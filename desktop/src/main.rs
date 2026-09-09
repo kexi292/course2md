@@ -45,7 +45,7 @@ use gpui_component::{
     *,
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -252,6 +252,22 @@ struct Desktop {
     reader_scroll: ScrollHandle,
     reader_saved_offset: f32,
     reader_position_saved_at: Option<Instant>,
+    // Virtualized long pages: the task queue and the course library each keep
+    // a persistent list state plus the identity keys and focus containers of
+    // the items the state currently describes.
+    queue_list: ListState,
+    queue_keys: Vec<String>,
+    queue_focus: Vec<FocusHandle>,
+    queue_rem: f32,
+    library_list: ListState,
+    library_keys: Vec<String>,
+    library_focus: Vec<FocusHandle>,
+    library_rem: f32,
+    // Entrance animations already played for logical content that a
+    // virtualized list may unmount and remount while scrolling.
+    entered: HashSet<String>,
+    // Disclosure open state that outlives a virtualized row's unmount.
+    task_panels_open: HashSet<String>,
     event_repaint_pending: bool,
     exporting: bool,
     message: Option<String>,
@@ -269,6 +285,48 @@ actions!(
 const EVENT_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 
 impl Desktop {
+    /// Splice a virtualized page list to a new item identity sequence, keeping
+    /// the measured heights and scroll anchor of the unchanged prefix/suffix.
+    fn reconcile_list_items(
+        state: &ListState,
+        keys: &mut Vec<String>,
+        focus: &mut Vec<FocusHandle>,
+        new_keys: Vec<String>,
+        cx: &mut App,
+    ) {
+        if *keys == new_keys {
+            return;
+        }
+        let prefix = keys
+            .iter()
+            .zip(new_keys.iter())
+            .take_while(|(old, new)| old == new)
+            .count();
+        let suffix = keys
+            .iter()
+            .rev()
+            .zip(new_keys.iter().rev())
+            .take_while(|(old, new)| old == new)
+            .count()
+            .min(keys.len() - prefix)
+            .min(new_keys.len() - prefix);
+        let old_end = keys.len() - suffix;
+        let new_mid = new_keys.len() - prefix - suffix;
+        let handles: Vec<FocusHandle> = (0..new_mid).map(|_| cx.focus_handle()).collect();
+        state.splice_focusable(prefix..old_end, handles.iter().cloned().map(Some));
+        keys.splice(
+            prefix..old_end,
+            new_keys[prefix..prefix + new_mid].iter().cloned(),
+        );
+        focus.splice(prefix..old_end, handles);
+    }
+
+    /// Entrance motion plays once per logical mount. A virtualized list
+    /// remounts rows as they re-enter the viewport, which must not replay it.
+    fn enter_once(&mut self, id: String) -> bool {
+        self.entered.insert(id)
+    }
+
     fn request_close(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.flush_settings_for_exit(cx) || !self.save_current_draft(cx) {
             return false;
@@ -383,7 +441,10 @@ impl Desktop {
                         this.source_validation = None;
                     }
                     if field == Field::Search {
-                        this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
+                        this.library_list.scroll_to(ListOffset {
+                            item_ix: 0,
+                            offset_in_item: px(0.),
+                        });
                     }
                     cx.notify();
                 })
@@ -542,6 +603,16 @@ impl Desktop {
             reader_scroll: ScrollHandle::new(),
             reader_saved_offset: f32::NAN,
             reader_position_saved_at: None,
+            queue_list: ListState::new(0, ListAlignment::Top, px(1000.)),
+            queue_keys: Vec::new(),
+            queue_focus: Vec::new(),
+            queue_rem: f32::NAN,
+            library_list: ListState::new(0, ListAlignment::Top, px(1000.)),
+            library_keys: Vec::new(),
+            library_focus: Vec::new(),
+            library_rem: f32::NAN,
+            entered: HashSet::new(),
+            task_panels_open: HashSet::new(),
             event_repaint_pending: false,
             exporting: false,
             message,
@@ -1601,4 +1672,57 @@ fn main() {
         ]);
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod list_reconcile_tests {
+    use super::Desktop;
+    use gpui::{App, FocusHandle, ListAlignment, ListOffset, ListState, TestAppContext, px};
+
+    #[gpui::test]
+    fn list_splice_keeps_the_scroll_anchor_on_unchanged_content(cx: &mut TestAppContext) {
+        cx.update(splice_keeps_anchor);
+    }
+
+    fn splice_keeps_anchor(cx: &mut App) {
+        let state = ListState::new(4, ListAlignment::Top, px(100.));
+        let mut keys = vec!["a".to_owned(), "b".into(), "c".into(), "d".into()];
+        let mut focus: Vec<FocusHandle> = (0..4).map(|_| cx.focus_handle()).collect();
+        state.scroll_to(ListOffset {
+            item_ix: 3,
+            offset_in_item: px(7.),
+        });
+        // Two rows arrive after the first row: the anchor item keeps its place.
+        Desktop::reconcile_list_items(
+            &state,
+            &mut keys,
+            &mut focus,
+            vec!["a".into(), "x".into(), "y".into(), "b".into(), "c".into(), "d".into()],
+            cx,
+        );
+        assert_eq!(state.item_count(), 6);
+        assert_eq!(state.logical_scroll_top().item_ix, 5);
+        assert_eq!(state.logical_scroll_top().offset_in_item, px(7.));
+        assert_eq!(keys, ["a", "x", "y", "b", "c", "d"]);
+        assert_eq!(focus.len(), 6);
+        // An identical frame is a no-op.
+        Desktop::reconcile_list_items(
+            &state,
+            &mut keys,
+            &mut focus,
+            vec!["a".into(), "x".into(), "y".into(), "b".into(), "c".into(), "d".into()],
+            cx,
+        );
+        assert_eq!(state.logical_scroll_top().item_ix, 5);
+        // Removing the rows above the anchor shifts it back with its content.
+        Desktop::reconcile_list_items(
+            &state,
+            &mut keys,
+            &mut focus,
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            cx,
+        );
+        assert_eq!(state.item_count(), 4);
+        assert_eq!(state.logical_scroll_top().item_ix, 3);
+    }
 }

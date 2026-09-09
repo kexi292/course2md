@@ -374,11 +374,15 @@ impl Render for Desktop {
             Page::Settings => self.settings_page(window, cx),
             Page::Result => self.reader_page(window, cx),
         };
+        // Task and library content virtualize their long lists: the list owns
+        // scrolling for the page instead of the shared page-scroll container.
+        let self_scrolling = matches!(self.page, Page::Task | Page::Library);
         let content = v_flex()
             .gap_4()
-            .when(matches!(self.page, Page::Result | Page::Settings), |v| {
-                v.h_full().min_h_0()
-            })
+            .when(
+                matches!(self.page, Page::Result | Page::Settings) || self_scrolling,
+                |v| v.h_full().min_h_0(),
+            )
             .when(
                 self.reading && !matches!(self.page, Page::Library | Page::Result),
                 |v| {
@@ -524,7 +528,7 @@ impl Render for Desktop {
                     .min_w_0()
                     .w_full()
                     .when(
-                        !matches!(self.page, Page::Result | Page::Settings),
+                        !matches!(self.page, Page::Result | Page::Settings) && !self_scrolling,
                         |view| {
                             view.overflow_y_scroll()
                                 .track_scroll(&self.scrolls[self.page as usize])
@@ -532,10 +536,15 @@ impl Render for Desktop {
                     )
                     .child(
                         shell_column_for(self.page)
-                            .when(matches!(self.page, Page::Result | Page::Settings), |v| {
-                                v.h_full().min_h_0()
-                            })
-                            .when(self.page != Page::Settings, |v| v.pb_6())
+                            .when(
+                                matches!(self.page, Page::Result | Page::Settings)
+                                    || self_scrolling,
+                                |v| v.h_full().min_h_0(),
+                            )
+                            .when(
+                                self.page != Page::Settings && !self_scrolling,
+                                |v| v.pb_6(),
+                            )
                             .child(content),
                     ),
             );

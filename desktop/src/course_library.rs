@@ -5,6 +5,7 @@ use gpui_component::{
     button::*,
     menu::{DropdownMenu, PopupMenuItem},
 };
+use std::rc::Rc;
 
 /// Geometry shared by list and card layouts; rem-based spacing scales with text.
 #[derive(Clone, Copy)]
@@ -14,6 +15,78 @@ struct LibraryLayout {
     card_chip_max: Pixels,
     compact: bool,
     stacked: bool,
+}
+
+/// One row of the virtualized library page. Grid rows carry their courses for
+/// the current column count; folder groups stay one item per disclosure so the
+/// expand motion is unchanged.
+enum LibraryItem {
+    Checking,
+    Recovery,
+    Coverage(String),
+    Issues(Vec<String>),
+    MaterialsNote(usize),
+    MaterialsMenu(Vec<PathBuf>),
+    Loading,
+    Empty { partial: bool },
+    SearchScope(String),
+    GroupHeader(Box<LibraryGroupHeader>),
+    GroupBody(Box<LibraryGroupBody>),
+    CardRow(Vec<(usize, Course)>),
+    ListRow(usize, Box<Course>),
+}
+
+/// A folder group's header row.
+struct LibraryGroupHeader {
+    index: usize,
+    key: String,
+    name: String,
+    count: usize,
+    collapsed: bool,
+}
+
+/// A folder group's disclosure body: its card or list rows.
+struct LibraryGroupBody {
+    index: usize,
+    key: String,
+    collapsed: bool,
+    entries: Vec<(usize, Course)>,
+}
+
+impl LibraryItem {
+    /// Identity for the list splice: stable while the row means the same
+    /// content, so measured heights and the scroll anchor survive updates.
+    fn key(&self, columns: usize) -> String {
+        match self {
+            LibraryItem::Checking => "checking".to_owned(),
+            LibraryItem::Recovery => "recovery".to_owned(),
+            LibraryItem::Coverage(_) => "coverage".to_owned(),
+            LibraryItem::Issues(_) => "issues".to_owned(),
+            LibraryItem::MaterialsNote(_) => "materials-note".to_owned(),
+            LibraryItem::MaterialsMenu(_) => "materials-menu".to_owned(),
+            LibraryItem::Loading => "loading".to_owned(),
+            LibraryItem::Empty { .. } => "empty".to_owned(),
+            LibraryItem::SearchScope(_) => "search-scope".to_owned(),
+            LibraryItem::GroupHeader(header) => format!("group-h-{}", header.key),
+            LibraryItem::GroupBody(body) => format!("group-b-{}", body.key),
+            LibraryItem::CardRow(row) => format!(
+                "row-{columns}-{}-{}",
+                row.len(),
+                row.first()
+                    .map(|(_, course)| course.dir.display().to_string())
+                    .unwrap_or_default()
+            ),
+            LibraryItem::ListRow(_, course) => format!("card-{}", course.dir.display()),
+        }
+    }
+}
+
+/// Per-row metadata for the library list's render closure.
+struct LibraryRowContext<'a> {
+    index: usize,
+    last: bool,
+    focus: Option<&'a FocusHandle>,
+    layout: LibraryLayout,
 }
 
 #[derive(IntoElement)]
@@ -603,18 +676,10 @@ impl Desktop {
             stacked: content < 56. * rem + 24.,
         };
         let query = self.value(Field::Search, cx).to_lowercase();
+        let mut items = Vec::new();
         let Some(all_access) = self.cached_library_access() else {
-            return h_flex()
-                .w_full()
-                .gap_2()
-                .items_center()
-                .py_6()
-                .child(crate::motion::spinner("library-location-check-spinner", cx))
-                .child(accessible_text(
-                    "library-location-checking-label",
-                    "正在检查保存位置…",
-                ))
-                .into_any_element();
+            items.push(LibraryItem::Checking);
+            return self.library_list_page(items, layout, rem, cx);
         };
         let in_scope =
             |root: &&PathBuf| self.folder_filter.is_none() || **root == self.library_root;
@@ -658,10 +723,9 @@ impl Desktop {
             })
             .map(|(index, course)| (index, course.clone()))
             .collect();
-        let mut view = v_flex()
-            .w_full()
-            .gap_6()
-            .children(self.library_recovery_view(&all_access, cx));
+        if self.library_recovery_view(&all_access, cx).is_some() {
+            items.push(LibraryItem::Recovery);
+        }
         if coverage != crate::storage::LibraryCoverage::Complete {
             let message = if coverage == crate::storage::LibraryCoverage::Unavailable {
                 if query.is_empty() {
@@ -683,11 +747,7 @@ impl Desktop {
                     scope.unavailable.len()
                 )
             };
-            view = view.child(
-                accessible_text("library-search-coverage", message)
-                    .text_sm()
-                    .text_color(color(MUTED)),
-            );
+            items.push(LibraryItem::Coverage(message));
         }
         // Recovery cards own their matching diagnostics. Keep unrelated read
         // failures visible without repeating the same classification warning.
@@ -721,32 +781,7 @@ impl Desktop {
             .collect();
         if !remaining_issues.is_empty() && coverage != crate::storage::LibraryCoverage::Unavailable
         {
-            view = view.child(
-                v_flex()
-                    .gap_2()
-                    .p_3()
-                    .bg(color(WARNING_BG))
-                    .border_1()
-                    .border_color(color(WARNING_BG))
-                    .rounded(RADIUS_CARD)
-                    .child(badge(BadgeKind::Warning).child("部分内容暂未读取"))
-                    .child(accessible_text(
-                        "library-issues-title",
-                        "已读取的笔记仍可阅读。请检查保存位置后重新检查；当前列表和搜索仅包含已读取的内容。",
-                    ))
-                    .child(
-                        control("retry-unread-library-content")
-                            .self_start()
-                            .icon(icons::refresh())
-                            .label("重新检查")
-                            .loading(self.loading)
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
-                    )
-                    .child(LibraryDiagnostics {
-                        id: "unread-content".into(),
-                        messages: remaining_issues,
-                    }),
-            );
+            items.push(LibraryItem::Issues(remaining_issues));
         }
         let materials = self
             .library_materials
@@ -760,44 +795,15 @@ impl Desktop {
             .cloned()
             .collect::<Vec<_>>();
         if !materials.is_empty() {
-            view = view.child(
-                accessible_text(
-                    "library-materials-state",
-                    format!("有 {} 份历史任务尚未生成可读笔记。", materials.len()),
-                )
-                .text_sm()
-                .text_color(color(MUTED)),
-            );
-            view = view.child(
-                control("open-library-materials")
-                    .self_start()
-                    .icon(IconName::FolderOpen)
-                    .label("查看保留的任务材料")
-                    .dropdown_menu(move |menu, _, _| {
-                        materials.iter().fold(menu, |menu, path| {
-                            let path = path.clone();
-                            menu.item(
-                                PopupMenuItem::new(path.display().to_string())
-                                    .on_click(move |_, _, cx| cx.open_with_system(&path)),
-                            )
-                        })
-                    }),
-            );
+            items.push(LibraryItem::MaterialsNote(materials.len()));
+            items.push(LibraryItem::MaterialsMenu(materials));
         }
         if self.loading {
-            return view
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .py_6()
-                        .child(crate::motion::spinner("library-scan-spinner", cx))
-                        .child(accessible_text("library-loading", "正在读取笔记…")),
-                )
-                .into_any_element();
+            items.push(LibraryItem::Loading);
+            return self.library_list_page(items, layout, rem, cx);
         }
         if coverage == crate::storage::LibraryCoverage::Unavailable {
-            return view.into_any_element();
+            return self.library_list_page(items, layout, rem, cx);
         }
         if courses.is_empty() {
             if query.is_empty()
@@ -805,98 +811,12 @@ impl Desktop {
                     || !self.library_materials.is_empty()
                     || !self.library_issues.is_empty())
             {
-                return view.into_any_element();
+                return self.library_list_page(items, layout, rem, cx);
             }
-            return view
-                .child(crate::motion::enter(
-                    "library-empty-state",
-                    v_flex()
-                        .py_12()
-                        .px_6()
-                        .gap_4()
-                        .items_center()
-                        .text_center()
-                        .child(
-                            Icon::new(IconName::BookOpen)
-                                .size(px(32.))
-                                .text_color(color(MUTED)),
-                        )
-                        .child(
-                            accessible_text(
-                                "library-empty-heading",
-                                if !query.is_empty() {
-                                    if coverage == crate::storage::LibraryCoverage::Partial
-                                        || !self.library_issues.is_empty()
-                                    {
-                                        "已读取的笔记中没有匹配的笔记。"
-                                    } else {
-                                        "没有匹配的笔记"
-                                    }
-                                } else if self.folder_filter.is_some() {
-                                    "这个文件夹还没有笔记"
-                                } else {
-                                    "还没有笔记"
-                                },
-                            )
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD),
-                        )
-                        .child(
-                            accessible_text(
-                                "library-empty-description",
-                                if !query.is_empty() {
-                                    if coverage == crate::storage::LibraryCoverage::Partial {
-                                        "未连接的位置尚未搜索。可以重新连接保存位置，或调整关键词。"
-                                    } else {
-                                        "试试更短的关键词。"
-                                    }
-                                } else if self.folder_filter.is_some() {
-                                    "从全部笔记中选择内容，移到这个文件夹。"
-                                } else {
-                                    "导入视频，生成的内容会保存在这里"
-                                },
-                            )
-                            .text_color(color(MUTED)),
-                        )
-                        .when(!query.is_empty(), |empty| {
-                            empty.child(
-                                outline_pill("clear-search")
-                                    .icon(IconName::Close)
-                                    .label("清除搜索")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.inputs[&Field::Search].update(cx, |state, cx| {
-                                            state.set_value("", window, cx)
-                                        });
-                                        cx.notify();
-                                    })),
-                            )
-                        })
-                        .when(query.is_empty() && self.folder_filter.is_none(), |empty| {
-                            empty.child(
-                                primary_pill("empty-library-add")
-                                    .icon(IconName::Plus)
-                                    .label("导入视频")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.begin_add(window, cx)
-                                    })),
-                            )
-                        })
-                        .when(query.is_empty() && self.folder_filter.is_some(), |empty| {
-                            empty.child(
-                                outline_pill("empty-folder-all-notes")
-                                    .icon(IconName::BookOpen)
-                                    .label("浏览全部笔记")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.folder_filter = None;
-                                        this.scrolls[Page::Library as usize]
-                                            .set_offset(point(px(0.), px(0.)));
-                                        cx.notify();
-                                    })),
-                            )
-                        }),
-                    cx,
-                ))
-                .into_any_element();
+            items.push(LibraryItem::Empty {
+                partial: coverage == crate::storage::LibraryCoverage::Partial,
+            });
+            return self.library_list_page(items, layout, rem, cx);
         }
         if !query.is_empty() {
             let raw = self.value(Field::Search, cx);
@@ -908,28 +828,7 @@ impl Desktop {
             } else {
                 format!("在全部笔记中搜索「{raw}」，找到 {} 篇笔记。", courses.len())
             };
-            view = view.child(
-                h_flex()
-                    .items_baseline()
-                    .gap_3()
-                    .flex_wrap()
-                    .child(
-                        accessible_text("library-search-scope", scoped)
-                            .text_size(TEXT_AUX)
-                            .text_color(color(GRAY)),
-                    )
-                    .child(
-                        quiet("clear-search-scope")
-                            .icon(IconName::Close)
-                            .label("清空搜索")
-                            .min_h(rems(1.6))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.inputs[&Field::Search]
-                                    .update(cx, |state, cx| state.set_value("", window, cx));
-                                cx.notify();
-                            })),
-                    ),
-            );
+            items.push(LibraryItem::SearchScope(scoped));
         }
         if self.desktop_settings.library_group_folders
             && self.folder_filter.is_none()
@@ -946,7 +845,6 @@ impl Desktop {
                     .or_default()
                     .push(entry);
             }
-            let mut group_list = v_flex().w_full().min_w_0().gap(px(20.));
             for (group_index, ((root, id), entries)) in groups.into_iter().enumerate() {
                 let location = self
                     .workspace
@@ -986,79 +884,426 @@ impl Desktop {
                 } else {
                     folder_name
                 };
-                let mut group = v_flex().gap_2().child(
-                    control(("library-group", group_index))
-                        .ghost()
-                        .w_full()
-                        .justify_start()
-                        .min_h(rems(1.6))
-                        .p_0()
-                        .accessibility_label(format!(
-                            "{} {name}，{} 篇笔记",
-                            if collapsed { "展开" } else { "收起" },
-                            entries.len()
-                        ))
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .gap_2()
-                                .items_baseline()
-                                .child(
-                                    Icon::new(if collapsed {
-                                        IconName::ChevronRight
-                                    } else {
-                                        IconName::ChevronDown
-                                    })
-                                    .size(px(12.))
-                                    .text_color(color(GRAY))
-                                    .flex_shrink_0(),
-                                )
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .whitespace_nowrap()
-                                        .text_ellipsis()
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .child(name),
-                                )
-                                .child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_size(TEXT_AUX)
-                                        .text_color(color(GRAY))
-                                        .child(entries.len().to_string()),
-                                ),
+                items.push(LibraryItem::GroupHeader(Box::new(LibraryGroupHeader {
+                    index: group_index,
+                    key: key.clone(),
+                    name,
+                    count: entries.len(),
+                    collapsed,
+                })));
+                items.push(LibraryItem::GroupBody(Box::new(LibraryGroupBody {
+                    index: group_index,
+                    key,
+                    collapsed,
+                    entries,
+                })));
+            }
+        } else if !self.desktop_settings.library_cards || layout.stacked {
+            items.extend(
+                courses
+                    .into_iter()
+                    .map(|(index, course)| LibraryItem::ListRow(index, Box::new(course))),
+            );
+        } else {
+            items.extend(
+                courses
+                    .chunks(layout.columns)
+                    .map(|row| LibraryItem::CardRow(row.to_vec())),
+            );
+        }
+        if !items
+            .iter()
+            .any(|item| matches!(item, LibraryItem::Empty { .. }))
+        {
+            self.entered.remove("library-empty-state");
+        }
+        self.library_list_page(items, layout, rem, cx)
+    }
+
+    /// The library's variable-height list: notices, folder groups and card
+    /// rows share one scroll region, spliced by identity so measured heights
+    /// and the scroll anchor survive content updates.
+    fn library_list_page(
+        &mut self,
+        items: Vec<LibraryItem>,
+        layout: LibraryLayout,
+        rem: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let flat = items.iter().find_map(|item| match item {
+            LibraryItem::CardRow(row) => {
+                Some((true, row.first().map(|(index, _)| *index).unwrap_or(0)))
+            }
+            LibraryItem::ListRow(index, _) => Some((false, *index)),
+            _ => None,
+        });
+        let keys = items
+            .iter()
+            .map(|item| item.key(layout.columns))
+            .collect();
+        Self::reconcile_list_items(
+            &self.library_list,
+            &mut self.library_keys,
+            &mut self.library_focus,
+            keys,
+            cx,
+        );
+        if self.library_rem != rem {
+            self.library_list.remeasure();
+            self.library_rem = rem;
+        }
+        let focus: Rc<Vec<FocusHandle>> = Rc::new(self.library_focus.clone());
+        let state = self.library_list.clone();
+        let items = Rc::new(items);
+        let desktop = cx.weak_entity();
+        let element = list(state, move |index, window, cx| {
+            let Some(item) = items.get(index) else {
+                return div().into_any_element();
+            };
+            let last = index + 1 == items.len();
+            let row = LibraryRowContext {
+                index,
+                last,
+                focus: focus.get(index),
+                layout,
+            };
+            desktop
+                .update(cx, |this, cx| this.library_item(item, row, window, cx))
+                .unwrap_or_else(|_| div().into_any_element())
+        })
+        .w_full()
+        .h_full()
+        .flex_1()
+        .min_h_0()
+        .pb_6();
+        if let Some((grid, id)) = flat {
+            crate::motion::enter(
+                if grid {
+                    ("library-grid", id)
+                } else {
+                    ("library-list", id)
+                },
+                element,
+                cx,
+            )
+        } else {
+            element.into_any_element()
+        }
+    }
+
+    fn library_item(
+        &mut self,
+        item: &LibraryItem,
+        row: LibraryRowContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (index, last, focus, layout) = (row.index, row.last, row.focus, row.layout);
+        let content = match item {
+            LibraryItem::Checking => h_flex()
+                .w_full()
+                .gap_2()
+                .items_center()
+                .py_6()
+                .child(crate::motion::spinner("library-location-check-spinner", cx))
+                .child(accessible_text(
+                    "library-location-checking-label",
+                    "正在检查保存位置…",
+                ))
+                .into_any_element(),
+            LibraryItem::Recovery => self
+                .cached_library_access()
+                .and_then(|access| self.library_recovery_view(&access, cx))
+                .unwrap_or_else(div)
+                .into_any_element(),
+            LibraryItem::Coverage(message) => {
+                accessible_text("library-search-coverage", message.clone())
+                    .text_sm()
+                    .text_color(color(MUTED))
+                    .into_any_element()
+            }
+            LibraryItem::Issues(messages) => v_flex()
+                .gap_2()
+                .p_3()
+                .bg(color(WARNING_BG))
+                .border_1()
+                .border_color(color(WARNING_BG))
+                .rounded(RADIUS_CARD)
+                .child(badge(BadgeKind::Warning).child("部分内容暂未读取"))
+                .child(accessible_text(
+                    "library-issues-title",
+                    "已读取的笔记仍可阅读。请检查保存位置后重新检查；当前列表和搜索仅包含已读取的内容。",
+                ))
+                .child(
+                    control("retry-unread-library-content")
+                        .self_start()
+                        .icon(icons::refresh())
+                        .label("重新检查")
+                        .loading(self.loading)
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
+                )
+                .child(LibraryDiagnostics {
+                    id: "unread-content".into(),
+                    messages: messages.clone(),
+                })
+                .into_any_element(),
+            LibraryItem::MaterialsNote(count) => accessible_text(
+                "library-materials-state",
+                format!("有 {count} 份历史任务尚未生成可读笔记。"),
+            )
+            .text_sm()
+            .text_color(color(MUTED))
+            .into_any_element(),
+            LibraryItem::MaterialsMenu(paths) => {
+                let materials = paths.clone();
+                control("open-library-materials")
+                    .self_start()
+                    .icon(IconName::FolderOpen)
+                    .label("查看保留的任务材料")
+                    .dropdown_menu(move |menu, _, _| {
+                        materials.iter().fold(menu, |menu, path| {
+                            let path = path.clone();
+                            menu.item(
+                                PopupMenuItem::new(path.display().to_string())
+                                    .on_click(move |_, _, cx| cx.open_with_system(&path)),
+                            )
+                        })
+                    })
+                    .into_any_element()
+            }
+            LibraryItem::Loading => h_flex()
+                .gap_2()
+                .items_center()
+                .py_6()
+                .child(crate::motion::spinner("library-scan-spinner", cx))
+                .child(accessible_text("library-loading", "正在读取笔记…"))
+                .into_any_element(),
+            LibraryItem::Empty { partial } => {
+                let partial = *partial;
+                let query = self.value(Field::Search, cx).to_lowercase();
+                let content = v_flex()
+                    .py_12()
+                    .px_6()
+                    .gap_4()
+                    .items_center()
+                    .text_center()
+                    .child(
+                        Icon::new(IconName::BookOpen)
+                            .size(px(32.))
+                            .text_color(color(MUTED)),
+                    )
+                    .child(
+                        accessible_text(
+                            "library-empty-heading",
+                            if !query.is_empty() {
+                                if partial || !self.library_issues.is_empty() {
+                                    "已读取的笔记中没有匹配的笔记。"
+                                } else {
+                                    "没有匹配的笔记"
+                                }
+                            } else if self.folder_filter.is_some() {
+                                "这个文件夹还没有笔记"
+                            } else {
+                                "还没有笔记"
+                            },
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(workspace) = &mut this.workspace {
-                                if let Err(error) = workspace.transaction(|state| {
-                                    if !state.collapsed.remove(&key) {
-                                        state.collapsed.insert(key.clone());
-                                    }
-                                    Ok(())
-                                }) {
+                        .text_lg()
+                        .font_weight(FontWeight::SEMIBOLD),
+                    )
+                    .child(
+                        accessible_text(
+                            "library-empty-description",
+                            if !query.is_empty() {
+                                if partial {
+                                    "未连接的位置尚未搜索。可以重新连接保存位置，或调整关键词。"
+                                } else {
+                                    "试试更短的关键词。"
+                                }
+                            } else if self.folder_filter.is_some() {
+                                "从全部笔记中选择内容，移到这个文件夹。"
+                            } else {
+                                "导入视频，生成的内容会保存在这里"
+                            },
+                        )
+                        .text_color(color(MUTED)),
+                    )
+                    .when(!query.is_empty(), |empty| {
+                        empty.child(
+                            outline_pill("clear-search")
+                                .icon(IconName::Close)
+                                .label("清除搜索")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.inputs[&Field::Search].update(cx, |state, cx| {
+                                        state.set_value("", window, cx)
+                                    });
+                                    cx.notify();
+                                })),
+                        )
+                    })
+                    .when(query.is_empty() && self.folder_filter.is_none(), |empty| {
+                        empty.child(
+                            primary_pill("empty-library-add")
+                                .icon(IconName::Plus)
+                                .label("导入视频")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.begin_add(window, cx)
+                                })),
+                        )
+                    })
+                    .when(query.is_empty() && self.folder_filter.is_some(), |empty| {
+                        empty.child(
+                            outline_pill("empty-folder-all-notes")
+                                .icon(IconName::BookOpen)
+                                .label("浏览全部笔记")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.folder_filter = None;
+                                    this.library_list.scroll_to(ListOffset {
+                                        item_ix: 0,
+                                        offset_in_item: px(0.),
+                                    });
+                                    cx.notify();
+                                })),
+                        )
+                    });
+                if self.enter_once("library-empty-state".to_owned()) {
+                    crate::motion::enter("library-empty-state", content, cx)
+                } else {
+                    content.into_any_element()
+                }
+            }
+            LibraryItem::SearchScope(scoped) => h_flex()
+                .items_baseline()
+                .gap_3()
+                .flex_wrap()
+                .child(
+                    accessible_text("library-search-scope", scoped.clone())
+                        .text_size(TEXT_AUX)
+                        .text_color(color(GRAY)),
+                )
+                .child(
+                    quiet("clear-search-scope")
+                        .icon(IconName::Close)
+                        .label("清空搜索")
+                        .min_h(rems(1.6))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.inputs[&Field::Search]
+                                .update(cx, |state, cx| state.set_value("", window, cx));
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+            LibraryItem::GroupHeader(header) => {
+                let LibraryGroupHeader {
+                    index,
+                    key,
+                    name,
+                    count,
+                    collapsed,
+                } = header.as_ref();
+                let key = key.clone();
+                let collapsed = *collapsed;
+                let index = *index;
+                control(("library-group", index))
+                    .ghost()
+                    .w_full()
+                    .justify_start()
+                    .min_h(rems(1.6))
+                    .p_0()
+                    .accessibility_label(format!(
+                        "{} {name}，{} 篇笔记",
+                        if collapsed { "展开" } else { "收起" },
+                        count
+                    ))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_baseline()
+                            .child(
+                                Icon::new(if collapsed {
+                                    IconName::ChevronRight
+                                } else {
+                                    IconName::ChevronDown
+                                })
+                                .size(px(12.))
+                                .text_color(color(GRAY))
+                                .flex_shrink_0(),
+                            )
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(TEXT_AUX)
+                                    .text_color(color(GRAY))
+                                    .child(count.to_string()),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(workspace) = &mut this.workspace {
+                            match workspace.transaction(|state| {
+                                let became = !state.collapsed.remove(&key);
+                                if became {
+                                    state.collapsed.insert(key.clone());
+                                }
+                                Ok(became)
+                            }) {
+                                Ok(true) => {
+                                    this.entered.remove(&format!("folder-disclosure-{index}"));
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
                                     this.workspace_error =
                                         Some(format!("分组展开状态尚未保存：{error:#}"));
                                 }
                             }
-                            cx.notify();
-                        })),
-                );
-                let collection = self.course_collection(&entries, layout, false, cx);
-                group = group.child(disclosure(
-                    ("folder-disclosure", group_index),
-                    !collapsed,
-                    collection,
-                    window,
-                    cx,
-                ));
-                group_list = group_list.child(group);
+                        }
+                        cx.notify();
+                    }))
+                    .into_any_element()
             }
-            view = view.child(group_list);
-        } else {
-            view = view.child(self.course_collection(&courses, layout, true, cx));
+            LibraryItem::GroupBody(body) => {
+                let collapsed = body.collapsed;
+                let index = body.index;
+                let animate = !collapsed && self.enter_once(format!("folder-disclosure-{index}"));
+                let collection = self.course_collection(&body.entries, layout, false, animate, cx);
+                if animate {
+                    disclosure(("folder-disclosure", index), true, collection, window, cx)
+                } else if collapsed {
+                    div().hidden().into_any_element()
+                } else {
+                    collection.into_any_element()
+                }
+            }
+            LibraryItem::CardRow(row) => self.library_card_row(row, layout, cx).into_any_element(),
+            LibraryItem::ListRow(index, course) => self
+                .library_list_row(index, course.as_ref(), layout, true, cx)
+                .into_any_element(),
+        };
+        // The old single scroll column spaced its children with gap_6, folder
+        // groups with gap_2 and 20px between groups, card rows with gap_4 and
+        // list rows with gap_2; each item carries the same trailing spacing.
+        let mut wrapper = v_flex().w_full().min_w_0();
+        if !last {
+            wrapper = match item {
+                LibraryItem::GroupHeader { .. } => wrapper.mb_2(),
+                LibraryItem::GroupBody { .. } => wrapper.mb(px(20.)),
+                LibraryItem::CardRow(_) => wrapper.mb_4(),
+                LibraryItem::ListRow(..) => wrapper.mb_2(),
+                _ => wrapper.mb_6(),
+            };
         }
-        view.into_any_element()
+        let mut wrapper = wrapper.child(content).id(("library-item", index)).tab_stop(false);
+        if let Some(focus) = focus {
+            wrapper = wrapper.track_focus(focus);
+        }
+        wrapper.into_any_element()
     }
 
     /// Sidebar successor: folder filter + creation entry, final form with M5.
@@ -1372,100 +1617,105 @@ impl Desktop {
         courses: &[(usize, Course)],
         layout: LibraryLayout,
         show_chip: bool,
+        animate: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let collection_id = courses.first().map(|(index, _)| *index).unwrap_or(0);
+        let collection = v_flex().w_full();
         if !self.desktop_settings.library_cards || layout.stacked {
-            let rows = v_flex()
-                .gap_2()
-                .children(courses.iter().map(|(index, course)| {
-                    let mut read = h_flex().w_full().min_w_0().items_center().gap(px(12.));
-                    if !layout.stacked {
-                        if let Some(thumbnail) = &course.thumbnail {
-                            read = read.child(
+            let rows = v_flex().gap_2().children(
+                courses
+                    .iter()
+                    .map(|(index, course)| self.library_list_row(index, course, layout, show_chip, cx)),
+            );
+            return if animate {
+                collection.child(crate::motion::enter(("library-list", collection_id), rows, cx))
+            } else {
+                collection.child(rows)
+            };
+        }
+        let cards = v_flex().gap_4().children(
+            courses
+                .chunks(layout.columns)
+                .map(|row| self.library_card_row(row, layout, cx)),
+        );
+        if animate {
+            collection.child(crate::motion::enter(("library-grid", collection_id), cards, cx))
+        } else {
+            collection.child(cards)
+        }
+    }
+
+    /// One row of course cards: equal-height columns, and trailing spacers keep
+    /// the final row's column widths aligned with the rest.
+    fn library_card_row(
+        &self,
+        row: &[(usize, Course)],
+        layout: LibraryLayout,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        h_flex()
+            .gap_4()
+            .items_stretch()
+            .children(row.iter().map(|(index, course)| {
+                let mut card = v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .bg(color(SURFACE))
+                    .border_1()
+                    .border_color(color(CARD_LINE))
+                    .rounded(RADIUS_CARD)
+                    .overflow_hidden();
+                if let Some(thumbnail) = &course.thumbnail {
+                    card = card.child(
+                        control(("read-course", *index))
+                            .ghost()
+                            .w_full()
+                            .h_auto()
+                            .p_0()
+                            .rounded_t(RADIUS_CARD)
+                            .rounded_b(px(0.))
+                            .aspect_ratio(16. / 9.)
+                            .accessibility_label(format!("阅读 {}", course.title))
+                            .child(
                                 img(thumbnail.clone())
-                                    .w(rems(6.857))
-                                    .h(rems(3.857))
-                                    .object_fit(ObjectFit::Cover)
-                                    .rounded(RADIUS_SMALL)
-                                    .flex_shrink_0(),
-                            );
-                        }
-                    }
-                    read = read.child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .whitespace_normal()
-                                    .when(!layout.stacked, |title| {
-                                        title.text_ellipsis().line_clamp(2)
-                                    })
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(course.title.clone()),
+                                    .size_full()
+                                    .rounded_t(RADIUS_CARD)
+                                    .object_fit(ObjectFit::Cover),
                             )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .whitespace_normal()
-                                    .text_size(TEXT_AUX)
-                                    .font_weight(FontWeight::NORMAL)
-                                    .text_color(color(GRAY))
-                                    .child(format!(
-                                        "{} · {}",
-                                        self.course_meta(course),
-                                        course.description()
-                                    )),
-                            ),
-                    );
-                    let read = control(("read-course", *index))
-                        .ghost()
-                        .flex_1()
-                        .min_w_0()
-                        .h_auto()
-                        .p_0()
-                        .justify_start()
-                        .when(layout.stacked, |button| button.w_full().flex_none())
-                        .accessibility_label(format!("阅读 {}", course.title))
-                        .tooltip("阅读笔记")
-                        .child(read)
-                        .on_click({
-                            let course = course.clone();
-                            cx.listener(move |this, _, _, cx| this.open_course(course.clone(), cx))
-                        });
-                    let actions = h_flex()
-                        .min_w_0()
-                        .flex_shrink_0()
-                        .items_center()
-                        .gap_2()
-                        .when(layout.stacked, |row| row.w_full().flex_wrap())
-                        .when(show_chip, |row| {
-                            row.child(self.folder_chip(
-                                Some(course.dir.clone()),
-                                index + 1,
-                                Some(layout.chip_max),
-                                layout.compact,
-                                cx,
-                            ))
-                        })
-                        .when(layout.stacked, |row| row.child(div().flex_1()))
-                        .child(
-                            outline_pill(("read-course-action", *index))
-                                .icon(IconName::BookOpen)
-                                .when(!layout.compact || layout.stacked, |button| {
-                                    button.label(if self.course_has_reading_position(course) {
-                                        "继续阅读"
-                                    } else {
-                                        "阅读"
-                                    })
+                            .on_click({
+                                let course = course.clone();
+                                cx.listener(move |this, _, _, cx| {
+                                    this.open_course(course.clone(), cx)
                                 })
-                                .loading(self.opening_course.as_ref() == Some(&course.dir))
-                                .disabled(self.opening_course.as_ref() == Some(&course.dir))
+                            }),
+                    );
+                }
+                card.child(
+                    v_flex()
+                        .flex_1()
+                        .w_full()
+                        .min_w_0()
+                        .p_4()
+                        .gap_2()
+                        .child(
+                            control(("read-title", *index))
                                 .accessibility_label(format!("阅读 {}", course.title))
-                                .tooltip("阅读笔记")
+                                .ghost()
+                                .w_full()
+                                .h_auto()
+                                .p_0()
+                                .justify_start()
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .whitespace_normal()
+                                        .when(!layout.stacked, |title| {
+                                            title.text_ellipsis().line_clamp(2)
+                                        })
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .child(course.title.clone()),
+                                )
                                 .on_click({
                                     let course = course.clone();
                                     cx.listener(move |this, _, _, cx| {
@@ -1473,184 +1723,204 @@ impl Desktop {
                                     })
                                 }),
                         )
-                        .child(self.course_actions(course.clone(), *index, cx));
-                    v_flex()
-                        .w_full()
-                        .min_w_0()
-                        .bg(color(SURFACE))
-                        .border_1()
-                        .border_color(color(CARD_LINE))
-                        .rounded(RADIUS_CARD)
                         .child(
-                            h_flex()
-                                .w_full()
-                                .min_w_0()
-                                .items_center()
-                                .p_4()
-                                .gap_4()
-                                .when(layout.stacked, |row| row.flex_col().items_start())
-                                .child(read)
-                                .child(actions),
-                        )
-                        .children(self.course_read_error(course, *index, cx))
-                        .children(
-                            self.course_export_feedback(course, cx)
-                                .map(|feedback| feedback.px_4().pb_3()),
-                        )
-                }));
-            return v_flex().w_full().child(crate::motion::enter(
-                ("library-list", collection_id),
-                rows,
-                cx,
-            ));
-        }
-        let cards = v_flex()
-            .gap_4()
-            .children(courses.chunks(layout.columns).map(|row| {
-                h_flex()
-                    .gap_4()
-                    .items_stretch()
-                    .children(row.iter().map(|(index, course)| {
-                        let mut card = v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .bg(color(SURFACE))
-                            .border_1()
-                            .border_color(color(CARD_LINE))
-                            .rounded(RADIUS_CARD)
-                            .overflow_hidden();
-                        if let Some(thumbnail) = &course.thumbnail {
-                            card = card.child(
-                                control(("read-course", *index))
-                                    .ghost()
-                                    .w_full()
-                                    .h_auto()
-                                    .p_0()
-                                    .rounded_t(RADIUS_CARD)
-                                    .rounded_b(px(0.))
-                                    .aspect_ratio(16. / 9.)
-                                    .accessibility_label(format!("阅读 {}", course.title))
-                                    .child(
-                                        img(thumbnail.clone())
-                                            .size_full()
-                                            .rounded_t(RADIUS_CARD)
-                                            .object_fit(ObjectFit::Cover),
-                                    )
-                                    .on_click({
-                                        let course = course.clone();
-                                        cx.listener(move |this, _, _, cx| {
-                                            this.open_course(course.clone(), cx)
-                                        })
-                                    }),
-                            );
-                        }
-                        card.child(
                             v_flex()
-                                .flex_1()
                                 .w_full()
                                 .min_w_0()
-                                .p_4()
-                                .gap_2()
+                                .gap_1()
                                 .child(
-                                    control(("read-title", *index))
-                                        .accessibility_label(format!("阅读 {}", course.title))
-                                        .ghost()
+                                    div()
                                         .w_full()
-                                        .h_auto()
-                                        .p_0()
-                                        .justify_start()
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .whitespace_normal()
-                                                .when(!layout.stacked, |title| {
-                                                    title.text_ellipsis().line_clamp(2)
-                                                })
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .child(course.title.clone()),
-                                        )
-                                        .on_click({
-                                            let course = course.clone();
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.open_course(course.clone(), cx)
-                                            })
-                                        }),
+                                        .whitespace_normal()
+                                        .text_size(TEXT_AUX)
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_color(color(GRAY))
+                                        .child(self.course_meta(course)),
                                 )
                                 .child(
-                                    v_flex()
+                                    div()
+                                        .w_full()
+                                        .whitespace_normal()
+                                        .text_size(TEXT_AUX)
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_color(color(GRAY))
+                                        .child(course.description()),
+                                )
+                                .child(
+                                    h_flex()
                                         .w_full()
                                         .min_w_0()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .whitespace_normal()
-                                                .text_size(TEXT_AUX)
-                                                .font_weight(FontWeight::NORMAL)
-                                                .text_color(color(GRAY))
-                                                .child(self.course_meta(course)),
-                                        )
-                                        .child(
-                                            div()
-                                                .w_full()
-                                                .whitespace_normal()
-                                                .text_size(TEXT_AUX)
-                                                .font_weight(FontWeight::NORMAL)
-                                                .text_color(color(GRAY))
-                                                .child(course.description()),
-                                        )
-                                        .child(
-                                            h_flex()
-                                                .w_full()
-                                                .min_w_0()
-                                                .gap_2()
-                                                .items_center()
-                                                .flex_wrap()
-                                                .child(self.folder_chip(
-                                                    Some(course.dir.clone()),
-                                                    index + 1,
-                                                    Some(layout.card_chip_max),
-                                                    false,
-                                                    cx,
-                                                ))
-                                                .child(div().flex_1())
-                                                .child(self.course_actions(
-                                                    course.clone(),
-                                                    *index,
-                                                    cx,
-                                                )),
-                                        ),
-                                )
-                                .children(self.course_read_error(course, *index, cx))
-                                .children(self.course_export_feedback(course, cx))
-                                .child(
-                                    outline_pill(("read-card-action", *index))
-                                        .mt_auto()
-                                        .w_full()
-                                        .icon(IconName::BookOpen)
-                                        .label(if self.course_has_reading_position(course) {
-                                            "继续阅读"
-                                        } else {
-                                            "阅读笔记"
-                                        })
-                                        .loading(self.opening_course.as_ref() == Some(&course.dir))
-                                        .disabled(self.opening_course.as_ref() == Some(&course.dir))
-                                        .on_click({
-                                            let course = course.clone();
-                                            cx.listener(move |this, _, _, cx| {
-                                                this.open_course(course.clone(), cx)
-                                            })
-                                        }),
+                                        .gap_2()
+                                        .items_center()
+                                        .flex_wrap()
+                                        .child(self.folder_chip(
+                                            Some(course.dir.clone()),
+                                            index + 1,
+                                            Some(layout.card_chip_max),
+                                            false,
+                                            cx,
+                                        ))
+                                        .child(div().flex_1())
+                                        .child(self.course_actions(
+                                            course.clone(),
+                                            *index,
+                                            cx,
+                                        )),
                                 ),
                         )
-                    }))
-                    .children((row.len()..layout.columns).map(|_| div().flex_1()))
-            }));
-        v_flex().w_full().child(crate::motion::enter(
-            ("library-grid", collection_id),
-            cards,
-            cx,
-        ))
+                        .children(self.course_read_error(course, *index, cx))
+                        .children(self.course_export_feedback(course, cx))
+                        .child(
+                            outline_pill(("read-card-action", *index))
+                                .mt_auto()
+                                .w_full()
+                                .icon(IconName::BookOpen)
+                                .label(if self.course_has_reading_position(course) {
+                                    "继续阅读"
+                                } else {
+                                    "阅读笔记"
+                                })
+                                .loading(self.opening_course.as_ref() == Some(&course.dir))
+                                .disabled(self.opening_course.as_ref() == Some(&course.dir))
+                                .on_click({
+                                    let course = course.clone();
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.open_course(course.clone(), cx)
+                                    })
+                                }),
+                        ),
+                )
+            }))
+            .children((row.len()..layout.columns).map(|_| div().flex_1()))
+    }
+
+    /// One course row in the list presentation.
+    fn library_list_row(
+        &self,
+        index: &usize,
+        course: &Course,
+        layout: LibraryLayout,
+        show_chip: bool,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let mut read = h_flex().w_full().min_w_0().items_center().gap(px(12.));
+        if !layout.stacked {
+            if let Some(thumbnail) = &course.thumbnail {
+                read = read.child(
+                    img(thumbnail.clone())
+                        .w(rems(6.857))
+                        .h(rems(3.857))
+                        .object_fit(ObjectFit::Cover)
+                        .rounded(RADIUS_SMALL)
+                        .flex_shrink_0(),
+                );
+            }
+        }
+        read = read.child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .child(
+                    div()
+                        .w_full()
+                        .whitespace_normal()
+                        .when(!layout.stacked, |title| {
+                            title.text_ellipsis().line_clamp(2)
+                        })
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(course.title.clone()),
+                )
+                .child(
+                    div()
+                        .w_full()
+                        .whitespace_normal()
+                        .text_size(TEXT_AUX)
+                        .font_weight(FontWeight::NORMAL)
+                        .text_color(color(GRAY))
+                        .child(format!(
+                            "{} · {}",
+                            self.course_meta(course),
+                            course.description()
+                        )),
+                ),
+        );
+        let read = control(("read-course", *index))
+            .ghost()
+            .flex_1()
+            .min_w_0()
+            .h_auto()
+            .p_0()
+            .justify_start()
+            .when(layout.stacked, |button| button.w_full().flex_none())
+            .accessibility_label(format!("阅读 {}", course.title))
+            .tooltip("阅读笔记")
+            .child(read)
+            .on_click({
+                let course = course.clone();
+                cx.listener(move |this, _, _, cx| this.open_course(course.clone(), cx))
+            });
+        let actions = h_flex()
+            .min_w_0()
+            .flex_shrink_0()
+            .items_center()
+            .gap_2()
+            .when(layout.stacked, |row| row.w_full().flex_wrap())
+            .when(show_chip, |row| {
+                row.child(self.folder_chip(
+                    Some(course.dir.clone()),
+                    index + 1,
+                    Some(layout.chip_max),
+                    layout.compact,
+                    cx,
+                ))
+            })
+            .when(layout.stacked, |row| row.child(div().flex_1()))
+            .child(
+                outline_pill(("read-course-action", *index))
+                    .icon(IconName::BookOpen)
+                    .when(!layout.compact || layout.stacked, |button| {
+                        button.label(if self.course_has_reading_position(course) {
+                            "继续阅读"
+                        } else {
+                            "阅读"
+                        })
+                    })
+                    .loading(self.opening_course.as_ref() == Some(&course.dir))
+                    .disabled(self.opening_course.as_ref() == Some(&course.dir))
+                    .accessibility_label(format!("阅读 {}", course.title))
+                    .tooltip("阅读笔记")
+                    .on_click({
+                        let course = course.clone();
+                        cx.listener(move |this, _, _, cx| {
+                            this.open_course(course.clone(), cx)
+                        })
+                    }),
+            )
+            .child(self.course_actions(course.clone(), *index, cx));
+        v_flex()
+            .w_full()
+            .min_w_0()
+            .bg(color(SURFACE))
+            .border_1()
+            .border_color(color(CARD_LINE))
+            .rounded(RADIUS_CARD)
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .p_4()
+                    .gap_4()
+                    .when(layout.stacked, |row| row.flex_col().items_start())
+                    .child(read)
+                    .child(actions),
+            )
+            .children(self.course_read_error(course, *index, cx))
+            .children(
+                self.course_export_feedback(course, cx)
+                    .map(|feedback| feedback.px_4().pb_3()),
+            )
     }
 
     /// Workbench "最近笔记": attention tasks first, then recent readable notes.
@@ -1931,5 +2201,64 @@ impl Desktop {
                         cx.listener(move |this, _, _, cx| this.open_course(course.clone(), cx)),
                     ),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LibraryGroupBody, LibraryGroupHeader, LibraryItem};
+    use crate::notes::Course;
+    use std::time::SystemTime;
+
+    fn course(dir: &str) -> Course {
+        Course {
+            dir: dir.into(),
+            title: dir.into(),
+            modified: SystemTime::UNIX_EPOCH,
+            slides: 0,
+            segments: 0,
+            thumbnail: None,
+            manifest: None,
+            warning: None,
+        }
+    }
+
+    #[test]
+    fn library_item_keys_follow_content_identity_and_columns() {
+        let row = vec![(0, course("/lib/a")), (1, course("/lib/b"))];
+        let items = [
+            LibraryItem::Coverage("m".into()),
+            LibraryItem::CardRow(row.clone()),
+            LibraryItem::ListRow(0, Box::new(course("/lib/a"))),
+            LibraryItem::GroupHeader(Box::new(LibraryGroupHeader {
+                index: 0,
+                key: "lib:0".into(),
+                name: "未分类".into(),
+                count: 2,
+                collapsed: false,
+            })),
+            LibraryItem::GroupBody(Box::new(LibraryGroupBody {
+                index: 0,
+                key: "lib:0".into(),
+                collapsed: false,
+                entries: row.clone(),
+            })),
+        ];
+        let keys: Vec<String> = items.iter().map(|item| item.key(3)).collect();
+        let unique: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(unique.len(), keys.len(), "library rows need distinct keys");
+        // Regrouping for a new column count replaces the affected rows.
+        assert_ne!(
+            LibraryItem::CardRow(row.clone()).key(3),
+            LibraryItem::CardRow(row.clone()).key(2)
+        );
+        // Content edits keep the row identity keyed by its first course; the
+        // row re-measures when it is visible.
+        let mut changed = row.clone();
+        changed[1] = (1, course("/lib/c"));
+        assert_eq!(
+            LibraryItem::CardRow(changed).key(3),
+            LibraryItem::CardRow(row).key(3)
+        );
     }
 }

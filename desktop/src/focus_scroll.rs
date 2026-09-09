@@ -46,11 +46,35 @@ impl RenderOnce for FocusRing {
     }
 }
 
+#[derive(Clone)]
+enum RevealScroll {
+    Handle(ScrollHandle),
+    List(ListState),
+}
+
+impl RevealScroll {
+    fn viewport(&self) -> Bounds<Pixels> {
+        match self {
+            RevealScroll::Handle(scroll) => scroll.bounds(),
+            RevealScroll::List(state) => state.viewport_bounds(),
+        }
+    }
+
+    fn scroll_by(&self, delta: Pixels) {
+        match self {
+            RevealScroll::Handle(scroll) => {
+                scroll.set_offset(scroll.offset() + point(px(0.), delta));
+            }
+            RevealScroll::List(state) => state.scroll_by(delta),
+        }
+    }
+}
+
 #[derive(IntoElement)]
 pub struct RevealFocus {
     id: ElementId,
     child: AnyElement,
-    scroll: ScrollHandle,
+    scroll: RevealScroll,
     full_width: bool,
 }
 
@@ -65,7 +89,17 @@ impl RevealFocus {
         Self {
             id: id.into(),
             child: child.into_any_element(),
-            scroll,
+            scroll: RevealScroll::Handle(scroll),
+            full_width: true,
+        }
+    }
+
+    /// Same reveal behavior against a variable-height `list` viewport.
+    pub fn in_list(id: impl Into<ElementId>, child: impl IntoElement, list: ListState) -> Self {
+        Self {
+            id: id.into(),
+            child: child.into_any_element(),
+            scroll: RevealScroll::List(list),
             full_width: true,
         }
     }
@@ -107,7 +141,7 @@ impl RenderOnce for RevealFocus {
                         if !reveal {
                             return;
                         }
-                        let viewport = scroll.bounds();
+                        let viewport = scroll.viewport();
                         if viewport.size.height <= px(0.) {
                             return;
                         }
@@ -118,7 +152,7 @@ impl RenderOnce for RevealFocus {
                             f32::from(viewport.bottom()) - 8.,
                         );
                         if delta != 0. {
-                            scroll.set_offset(scroll.offset() + point(px(0.), px(delta)));
+                            scroll.scroll_by(px(delta));
                             window.refresh();
                         }
                     });
