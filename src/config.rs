@@ -59,13 +59,11 @@ pub fn asr_endpoint(api: &crate::settings::AsrApi) -> AnyhowResult<String> {
     })
 }
 
-/// 云端 STT API key 环境变量：新名 `COURSE2MD_ASR_API_KEY` 优先，
-/// `OPENROUTER_API_KEY` 仅作兼容回落（旧文档/脚本中已存在）。
+/// 云端 STT API key 环境变量：`COURSE2MD_ASR_API_KEY`。
 pub fn asr_api_key_from_env() -> Option<String> {
-    ["COURSE2MD_ASR_API_KEY", "OPENROUTER_API_KEY"]
-        .into_iter()
-        .filter_map(|k| std::env::var(k).ok())
-        .find(|k| !k.trim().is_empty())
+    std::env::var("COURSE2MD_ASR_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
 }
 
 /// ASR 后端。typed enum 取代散落各处的字符串比较（`eq_ignore_ascii_case`）。

@@ -138,18 +138,10 @@ fn ensure_metallib() -> Result<()> {
 }
 
 /// 解析 coreml 后端用的模型：显式参数（调用方已合并 CLI 与 config.toml
-/// defaults.asr_model）> 旧 marker 文件（一次性迁移到 config.toml 并删除）
-/// > （交互式终端则询问并写 config.toml）> qwen3-1.7b。
+/// defaults.asr_model）> （交互式终端则询问并写 config.toml）> qwen3-1.7b。
 pub fn resolve_model(explicit: Option<&str>) -> Result<String> {
     if let Some(m) = explicit {
         return normalize(m);
-    }
-    let marker = crate::config::config_dir().join("asr_model");
-    if let Ok(s) = std::fs::read_to_string(&marker)
-        && let Ok(m) = normalize(s.trim())
-    {
-        migrate_marker(&marker, &m);
-        return Ok(m);
     }
     let chosen = prompt_model_choice()?;
     use std::io::IsTerminal as _;
@@ -175,25 +167,6 @@ fn persist_model_choice(model: &str) {
         tracing::warn!(
             "无法保存模型选择，下次仍会询问 / Could not save model choice; you will be asked again next time: {e:#}"
         );
-    }
-}
-
-/// 旧 marker 文件（~/.config/course2md/asr_model）→ config.toml defaults.asr_model，
-/// 写盘成功后才删除 marker（失败保留，下次再迁移）。
-fn migrate_marker(marker: &Path, model: &str) {
-    match (|| -> Result<()> {
-        let mut cfg = crate::settings::load()?;
-        cfg.defaults.asr_model = Some(model.to_string());
-        crate::settings::save(&cfg)?;
-        Ok(())
-    })() {
-        Ok(()) => {
-            let _ = std::fs::remove_file(marker);
-            tracing::info!("已将模型选择从 asr_model marker 迁移到 config.toml / Migrated the model selection from the asr_model marker to config.toml");
-        }
-        Err(e) => tracing::warn!(
-            "无法更新旧模型配置，已保留原设置 / Could not update legacy model settings; original settings kept: {e:#}"
-        ),
     }
 }
 

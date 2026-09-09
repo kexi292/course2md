@@ -169,7 +169,7 @@ impl Request {
         cfg.out_root = self.course_dir.clone();
         // Recovery is a task invariant, not a configurable preference.
         cfg.resume = true;
-        // Never enter Apple's legacy marker/config migration or model-choice prompt.
+        // Never enter Apple's model-choice prompt.
         if cfg
             .asr_model
             .as_deref()

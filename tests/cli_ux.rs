@@ -18,7 +18,6 @@ impl CliTest {
             .env("XDG_CACHE_HOME", self.dir.path().join("cache"))
             .env_remove("RUST_LOG")
             .env_remove("COURSE2MD_ASR_API_KEY")
-            .env_remove("OPENROUTER_API_KEY")
             .stdin(std::process::Stdio::null())
             .output()
             .unwrap()

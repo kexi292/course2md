@@ -105,7 +105,7 @@ impl Checkpoint {
                         "asr checkpoint 身份不匹配（模型/后端/版本已变化），旧进度作废重算 / asr checkpoint identity mismatch (model/backend/version changed); old progress discarded and recomputed"
                     ),
                     None => tracing::info!(
-                        "asr checkpoint 无身份标记（1.0 前的旧格式），旧进度作废重算 / asr checkpoint has no identity marker (pre-1.0 legacy format); old progress discarded and recomputed"
+                        "asr checkpoint 无身份标记，旧进度作废重算 / asr checkpoint has no identity marker; old progress discarded and recomputed"
                     ),
                 }
             }
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_checkpoint_without_identity_is_discarded() {
+    fn checkpoint_without_identity_is_discarded() {
         let d = tmpdir("legacy");
         std::fs::write(
             d.join("asr.jsonl"),
@@ -466,7 +466,7 @@ mod tests {
                 serde_json::to_string(&TranscriptEvent {
                     start: 0.0,
                     end: 1.0,
-                    text: "旧格式".into(),
+                    text: "无身份标记".into(),
                     raw: None,
                 })
                 .unwrap()
@@ -476,7 +476,7 @@ mod tests {
         std::fs::write(d.join(".asr_done"), b"done\n").unwrap();
 
         let cp = Checkpoint::open(&d, true, &identity("qwen3")).unwrap();
-        assert!(cp.events().is_empty(), "无身份标记的 1.0 前进度必须作废");
+        assert!(cp.events().is_empty(), "无身份标记的进度必须作废");
         let _ = std::fs::remove_dir_all(&d);
     }
 

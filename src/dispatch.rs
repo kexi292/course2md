@@ -549,7 +549,7 @@ pub fn json_request_described(
             validate,
         );
     }
-    // Legacy CLI has no durable task context. Only confirmed unsent/429 are retryable.
+    // The CLI has no durable task context. Only confirmed unsent/429 are retryable.
     let response = send().map_err(|e| Failure {
         status: None,
         retryable: e.definitely_unsent,
