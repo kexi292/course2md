@@ -5,6 +5,7 @@
 use anyhow::{Result, anyhow, bail};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
@@ -157,30 +158,109 @@ impl CredentialVault for KeychainCredentialVault {
     }
 }
 
+/// File-backed credential store for platforms without a system keychain.
+///
+/// Credentials are written as JSON next to the desktop preferences. The file is
+/// created through `atomic_write`, which uses a 0o600 temporary file on Unix, so
+/// the persisted secrets are not world-readable. This mirrors the CLI, which
+/// stores API keys in the user's `config.toml` under the same permissions.
 #[cfg(not(target_os = "macos"))]
-struct UnavailableCredentialVault;
+pub struct FileCredentialVault {
+    path: PathBuf,
+    values: Mutex<BTreeMap<CredentialRef, Zeroizing<String>>>,
+}
 
 #[cfg(not(target_os = "macos"))]
-impl CredentialVault for UnavailableCredentialVault {
-    fn insert(&self, _secret: Secret) -> Result<CredentialRef> {
-        bail!("此系统尚未提供安全凭据存储；可以使用无需认证的本机服务")
+impl FileCredentialVault {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let values = Self::load(&path).unwrap_or_default();
+        Self {
+            path,
+            values: Mutex::new(values),
+        }
     }
-    fn resolve(&self, _reference: &str) -> Result<Secret> {
-        bail!("此系统尚未提供安全凭据存储")
+
+    fn load(path: &Path) -> Result<BTreeMap<CredentialRef, Zeroizing<String>>> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BTreeMap::new());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let plain: BTreeMap<CredentialRef, String> = serde_json::from_slice(&bytes)?;
+        Ok(plain
+            .into_iter()
+            .map(|(reference, value)| (reference, Zeroizing::new(value)))
+            .collect())
     }
-    fn remove(&self, _reference: &str) -> Result<()> {
-        bail!("此系统尚未提供安全凭据存储")
+
+    fn persist(&self, values: &BTreeMap<CredentialRef, Zeroizing<String>>) -> Result<()> {
+        let plain: BTreeMap<CredentialRef, String> = values
+            .iter()
+            .map(|(reference, value)| (reference.clone(), value.as_str().to_owned()))
+            .collect();
+        let bytes = serde_json::to_vec_pretty(&plain)?;
+        course2md::checkpoint::atomic_write(&self.path, &bytes)
     }
 }
 
-pub fn system_vault() -> Arc<dyn CredentialVault> {
+#[cfg(not(target_os = "macos"))]
+impl CredentialVault for FileCredentialVault {
+    fn insert(&self, secret: Secret) -> Result<CredentialRef> {
+        if secret.is_empty() {
+            bail!("请输入 API Key");
+        }
+        let reference = new_reference();
+        let mut values = self
+            .values
+            .lock()
+            .map_err(|_| anyhow!("暂时无法保存凭据"))?;
+        values.insert(reference.clone(), Zeroizing::new(secret.expose().to_owned()));
+        if let Err(error) = self.persist(&values) {
+            values.remove(&reference);
+            return Err(error);
+        }
+        Ok(reference)
+    }
+
+    fn resolve(&self, reference: &str) -> Result<Secret> {
+        validate_reference(reference)?;
+        self.values
+            .lock()
+            .map_err(|_| anyhow!("暂时无法读取凭据"))?
+            .get(reference)
+            .map(|value| Secret::new(value.as_str()))
+            .ok_or_else(|| anyhow!("找不到此服务的凭据，请重新保存 API Key"))
+    }
+
+    fn remove(&self, reference: &str) -> Result<()> {
+        validate_reference(reference)?;
+        let mut values = self
+            .values
+            .lock()
+            .map_err(|_| anyhow!("暂时无法移除凭据"))?;
+        let removed = values.remove(reference);
+        if let Err(error) = self.persist(&values) {
+            if let Some(value) = removed {
+                values.insert(reference.to_owned(), value);
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+pub fn system_vault(path: impl Into<PathBuf>) -> Arc<dyn CredentialVault> {
     #[cfg(target_os = "macos")]
     {
+        let _ = path;
         Arc::new(KeychainCredentialVault::default())
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Arc::new(UnavailableCredentialVault)
+        Arc::new(FileCredentialVault::new(path))
     }
 }
 
@@ -215,5 +295,45 @@ mod tests {
         let error = vault.resolve("test-only-do-not-print").unwrap_err();
         assert!(!error.to_string().contains("test-only-do-not-print"));
         assert!(vault.insert(Secret::new("   ")).is_err());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn file_vault_persists_credentials_across_instances() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("desktop-credentials.json");
+        let reference = {
+            let vault = FileCredentialVault::new(&path);
+            let reference = vault.insert(Secret::new("test-only-file-key")).unwrap();
+            assert_eq!(
+                vault.resolve(&reference).unwrap().expose(),
+                "test-only-file-key"
+            );
+            reference
+        };
+        // A fresh instance reads the same credential back from disk.
+        let reopened = FileCredentialVault::new(&path);
+        assert_eq!(
+            reopened.resolve(&reference).unwrap().expose(),
+            "test-only-file-key"
+        );
+        reopened.remove(&reference).unwrap();
+        assert!(reopened.resolve(&reference).is_err());
+        // Removal is also persisted.
+        let after_remove = FileCredentialVault::new(&path);
+        assert!(after_remove.resolve(&reference).is_err());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn file_vault_starts_empty_when_file_is_missing_or_corrupt() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = FileCredentialVault::new(directory.path().join("missing.json"));
+        assert!(missing.resolve("credential-00000000-0000-0000-0000-000000000000").is_err());
+
+        let corrupt = directory.path().join("corrupt.json");
+        std::fs::write(&corrupt, b"not json").unwrap();
+        let vault = FileCredentialVault::new(&corrupt);
+        assert!(vault.resolve("credential-00000000-0000-0000-0000-000000000000").is_err());
     }
 }

@@ -365,7 +365,7 @@ impl Desktop {
         let output = configuration_directory.join("desktop-local-library");
         let preferences = preferences::Store::open(
             configuration_directory.join("desktop-preferences"),
-            credentials::system_vault(),
+            credentials::system_vault(configuration_directory.join("desktop-credentials.json")),
         );
         let mut config = preferences.defaults_config();
         config.defaults.out = Some(output.clone());
