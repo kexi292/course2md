@@ -1,0 +1,14 @@
+#!/bin/sh
+
+push_url=${2%/}
+push_url=${push_url%.git}
+
+case "$push_url" in
+  git@github.com:kexi292/course2md|https://github.com/kexi292/course2md|ssh://git@github.com/kexi292/course2md)
+    exit 0
+    ;;
+  *)
+    echo "Push blocked: $2 is not the allowed fork (kexi292/course2md)." >&2
+    exit 1
+    ;;
+esac
