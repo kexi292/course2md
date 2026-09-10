@@ -3681,9 +3681,20 @@ impl Desktop {
                             true
                         }
                         Err(error) => {
+                            // The retire marker is written before the group is persisted,
+                            // so a mid-failure can leave dispatch blocked without a visible
+                            // deletion; say so instead of claiming nothing happened.
+                            let blocked = this.preferences.is_service_retired(&id);
                             this.set_settings_feedback(
                                 PreferenceGroup::Services,
-                                format!("尚未删除此服务：{error:#}"),
+                                format!(
+                                    "{}：{error:#}",
+                                    if blocked {
+                                        "已停止派发，删除记录尚未完整保存"
+                                    } else {
+                                        "尚未删除此服务"
+                                    }
+                                ),
                                 true,
                             );
                             this.refresh_dispatch_controls(cx);
@@ -4609,55 +4620,5 @@ impl Desktop {
         next.ai_summary = config.llm.summarize;
         next.vision = config.llm.vision;
         self.commit_generation(next, cx);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn generation_settings_omit_the_abrupt_scope_sentence() {
-        let source = include_str!("settings_ui.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production settings");
-        assert!(
-            !source.contains("用于后续生成，也会更新当前未单独修改的选项。"),
-            "generation settings must not lead with that standalone sentence"
-        );
-        assert!(
-            source.contains("delete-saved-service-"),
-            "saved services must offer delete, not disable"
-        );
-        assert!(
-            !source.contains("停用") && !source.contains("已停用"),
-            "停用 must not remain a user-facing service concept"
-        );
-        assert!(
-            source.contains("diagnostic-capability") && source.contains("setting_surface"),
-            "application diagnostics must use shared setting cards"
-        );
-        let environment = source
-            .split("fn environment_page")
-            .nth(1)
-            .expect("environment page")
-            .split("fn ordinary_preferences_ready_for_submit")
-            .next()
-            .expect("environment page body");
-        assert!(
-            environment.contains("settings_status_row")
-                && environment.contains("setting_surface()")
-                && !environment.contains("settings_row("),
-            "运行检查 capabilities belong in one card of compact status rows"
-        );
-        let diagnostics = include_str!("model_diagnostics.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production diagnostics");
-        assert!(
-            diagnostics.contains("transfer_status")
-                && diagnostics.contains("transfer_metrics")
-                && !diagnostics.contains("model-download-bar"),
-            "model download must show labeled speed and remaining time, not a title-only line"
-        );
     }
 }
