@@ -646,12 +646,7 @@ pub fn quiet(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
 pub fn input_action(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
     use gpui::Styled;
     let size = rems(28. / 14.);
-    quiet(id)
-        .h(size)
-        .min_h(size)
-        .w(size)
-        .min_w(size)
-        .px_0()
+    quiet(id).h(size).min_h(size).w(size).min_w(size).px_0()
 }
 
 /// Inset note for supporting information.

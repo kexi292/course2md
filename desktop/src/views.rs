@@ -542,10 +542,7 @@ impl Render for Desktop {
                                     || self_scrolling,
                                 |v| v.h_full().min_h_0(),
                             )
-                            .when(
-                                self.page != Page::Settings && !self_scrolling,
-                                |v| v.pb_6(),
-                            )
+                            .when(self.page != Page::Settings && !self_scrolling, |v| v.pb_6())
                             .child(content),
                     ),
             );
