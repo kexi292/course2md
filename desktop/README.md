@@ -21,6 +21,14 @@ cargo build --manifest-path desktop/Cargo.toml
 COURSE2MD_BIN="$PWD/target/debug/course2md" cargo run --manifest-path desktop/Cargo.toml
 ```
 
+把当前源码装到本机测试：
+
+```sh
+just install
+```
+
+写入 `/Applications/course2md.app`，沿用现有笔记和设置。
+
 `sources.py` 默认先在项目同级的 `course2md-dependencies/` 中 clone 或 fast-forward pull `zed` 和 `gpui-component` 的 main，再建立 `desktop/.deps` 下的独立工作树，避免占用系统盘。可通过 `--developer-dir` 指定其他仓库根目录；`--no-pull` 仅复用本次已更新的源码。开发不使用版本号或固定 commit。两个原始工作区必须干净，脚本不会替你丢弃修改。
 
 组件主线现属于 GPUI Kit，使用重新发布的 `gpui-pre` 包名。准备脚本只在独立工作树中将依赖映射到 Zed GPUI，并让组件宏兼容原始 `gpui` 包名；不改动开发者原始工作区。上游布局变更时脚本会明确失败，要求检查兼容调整。
