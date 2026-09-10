@@ -650,6 +650,7 @@ impl Desktop {
     /// Folder filter for the library toolbar (sidebar successor): lists 未分类 and
     /// every folder of every readable registered library; the final form lands
     /// with the notes-page milestone (M5).
+    #[allow(dead_code)]
     pub fn folder_filter_menu(
         entity: WeakEntity<Desktop>,
         multi: bool,

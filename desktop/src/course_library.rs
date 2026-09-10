@@ -7,6 +7,72 @@ use gpui_component::{
 };
 use std::rc::Rc;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct LibraryFilterOption {
+    pub value: String,
+    pub label: String,
+    pub root: PathBuf,
+    pub folder: Option<u64>,
+}
+
+pub(crate) fn library_filter_options(
+    sections: &[(PathBuf, String, Vec<(u64, String)>)],
+    current_root: &std::path::Path,
+    multi: bool,
+) -> Vec<LibraryFilterOption> {
+    let mut options = vec![LibraryFilterOption {
+        value: "all".into(),
+        label: "全部笔记".into(),
+        root: current_root.to_path_buf(),
+        folder: None,
+    }];
+    for (index, (root, library_name, folders)) in sections.iter().enumerate() {
+        let unfiled = LibraryFilterOption {
+            value: format!("f-{index}-0"),
+            label: if multi {
+                format!("{library_name} · 未分类")
+            } else {
+                "未分类".into()
+            },
+            root: root.clone(),
+            folder: Some(0),
+        };
+        options.push(unfiled);
+        for (id, name) in folders {
+            options.push(LibraryFilterOption {
+                value: format!("f-{index}-{id}"),
+                label: if multi {
+                    format!("{library_name} · {name}")
+                } else {
+                    name.clone()
+                },
+                root: root.clone(),
+                folder: Some(*id),
+            });
+        }
+    }
+    options
+}
+
+pub(crate) fn library_filter_selected(
+    options: &[LibraryFilterOption],
+    current_root: &std::path::Path,
+    folder: Option<u64>,
+) -> String {
+    options
+        .iter()
+        .find(|option| match folder {
+            None => option.folder.is_none(),
+            Some(id) => option.folder == Some(id) && option.root == current_root,
+        })
+        .map(|option| option.value.clone())
+        .unwrap_or_else(|| "all".into())
+}
+
+pub(crate) fn library_layout_choice(cards: bool) -> &'static str {
+    if cards { "cards" } else { "list" }
+}
+
 /// Geometry shared by list and card layouts; rem-based spacing scales with text.
 #[derive(Clone, Copy)]
 struct LibraryLayout {
@@ -906,10 +972,7 @@ impl Desktop {
             LibraryItem::ListRow(index, _) => Some((false, *index)),
             _ => None,
         });
-        let keys = items
-            .iter()
-            .map(|item| item.key(layout.columns))
-            .collect();
+        let keys = items.iter().map(|item| item.key(layout.columns)).collect();
         Self::reconcile_list_items(
             &self.library_list,
             &mut self.library_keys,
@@ -1244,7 +1307,10 @@ impl Desktop {
                 _ => wrapper.mb_6(),
             };
         }
-        let mut wrapper = wrapper.child(content).id(("library-item", index)).tab_stop(false);
+        let mut wrapper = wrapper
+            .child(content)
+            .id(("library-item", index))
+            .tab_stop(false);
         if let Some(focus) = focus {
             wrapper = wrapper.track_focus(focus);
         }
@@ -1290,38 +1356,31 @@ impl Desktop {
                     .collect(),
             ));
         }
-        let label = match self.folder_filter {
-            None => "全部笔记".to_owned(),
-            Some(0) => "未分类".into(),
-            Some(id) => self
-                .library
-                .folders
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(|| "文件夹已删除".into()),
-        };
-        control("folder-filter")
-            .rounded(RADIUS_PILL)
-            .px(px(12.))
-            .max_w(rems(16.))
-            .icon(IconName::Folder)
-            .accessibility_label(format!("文件夹筛选：{label}"))
-            .tooltip(label.clone())
-            .child(
-                div()
-                    .min_w_0()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(label),
-            )
-            .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
-            .dropdown_menu(Self::folder_filter_menu(
-                cx.entity().downgrade(),
-                multi,
-                sections,
-                self.library_root.clone(),
-                self.folder_filter,
-            ))
+        let options = library_filter_options(&sections, &self.library_root, multi);
+        let selected = library_filter_selected(&options, &self.library_root, self.folder_filter);
+        let choices: Vec<(String, String)> = options
+            .iter()
+            .map(|option| (option.value.clone(), option.label.clone()))
+            .collect();
+        SingleChoiceGroup::new("folder-filter", "文件夹筛选")
+            .options(choices)
+            .selected(selected)
+            .on_change(cx.listener({
+                let options = options.clone();
+                move |this, value: &SharedString, _, cx| {
+                    let Some(option) = options.iter().find(|option| option.value == value.as_ref())
+                    else {
+                        return;
+                    };
+                    this.library_root = option.root.clone();
+                    if let Some(organization) = this.library_indexes.get(&option.root) {
+                        this.library = organization.clone();
+                    }
+                    this.folder_filter = option.folder;
+                    this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
+                    cx.notify();
+                }
+            }))
     }
 
     pub(super) fn library_controls_visible(&self, cx: &App) -> bool {
@@ -1340,6 +1399,7 @@ impl Desktop {
         }
         let group_on = self.desktop_settings.library_group_folders;
         let cards_on = self.desktop_settings.library_cards;
+        let can_group = self.folder_filter.is_none() && self.library_error.is_none();
         let controls = h_flex()
             .gap_2()
             .flex_wrap()
@@ -1378,55 +1438,29 @@ impl Desktop {
                         }),
                 )
             })
-            .child({
-                let weak = cx.weak_entity();
-                let can_group = self.folder_filter.is_none() && self.library_error.is_none();
-                control("library-display")
-                    .icon(icons::tune())
-                    .label("显示")
-                    .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
-                    .dropdown_menu(move |menu, _, _| {
-                        let list = weak.clone();
-                        let cards = weak.clone();
-                        let group = weak.clone();
-                        let mut menu = menu
-                            .item(
-                                PopupMenuItem::new("列表")
-                                    .icon(icons::toc())
-                                    .checked(!cards_on)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = list.update(cx, |this, cx| {
-                                            this.desktop_settings.library_cards = false;
-                                            this.save_library_presentation(cx);
-                                        });
-                                    }),
-                            )
-                            .item(
-                                PopupMenuItem::new("卡片")
-                                    .icon(icons::grid_view())
-                                    .checked(cards_on)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = cards.update(cx, |this, cx| {
-                                            this.desktop_settings.library_cards = true;
-                                            this.save_library_presentation(cx);
-                                        });
-                                    }),
-                            );
-                        if can_group {
-                            menu = menu.separator().item(
-                                PopupMenuItem::new("按文件夹分组")
-                                    .icon(icons::folder())
-                                    .checked(group_on)
-                                    .on_click(move |_, _, cx| {
-                                        let _ = group.update(cx, |this, cx| {
-                                            this.desktop_settings.library_group_folders = !group_on;
-                                            this.save_library_presentation(cx);
-                                        });
-                                    }),
-                            );
-                        }
-                        menu
-                    })
+            .child(
+                SingleChoiceGroup::new("library-layout", "笔记显示方式")
+                    .options([("list", "列表"), ("cards", "卡片")])
+                    .selected(library_layout_choice(cards_on))
+                    .on_change(cx.listener(|this, value: &SharedString, _, cx| {
+                        this.desktop_settings.library_cards = value.as_ref() == "cards";
+                        this.save_library_presentation(cx);
+                    })),
+            )
+            .when(can_group, |row| {
+                row.child(
+                    quiet("library-group-folders")
+                        .icon(icons::folder())
+                        .label(if group_on {
+                            "取消按文件夹分组"
+                        } else {
+                            "按文件夹分组"
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.desktop_settings.library_group_folders = !group_on;
+                            this.save_library_presentation(cx);
+                        })),
+                )
             });
         h_flex()
             .w_full()
@@ -1568,13 +1602,17 @@ impl Desktop {
         let collection_id = courses.first().map(|(index, _)| *index).unwrap_or(0);
         let collection = v_flex().w_full();
         if !self.desktop_settings.library_cards || layout.stacked {
-            let rows = v_flex().gap_2().children(
-                courses
-                    .iter()
-                    .map(|(index, course)| self.library_list_row(index, course, layout, show_chip, cx)),
-            );
+            let rows = v_flex()
+                .gap_2()
+                .children(courses.iter().map(|(index, course)| {
+                    self.library_list_row(index, course, layout, show_chip, cx)
+                }));
             return if animate {
-                collection.child(crate::motion::enter(("library-list", collection_id), rows, cx))
+                collection.child(crate::motion::enter(
+                    ("library-list", collection_id),
+                    rows,
+                    cx,
+                ))
             } else {
                 collection.child(rows)
             };
@@ -1585,7 +1623,11 @@ impl Desktop {
                 .map(|row| self.library_card_row(row, layout, cx)),
         );
         if animate {
-            collection.child(crate::motion::enter(("library-grid", collection_id), cards, cx))
+            collection.child(crate::motion::enter(
+                ("library-grid", collection_id),
+                cards,
+                cx,
+            ))
         } else {
             collection.child(cards)
         }
@@ -1706,11 +1748,7 @@ impl Desktop {
                                             cx,
                                         ))
                                         .child(div().flex_1())
-                                        .child(self.course_actions(
-                                            course.clone(),
-                                            *index,
-                                            cx,
-                                        )),
+                                        .child(self.course_actions(course.clone(), *index, cx)),
                                 ),
                         )
                         .children(self.course_read_error(course, *index, cx))
@@ -1770,9 +1808,7 @@ impl Desktop {
                     div()
                         .w_full()
                         .whitespace_normal()
-                        .when(!layout.stacked, |title| {
-                            title.text_ellipsis().line_clamp(2)
-                        })
+                        .when(!layout.stacked, |title| title.text_ellipsis().line_clamp(2))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(course.title.clone()),
                 )
@@ -1837,9 +1873,7 @@ impl Desktop {
                     .tooltip("阅读笔记")
                     .on_click({
                         let course = course.clone();
-                        cx.listener(move |this, _, _, cx| {
-                            this.open_course(course.clone(), cx)
-                        })
+                        cx.listener(move |this, _, _, cx| this.open_course(course.clone(), cx))
                     }),
             )
             .child(self.course_actions(course.clone(), *index, cx));
@@ -2204,6 +2238,38 @@ mod tests {
         assert_eq!(
             LibraryItem::CardRow(changed).key(3),
             LibraryItem::CardRow(row).key(3)
+        );
+    }
+
+    #[test]
+    fn library_filters_are_surfaced_as_one_level_choices() {
+        let root = std::path::PathBuf::from("/notes");
+        let options = super::library_filter_options(
+            &[(root.clone(), "课程库".into(), vec![(2, "讲座".into())])],
+            &root,
+            false,
+        );
+        assert_eq!(options[0].label, "全部笔记");
+        assert_eq!(options[1].folder, Some(0));
+        assert_eq!(options[2].label, "讲座");
+        assert_eq!(super::library_filter_selected(&options, &root, None), "all");
+        assert_eq!(
+            super::library_filter_selected(&options, &root, Some(2)),
+            "f-0-2"
+        );
+        assert_eq!(super::library_layout_choice(false), "list");
+        assert_eq!(super::library_layout_choice(true), "cards");
+        let source = include_str!("course_library.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production library");
+        assert!(
+            !source.contains(".dropdown_menu(Self::folder_filter_menu"),
+            "folder filter must not be a nested menu"
+        );
+        assert!(
+            !source.contains("library-display"),
+            "display must not be a nested 显示 menu"
         );
     }
 }
