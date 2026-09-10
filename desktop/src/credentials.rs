@@ -158,7 +158,57 @@ impl CredentialVault for KeychainCredentialVault {
     }
 }
 
-/// File-backed credential store for platforms without a system keychain.
+/// System keyring-backed credential store for Linux (Secret Service) and
+/// Windows (Credential Manager). Availability is checked once through the
+/// keyring crate's store status; when no system keyring is reachable the
+/// caller falls back to `FileCredentialVault`.
+#[cfg(not(target_os = "macos"))]
+pub struct KeyringCredentialVault {
+    service: String,
+}
+
+#[cfg(not(target_os = "macos"))]
+impl KeyringCredentialVault {
+    pub fn new() -> Self {
+        Self {
+            service: "com.course2md.desktop.service-credentials.v1".into(),
+        }
+    }
+
+    /// Whether the platform credential store initialized successfully.
+    pub fn available() -> bool {
+        keyring::Entry::store_status().is_ok()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl CredentialVault for KeyringCredentialVault {
+    fn insert(&self, secret: Secret) -> Result<CredentialRef> {
+        if secret.is_empty() {
+            bail!("请输入 API Key");
+        }
+        let reference = new_reference();
+        let entry = keyring::Entry::new(&self.service, &reference)?;
+        entry.set_password(secret.expose())?;
+        Ok(reference)
+    }
+
+    fn resolve(&self, reference: &str) -> Result<Secret> {
+        validate_reference(reference)?;
+        let entry = keyring::Entry::new(&self.service, reference)?;
+        let password = entry.get_password()?;
+        Ok(Secret::new(password))
+    }
+
+    fn remove(&self, reference: &str) -> Result<()> {
+        validate_reference(reference)?;
+        let entry = keyring::Entry::new(&self.service, reference)?;
+        entry.delete_credential()?;
+        Ok(())
+    }
+}
+
+/// File-backed fallback for platforms without a reachable system keychain.
 ///
 /// Credentials are written as JSON next to the desktop preferences. The file is
 /// created through `atomic_write`, which uses a 0o600 temporary file on Unix, so
@@ -260,7 +310,11 @@ pub fn system_vault(path: impl Into<PathBuf>) -> Arc<dyn CredentialVault> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Arc::new(FileCredentialVault::new(path))
+        if KeyringCredentialVault::available() {
+            Arc::new(KeyringCredentialVault::new())
+        } else {
+            Arc::new(FileCredentialVault::new(path))
+        }
     }
 }
 

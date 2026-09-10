@@ -37,6 +37,9 @@ pulldown-cmark = "0.13"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+keyring = { version = "4", features = ["v1"] }
+
 [target.'cfg(windows)'.dependencies]
 same-file = "1.0.6"
 

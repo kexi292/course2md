@@ -5,7 +5,7 @@
 
 ## [未发布]
 
-- 修复 Linux/Windows 桌面端无法保存 AI 服务 API Key 的问题：改用文件凭据存储（0600 权限），与 CLI 的 `config.toml` 存储方式一致。
+- 修复 Linux/Windows 桌面端无法保存 AI 服务 API Key 的问题：优先使用系统钥匙串（Linux Secret Service / Windows 凭据管理器），不可用时回退到文件存储（0600 权限）。
 
 ## [2.0.0-rc.1] — 2026-09-09
 
