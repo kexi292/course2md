@@ -801,33 +801,9 @@ impl Store {
     fn retired_marker(&self, service_id: &str) -> PathBuf {
         self.root.join("stopped-services").join(service_id)
     }
-    pub fn retired_version_ids(&self) -> BTreeSet<ServiceVersionId> {
-        let mut ids = BTreeSet::new();
-        for version in self.services.versions.values() {
-            if self.is_service_retired(&version.service_id) {
-                ids.insert(version.id.clone());
-            }
-        }
-        if let Ok(entries) = std::fs::read_dir(self.root.join("stopped-services")) {
-            for entry in entries.flatten() {
-                if let Ok(text) = std::fs::read_to_string(entry.path()) {
-                    for line in text.lines() {
-                        if valid_id(line, "service-version-") {
-                            ids.insert(line.to_owned());
-                        }
-                    }
-                }
-            }
-        }
-        ids
-    }
-    fn write_retire_marker(&self, service_id: &str, version_ids: &[impl AsRef<str>]) -> Result<()> {
-        let mut body = String::from("deleted\n");
-        for id in version_ids {
-            body.push_str(id.as_ref());
-            body.push('\n');
-        }
-        atomic_write_with_retry(&self.retired_marker(service_id), body.as_bytes())
+    /// The marker's presence is the whole record; nothing reads its body.
+    fn write_retire_marker(&self, service_id: &str) -> Result<()> {
+        atomic_write_with_retry(&self.retired_marker(service_id), b"deleted\n")
     }
     fn forget_retired_service_records(&mut self) {
         if self.is_blocked(PreferenceGroup::Services) {
@@ -871,13 +847,11 @@ impl Store {
             return;
         }
         for service_id in &retired {
-            let ids: Vec<_> = leftover
-                .iter()
-                .filter(|version| version.service_id == *service_id)
-                .map(|version| version.id.as_str())
-                .collect();
-            if !ids.is_empty() {
-                let _ = self.write_retire_marker(service_id, &ids);
+            // Legacy tombstones lived only in services.json; ensure the
+            // independent marker exists so a restored backup cannot revive
+            // dispatch for this service.
+            if !self.retired_marker(service_id).exists() {
+                let _ = self.write_retire_marker(service_id);
             }
         }
         let mut next = self.services.clone();
@@ -1169,8 +1143,7 @@ impl Store {
             .iter()
             .filter_map(|version| version.config.credential.clone())
             .collect();
-        let version_ids: Vec<_> = versions.iter().map(|version| version.id.as_str()).collect();
-        self.write_retire_marker(service_id, &version_ids)?;
+        self.write_retire_marker(service_id)?;
         let mut next = self.services.clone();
         next.stopped
             .entry(service_id.to_owned())

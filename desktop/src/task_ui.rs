@@ -1376,15 +1376,13 @@ impl Desktop {
                 authorizations.push(id);
             }
         }
-        let retired = self.preferences.retired_version_ids();
         let stopped: Vec<_> = [&task.plan.asr_service, &task.plan.ai_service]
             .into_iter()
             .flatten()
             .filter(|id| {
-                retired.contains(*id)
-                    || self.preferences.version(id).is_none_or(|version| {
-                        self.preferences.is_service_retired(&version.service_id)
-                    })
+                self.preferences
+                    .version(id)
+                    .is_none_or(|version| self.preferences.is_service_retired(&version.service_id))
             })
             .cloned()
             .collect();
