@@ -335,6 +335,15 @@ pub fn tool_path() -> std::ffi::OsString {
     }
     std::env::join_paths(dirs).unwrap_or_default()
 }
+/// Presence of a llama.cpp runtime is independent of `--list-devices` succeeding.
+/// That flag can fail on CPU-only builds or older binaries that are still installed.
+pub(crate) fn llama_binary_on_path(path: &std::ffi::OsStr) -> bool {
+    ["llama-server", "llama-cli"].iter().any(|name| {
+        let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        std::env::split_paths(path).any(|dir| dir.join(&file).is_file())
+    })
+}
+
 pub fn resolve_cli() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("COURSE2MD_BIN") {
         let path = PathBuf::from(path);
@@ -388,6 +397,7 @@ impl Environment {
                 .map(|(bin, arg)| scope.spawn(move || probe(bin, &[arg])))
                 .map(|task| task.join().unwrap_or(None))
         });
+        let llama = llama_binary_on_path(&tool_path());
         let gpu = checks[4].as_deref().and_then(|output| {
             output.lines().find_map(|line| {
                 let (id, description) = line.trim().split_once(':')?;
@@ -426,16 +436,16 @@ impl Environment {
             false
         };
         let npu_runtime = ["uv", "python3", "python"].iter().any(|name| {
-                let executable = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-                std::env::split_paths(&tool_path()).any(|dir| dir.join(&executable).is_file())
-            });
+            let executable = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+            std::env::split_paths(&tool_path()).any(|dir| dir.join(&executable).is_file())
+        });
         let npu = npu_device && npu_runtime;
         Self {
             engine: cli.is_some() && checks[0].is_some(),
             ffmpeg: checks[1].is_some(),
             ffprobe: checks[2].is_some(),
             ytdlp: checks[3].is_some(),
-            llama: checks[4].is_some(),
+            llama,
             apple,
             gpu,
             npu,
@@ -634,8 +644,7 @@ mod tests {
         let version = target.version_dir();
         // Tamper with the published records: the frame reference now escapes the note.
         let mut manifest: course2md::artifact::Manifest =
-            serde_json::from_slice(&std::fs::read(version.join("manifest.json")).unwrap())
-                .unwrap();
+            serde_json::from_slice(&std::fs::read(version.join("manifest.json")).unwrap()).unwrap();
         manifest.frames[0].image = "../../outside.jpg".into();
         std::fs::write(
             version.join("manifest.json"),
@@ -643,8 +652,7 @@ mod tests {
         )
         .unwrap();
         let mut document: course2md::artifact::Document =
-            serde_json::from_slice(&std::fs::read(version.join("document.json")).unwrap())
-                .unwrap();
+            serde_json::from_slice(&std::fs::read(version.join("document.json")).unwrap()).unwrap();
         document.sections[0].image = "../../outside.jpg".into();
         std::fs::write(
             version.join("document.json"),
@@ -719,5 +727,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn llama_runtime_is_present_when_the_binary_exists_even_if_device_listing_fails() {
+        let missing = tempfile::tempdir().unwrap();
+        assert!(!llama_binary_on_path(missing.path().as_os_str()));
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir
+            .path()
+            .join(format!("llama-server{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&bin, b"not-executable").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(llama_binary_on_path(dir.path().as_os_str()));
     }
 }

@@ -35,6 +35,18 @@ enum InputField {
     Key,
 }
 
+pub(crate) fn saved_api_key_placeholder(has_saved_credential: bool) -> &'static str {
+    if has_saved_credential {
+        "••••••••"
+    } else {
+        ""
+    }
+}
+
+pub(crate) fn setup_engines_use_nested_disclosure() -> bool {
+    false
+}
+
 struct ServiceSetup {
     inputs: BTreeMap<InputField, Entity<InputState>>,
     draft: ServiceDraft,
@@ -159,7 +171,6 @@ pub(crate) struct State {
     finish_failed: bool,
     model_details_open: bool,
     model_choices_open: bool,
-    engine_details_open: bool,
     model_preparation: Option<ModelPreparation>,
     model_status_request: Option<ModelRequest>,
     model_return_page: Option<Page>,
@@ -183,7 +194,6 @@ impl State {
             finish_failed: false,
             model_details_open: false,
             model_choices_open: false,
-            engine_details_open: false,
             model_preparation: None,
             model_status_request: None,
             model_return_page: None,
@@ -489,10 +499,6 @@ impl Desktop {
         }
         self.onboarding.model_details_open = false;
         self.onboarding.model_choices_open = false;
-        self.onboarding.engine_details_open = self
-            .onboarding
-            .provider
-            .is_some_and(|provider| provider != AsrProvider::Api);
         self.onboarding.finish_failed = false;
         self.onboarding.model_status_request = None;
         self.onboarding.model_return_page = None;
@@ -577,7 +583,14 @@ impl Desktop {
         ] {
             service.inputs[&field].update(cx, |input, cx| input.set_value(value, window, cx));
         }
-        service.inputs[&InputField::Key].update(cx, |input, cx| input.set_masked(true, window, cx));
+        service.inputs[&InputField::Key].update(cx, |input, cx| {
+            input.set_placeholder(
+                saved_api_key_placeholder(draft.credential.is_some()),
+                window,
+                cx,
+            );
+            input.set_masked(true, window, cx);
+        });
     }
 
     fn setup_step(&mut self, step: Step, cx: &mut Context<Self>) {
@@ -1340,73 +1353,42 @@ impl Desktop {
                 ),
             );
         }
+        if setup_engines_use_nested_disclosure() {
+            unreachable!("onboarding engine choices are shown at one level");
+        }
         body = body.child(
             v_flex()
                 .w_full()
                 .min_w_0()
-                .gap_2()
+                .gap_3()
+                .child(help(
+                    "setup-current-engine",
+                    format!(
+                        "{} · {}",
+                        if selected.is_none() {
+                            "自动选择，目前使用"
+                        } else {
+                            "固定引擎"
+                        },
+                        provider_label(Some(selected.unwrap_or(recommended)))
+                    ),
+                ))
                 .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .items_center()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            help(
-                                "setup-current-engine",
-                                format!(
-                                    "{} · {}",
-                                    if selected.is_none() {
-                                        "自动选择，目前使用"
-                                    } else {
-                                        "固定引擎"
-                                    },
-                                    provider_label(Some(selected.unwrap_or(recommended)))
-                                ),
-                            )
-                            .w_auto()
-                            .flex_1(),
-                        )
-                        .child(
-                            quiet("setup-show-engines")
-                                .icon(icons::tune())
-                                .label(if self.onboarding.engine_details_open {
-                                    "收起引擎"
-                                } else {
-                                    "更换引擎"
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.onboarding.engine_details_open =
-                                        !this.onboarding.engine_details_open;
-                                    cx.notify();
-                                })),
-                        ),
+                    described_choice(
+                        "setup-engine-auto",
+                        "自动选择引擎",
+                        "根据本机运行环境选择；无需固定硬件方式",
+                        icons::auto_fix(),
+                        selected.is_none(),
+                        window,
+                        cx,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.select_setup_provider(None, cx);
+                    })),
                 )
-                .child(motion::disclosure(
-                    "setup-engines",
-                    self.onboarding.engine_details_open,
-                    v_flex()
-                        .gap_3()
-                        .child(
-                            described_choice(
-                                "setup-engine-auto",
-                                "自动选择引擎",
-                                "根据本机运行环境选择；无需固定硬件方式",
-                                icons::auto_fix(),
-                                selected.is_none(),
-                                window,
-                                cx,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.select_setup_provider(None, cx);
-                            })),
-                        )
-                        .child(field_label("setup-fixed-engine-label", "固定引擎"))
-                        .child(choices),
-                    window,
-                    cx,
-                )),
+                .child(field_label("setup-fixed-engine-label", "固定引擎"))
+                .child(choices),
         );
         let provider = selected.unwrap_or(recommended);
         let models = local_model_choices(provider, &self.onboarding.model);
@@ -2657,8 +2639,8 @@ impl Desktop {
 mod tests {
     use super::{
         ProviderChoice, apply_provider_choice, engine_preferences, evidence_covers,
-        local_model_choices, newly_enabled_ai_tests, requested_tests, setup_cache_model,
-        setup_model_supported,
+        local_model_choices, newly_enabled_ai_tests, requested_tests, saved_api_key_placeholder,
+        setup_cache_model, setup_engines_use_nested_disclosure, setup_model_supported,
     };
     use crate::preferences::{
         Authentication, GenerationPreferences, ServiceConfiguration, ServiceProtocol,
@@ -2931,6 +2913,25 @@ mod tests {
         assert_eq!(
             requested_tests(ServicePurpose::Ai, true, false, true),
             vec![TestKind::Proofread, TestKind::Vision]
+        );
+    }
+
+    #[test]
+    fn saved_api_key_fields_show_dots_instead_of_an_empty_box() {
+        assert_eq!(saved_api_key_placeholder(true), "••••••••");
+        assert_eq!(saved_api_key_placeholder(false), "");
+        let source = include_str!("onboarding.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production onboarding");
+        assert!(source.contains("saved_api_key_placeholder"));
+        assert!(
+            !setup_engines_use_nested_disclosure(),
+            "engine choices belong at the onboarding step, not behind 收起引擎"
+        );
+        assert!(
+            !source.contains("\"收起引擎\""),
+            "onboarding must not nest engine choices"
         );
     }
 }
