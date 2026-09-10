@@ -793,6 +793,11 @@ impl Store {
     pub fn is_service_retired(&self, service_id: &str) -> bool {
         self.services.stopped.contains_key(service_id) || self.retired_marker(service_id).exists()
     }
+    /// Display the currently loaded state without probing the filesystem.
+    /// Actual publication, submission and execution still use dispatch checks.
+    pub fn service_retired_in_snapshot(&self, service_id: &str) -> bool {
+        self.services.stopped.contains_key(service_id)
+    }
     fn retired_marker(&self, service_id: &str) -> PathBuf {
         self.root.join("stopped-services").join(service_id)
     }

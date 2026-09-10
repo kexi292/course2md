@@ -2144,9 +2144,10 @@ impl Desktop {
         .into_iter()
         .find_map(|(purpose, required)| {
             (required
-                && self
-                    .selected_task_service(purpose)
-                    .is_none_or(|version| self.preferences.is_service_retired(&version.service_id)))
+                && self.selected_task_service(purpose).is_none_or(|version| {
+                    self.preferences
+                        .service_retired_in_snapshot(&version.service_id)
+                }))
             .then_some(purpose)
         })
     }

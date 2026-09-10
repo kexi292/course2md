@@ -1576,7 +1576,9 @@ impl Desktop {
             let mut section = group(heading_id, heading);
             for version in latest.values().filter(|version| {
                 version.config.protocol.purpose() == purpose
-                    && !self.preferences.is_service_retired(&version.service_id)
+                    && !self
+                        .preferences
+                        .service_retired_in_snapshot(&version.service_id)
             }) {
                 section = section.child(self.service_card(version, cx));
             }
@@ -1865,12 +1867,16 @@ impl Desktop {
         let editor_version = current
             .as_deref()
             .and_then(|id| self.preferences.version(id))
-            .filter(|version| !self.preferences.is_service_retired(&version.service_id))
+            .filter(|version| {
+                !self
+                    .preferences
+                    .service_retired_in_snapshot(&version.service_id)
+            })
             .map(|version| version.id.clone());
         let mut latest = BTreeMap::<String, ServiceVersion>::new();
         for version in self.preferences.versions().filter(|v| {
             v.config.protocol.purpose() == purpose
-                && !self.preferences.is_service_retired(&v.service_id)
+                && !self.preferences.service_retired_in_snapshot(&v.service_id)
         }) {
             if latest
                 .get(&version.service_id)
@@ -1883,7 +1889,11 @@ impl Desktop {
         let current_version = current
             .as_deref()
             .and_then(|id| self.preferences.version(id))
-            .filter(|version| !self.preferences.is_service_retired(&version.service_id))
+            .filter(|version| {
+                !self
+                    .preferences
+                    .service_retired_in_snapshot(&version.service_id)
+            })
             .cloned();
         let old_current = current_version
             .as_ref()
@@ -2216,7 +2226,11 @@ impl Desktop {
         };
         let draft = self
             .selected_task_service(purpose)
-            .filter(|version| !self.preferences.is_service_retired(&version.service_id))
+            .filter(|version| {
+                !self
+                    .preferences
+                    .service_retired_in_snapshot(&version.service_id)
+            })
             .map(|v| ServiceDraft::from_version(&v))
             .unwrap_or_else(|| ServiceDraft::new(purpose));
         self.open_service_draft(draft, Some(target), None, window, cx);
@@ -2242,7 +2256,11 @@ impl Desktop {
             .ai_service
             .as_deref()
             .and_then(|id| self.preferences.version(id))
-            .filter(|version| !self.preferences.is_service_retired(&version.service_id))
+            .filter(|version| {
+                !self
+                    .preferences
+                    .service_retired_in_snapshot(&version.service_id)
+            })
             .map(ServiceDraft::from_version)
             .unwrap_or_else(|| ServiceDraft::new(ServicePurpose::Ai));
         self.open_service_draft(draft, None, Some((task_id, components)), window, cx);
@@ -2333,7 +2351,10 @@ impl Desktop {
         let also_default = default
             .as_deref()
             .and_then(|id| self.preferences.version(id))
-            .is_none_or(|version| self.preferences.is_service_retired(&version.service_id));
+            .is_none_or(|version| {
+                self.preferences
+                    .service_retired_in_snapshot(&version.service_id)
+            });
         self.settings_ui.editor = Some(ServiceEditor {
             draft,
             models: Default::default(),
