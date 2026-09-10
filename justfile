@@ -20,23 +20,18 @@ install:
     mkdir -p "$bin" "$res"
     python3 - "$app" <<'PY'
     from pathlib import Path
-    import plistlib, re, tomllib, sys
+    import plistlib, tomllib, sys
+    sys.path.insert(0, "desktop/scripts")
+    from package import macos_versions
     app = Path(sys.argv[1])
     version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
-    match = re.fullmatch(r"(\d+\.\d+\.\d+)(?:-(alpha|beta|rc)\.([1-9]\d*))?", version)
-    if not match:
-        raise SystemExit(f"unsupported version: {version}")
-    short, channel, number = match.groups()
-    build = short + ({"alpha": "a", "beta": "b", "rc": "fc"}[channel] + number if channel else "")
     plistlib.dump({
         "CFBundleName": "course2md",
         "CFBundleDisplayName": "course2md",
         "CFBundleIdentifier": "dev.course2md.desktop",
         "CFBundleExecutable": "course2md-desktop",
         "CFBundlePackageType": "APPL",
-        "CFBundleShortVersionString": short,
-        "CFBundleVersion": build,
-        "Course2mdVersion": version,
+        **macos_versions(version),
         "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication",
         "LSMinimumSystemVersion": "14.0",
