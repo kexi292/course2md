@@ -2298,27 +2298,14 @@ impl Desktop {
         {
             has_phase = true;
             let phase = model_preparation_phase(stage, &progress.message);
-            view = view
-                .child(semantic_label(
-                    ("setup-model-phase", index),
-                    phase,
-                    icons::download(),
-                ))
-                .child(
-                    help(
-                        ("setup-model-progress", index),
-                        progress.detail(stage, true),
-                    )
-                    .pl(rems(28. / 14.)),
-                )
-                .when_some(progress.fraction(), |view, fraction| {
-                    view.child(motion::progress(
-                        ("setup-model-progress-bar", index),
-                        fraction,
-                        window,
-                        cx,
-                    ))
-                });
+            view = view.child(motion::transfer_status(
+                ("setup-model-progress", index),
+                phase,
+                &progress.transfer_metrics(stage, true),
+                progress.fraction(),
+                window,
+                cx,
+            ));
         }
         if !has_phase {
             view = view.child(semantic_label(
@@ -2932,6 +2919,10 @@ mod tests {
         assert!(
             !source.contains("\"收起引擎\""),
             "onboarding must not nest engine choices"
+        );
+        assert!(
+            source.contains("transfer_status") && source.contains("transfer_metrics"),
+            "onboarding model preparation must show labeled download speed and remaining time"
         );
     }
 }

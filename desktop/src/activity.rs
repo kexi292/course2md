@@ -55,60 +55,119 @@ impl Activity {
         (elapsed >= 1. && processed > 0 && self.updated.elapsed() < Duration::from_secs(30))
             .then(|| processed as f64 / elapsed)
     }
-    pub fn detail(&self, stage: &str, running: bool) -> String {
+    pub fn transfer_metrics(&self, stage: &str, running: bool) -> TransferMetrics {
         if self.done {
-            return "已完成".into();
+            return TransferMetrics {
+                note: Some("已完成".into()),
+                ..TransferMetrics::default()
+            };
         }
         if !running {
-            return "已停止".into();
+            return TransferMetrics {
+                note: Some("已停止".into()),
+                ..TransferMetrics::default()
+            };
         }
         let quantity = quantity(stage, self.current, self.total);
         // Apple reports weighted preparation stages, not byte throughput. Loading,
         // downloads and compilation do not advance those stages at a constant rate.
         if stage == "model/apple" {
-            let elapsed = format!("已用 {}", duration(self.started.elapsed().as_secs_f64()));
-            return if quantity.is_empty() {
-                elapsed
-            } else {
-                format!("{quantity} · {elapsed}")
+            return TransferMetrics {
+                quantity,
+                note: Some(format!(
+                    "已用 {}",
+                    duration(self.started.elapsed().as_secs_f64())
+                )),
+                ..TransferMetrics::default()
             };
         }
-        let remaining = if self.updated.elapsed() >= Duration::from_secs(30) && self.current > 0 {
-            if stage.starts_with("scenes/") {
-                "仍在处理"
-            } else {
-                "等待响应"
+        let byte_download = is_byte_download(stage);
+        let stalled = self.updated.elapsed() >= Duration::from_secs(30) && self.current > 0;
+        if stalled {
+            return TransferMetrics {
+                quantity,
+                speed: byte_download.then(|| "—".into()),
+                note: Some(
+                    if stage.starts_with("scenes/") {
+                        "仍在处理"
+                    } else {
+                        "等待响应"
+                    }
+                    .into(),
+                ),
+                ..TransferMetrics::default()
+            };
+        }
+        let rate = self.rate();
+        let speed = byte_download.then(|| match rate {
+            Some(rate) => format!("{}/s", throughput(rate)),
+            None => "正在测量".into(),
+        });
+        let eta = if self.total > self.current {
+            match rate {
+                Some(rate) => Some(duration((self.total - self.current) as f64 / rate)),
+                None if byte_download => Some("计算中".into()),
+                None => None,
             }
-            .into()
-        } else if self.total > self.current {
-            self.rate()
-                .map(|rate| {
-                    format!(
-                        "约剩 {}",
-                        duration((self.total - self.current) as f64 / rate)
-                    )
-                })
-                .unwrap_or_default()
         } else if self.total > 0 {
-            "收尾中…".into()
+            Some("收尾中…".into())
+        } else if !byte_download {
+            Some(format!(
+                "已用 {}",
+                duration(self.started.elapsed().as_secs_f64())
+            ))
         } else {
-            format!("已用 {}", duration(self.started.elapsed().as_secs_f64()))
+            None
         };
-        let speed = if stage.starts_with("model/") && stage != "model/apple" {
-            self.rate()
-                .map(|rate| format!(" · {}/s", bytes(rate as u64)))
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-        if quantity.is_empty() {
-            remaining
-        } else if remaining.is_empty() {
-            format!("{quantity}{speed}")
-        } else {
-            format!("{quantity}{speed} · {remaining}")
+        TransferMetrics {
+            quantity,
+            speed,
+            eta,
+            note: None,
         }
     }
+    pub fn detail(&self, stage: &str, running: bool) -> String {
+        self.transfer_metrics(stage, running).summary()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TransferMetrics {
+    pub quantity: String,
+    pub speed: Option<String>,
+    pub eta: Option<String>,
+    pub note: Option<String>,
+}
+
+impl TransferMetrics {
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if !self.quantity.is_empty() {
+            parts.push(self.quantity.clone());
+        }
+        if let Some(speed) = &self.speed {
+            parts.push(format!("速度 {speed}"));
+        }
+        if let Some(eta) = &self.eta {
+            parts.push(if looks_like_duration(eta) || eta == "计算中" {
+                format!("预计剩余 {eta}")
+            } else {
+                eta.clone()
+            });
+        }
+        if let Some(note) = &self.note {
+            parts.push(note.clone());
+        }
+        parts.join(" · ")
+    }
+}
+
+fn is_byte_download(stage: &str) -> bool {
+    stage.starts_with("model/") && stage != "model/apple"
+}
+
+fn looks_like_duration(value: &str) -> bool {
+    value.contains("秒") || value.contains("分") || value.contains("小时")
 }
 
 pub fn quantity(stage: &str, current: u64, total: u64) -> String {
@@ -213,8 +272,24 @@ pub fn title(stage: &str) -> String {
 fn bytes(value: u64) -> String {
     if value >= 1024 * 1024 * 1024 {
         format!("{:.2} GB", value as f64 / (1024. * 1024. * 1024.))
-    } else {
+    } else if value >= 1024 * 1024 {
         format!("{:.1} MB", value as f64 / (1024. * 1024.))
+    } else if value >= 1024 {
+        format!("{:.0} KB", value as f64 / 1024.)
+    } else {
+        format!("{value} 字节")
+    }
+}
+
+fn throughput(bytes_per_sec: f64) -> String {
+    if bytes_per_sec >= 1024. * 1024. * 1024. {
+        format!("{:.2} GB", bytes_per_sec / (1024. * 1024. * 1024.))
+    } else if bytes_per_sec >= 1024. * 1024. {
+        format!("{:.1} MB", bytes_per_sec / (1024. * 1024.))
+    } else if bytes_per_sec >= 1024. {
+        format!("{:.0} KB", bytes_per_sec / 1024.)
+    } else {
+        format!("{:.0} 字节", bytes_per_sec.max(0.))
     }
 }
 fn duration(seconds: f64) -> String {
@@ -273,10 +348,34 @@ mod tests {
         activity.update(0, 8 * 1024 * 1024, None);
         activity.started = Instant::now() - Duration::from_secs(10);
         activity.update(4 * 1024 * 1024, 8 * 1024 * 1024, None);
+        let metrics = activity.transfer_metrics("model/model.gguf", true);
+        assert_eq!(metrics.quantity, "4.0 MB / 8.0 MB");
+        assert_eq!(metrics.speed.as_deref(), Some("410 KB/s"));
+        assert!(
+            metrics
+                .eta
+                .as_deref()
+                .is_some_and(|eta| eta.ends_with("秒")),
+            "{metrics:?}"
+        );
         let detail = activity.detail("model/model.gguf", true);
         assert!(detail.contains("4.0 MB / 8.0 MB"), "{detail}");
         assert!(
-            detail.contains("MB/s") && detail.contains("约剩"),
+            detail.contains("速度 410 KB/s") && detail.contains("预计剩余"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn model_download_metrics_stay_labeled_while_speed_is_measured() {
+        let mut activity = Activity::new();
+        activity.update(1_048_576, 8 * 1024 * 1024, None);
+        let metrics = activity.transfer_metrics("model/model.gguf", true);
+        assert_eq!(metrics.speed.as_deref(), Some("正在测量"));
+        assert_eq!(metrics.eta.as_deref(), Some("计算中"));
+        let detail = metrics.summary();
+        assert!(
+            detail.contains("速度 正在测量") && detail.contains("计算中"),
             "{detail}"
         );
     }
@@ -295,7 +394,9 @@ mod tests {
         extract.started = Instant::now() - Duration::from_secs(25);
         let detail = extract.detail("scenes/extract", true);
         assert!(detail.contains("已保存 0 / 1 张截图"), "{detail}");
-        assert!(!detail.contains("100%") && !detail.contains("收尾") && !detail.contains("约剩"));
+        assert!(
+            !detail.contains("100%") && !detail.contains("收尾") && !detail.contains("预计剩余")
+        );
         assert_eq!(extract.fraction(), Some(0.));
         extract.update(1, 1, None);
         extract.done = true;
@@ -343,7 +444,7 @@ mod tests {
         let mut item = Activity::new();
         item.update(8192, 0, None);
         assert!(item.fraction().is_none());
-        assert!(!item.detail("model/test", true).contains("约剩"));
+        assert!(!item.detail("model/test", true).contains("预计剩余"));
         assert_eq!(item.detail("model/test", false), "已停止");
     }
 }

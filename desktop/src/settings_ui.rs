@@ -310,6 +310,29 @@ fn settings_form_row(
     })
 }
 
+/// Status rows inside an existing card: label on the shared axis, value trailing.
+/// Do not wrap these in `settings_row`; that would give each item its own surface.
+pub(super) fn settings_status_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    value: impl IntoElement,
+) -> Div {
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .min_h(CONTROL_HEIGHT)
+        .items_center()
+        .gap_4()
+        .child(setting_label(id, label).flex_1().min_w_0().max_w_full())
+        .child(
+            h_flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_end()
+                .child(value),
+        )
+}
+
 pub(super) fn setting_surface() -> Div {
     v_flex()
         .w_full()
@@ -4246,7 +4269,7 @@ impl Desktop {
         }
     }
     fn environment_page(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let mut card = v_flex().w_full().min_w_0().gap_3();
+        let mut card = setting_surface();
         if let Some(e) = &self.environment {
             let provider = self
                 .preferences
@@ -4271,10 +4294,9 @@ impl Desktop {
             .into_iter()
             .enumerate()
             {
-                card = card.child(settings_row(
+                card = card.child(settings_status_row(
                     ("diagnostic-capability", index),
                     label,
-                    "",
                     badge(if optional {
                         BadgeKind::Neutral
                     } else if ready {
@@ -4330,14 +4352,33 @@ impl Desktop {
         }
         let open = self.settings_ui.diagnostics_details_open;
         card = card.child(
-            h_flex().gap_2().flex_wrap().child(
-                control("refresh-environment")
-                    .icon(icons::refresh())
-                    .label("重新检查环境")
-                    .loading(self.environment.is_none())
-                    .disabled(self.environment.is_none())
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_environment(cx))),
-            ),
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .flex_wrap()
+                .child(
+                    control("refresh-environment")
+                        .icon(icons::refresh())
+                        .label("重新检查环境")
+                        .loading(self.environment.is_none())
+                        .disabled(self.environment.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_environment(cx))),
+                )
+                .child(
+                    quiet("toggle-diagnostics-details")
+                        .icon(icons::info())
+                        .label(if open {
+                            "收起诊断详情"
+                        } else {
+                            "查看诊断详情"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings_ui.diagnostics_details_open =
+                                !this.settings_ui.diagnostics_details_open;
+                            cx.notify();
+                        })),
+                ),
         );
         let mut details = v_flex().w_full().min_w_0().gap_6().pt_3();
         if let Some(e) = &self.environment {
@@ -4412,22 +4453,6 @@ impl Desktop {
         details = details.child(self.model_hardware_details(cx));
         group("diagnostics-heading", "运行检查")
             .child(card)
-            .child(self.model_diagnostics_panel(window, cx))
-            .child(
-                quiet("toggle-diagnostics-details")
-                    .icon(icons::info())
-                    .label(if open {
-                        "收起诊断详情"
-                    } else {
-                        "查看诊断详情"
-                    })
-                    .self_start()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_ui.diagnostics_details_open =
-                            !this.settings_ui.diagnostics_details_open;
-                        cx.notify();
-                    })),
-            )
             .child(crate::motion::disclosure(
                 "diagnostics-detail-content",
                 open,
@@ -4435,6 +4460,7 @@ impl Desktop {
                 window,
                 cx,
             ))
+            .child(self.model_diagnostics_panel(window, cx))
     }
     // Wrappers only while the other interface modules are being integrated.
     /// Service editor drafts are deliberately excluded: an existing published service
@@ -4654,6 +4680,29 @@ mod tests {
         assert!(
             source.contains("diagnostic-capability") && source.contains("setting_surface"),
             "application diagnostics must use shared setting cards"
+        );
+        let environment = source
+            .split("fn environment_page")
+            .nth(1)
+            .expect("environment page")
+            .split("fn ordinary_preferences_ready_for_submit")
+            .next()
+            .expect("environment page body");
+        assert!(
+            environment.contains("settings_status_row")
+                && environment.contains("setting_surface()")
+                && !environment.contains("settings_row("),
+            "运行检查 capabilities belong in one card of compact status rows"
+        );
+        let diagnostics = include_str!("model_diagnostics.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production diagnostics");
+        assert!(
+            diagnostics.contains("transfer_status")
+                && diagnostics.contains("transfer_metrics")
+                && !diagnostics.contains("model-download-bar"),
+            "model download must show labeled speed and remaining time, not a title-only line"
         );
     }
 }

@@ -1,5 +1,5 @@
 //! Model evidence is loaded in the background; preparation uses the existing model job.
-use super::{settings_detail_group, settings_detail_row, settings_value};
+use super::{settings_detail_group, settings_detail_row, settings_status_row, settings_value};
 use crate::theme::*;
 use crate::*;
 use course2md::{
@@ -384,15 +384,16 @@ impl Desktop {
             .w_full()
             .min_w_0()
             .gap_3()
-            .child(settings_detail_row(
+            .child(settings_status_row(
                 SharedString::from(format!("model-provider-label-{key}")),
                 "识别方式",
                 settings_value(
                     SharedString::from(format!("model-provider-{key}")),
                     provider_name(provider),
-                ),
+                )
+                .w_auto(),
             ))
-            .child(settings_detail_row(
+            .child(settings_status_row(
                 SharedString::from(format!("model-name-label-{key}")),
                 "模型",
                 settings_value(
@@ -402,7 +403,8 @@ impl Desktop {
                         "qwen3-0.6b" => "Qwen3-ASR 0.6B".to_owned(),
                         _ => request.model.clone(),
                     },
-                ),
+                )
+                .w_auto(),
             ));
         if let Some(issue) = &device_issue {
             view = view
@@ -422,12 +424,10 @@ impl Desktop {
             .and_then(|entry| entry.result.as_ref())
             .and_then(|result| result.as_ref().ok());
         if checking {
-            view = view.child(settings_detail_row(
+            view = view.child(settings_status_row(
                 SharedString::from(format!("model-checking-label-{key}")),
                 "模型状态",
                 h_flex()
-                    .w_full()
-                    .min_w_0()
                     .gap_2()
                     .items_center()
                     .child(crate::motion::spinner(
@@ -439,6 +439,7 @@ impl Desktop {
                             SharedString::from(format!("model-checking-{key}")),
                             "正在检查模型…",
                         )
+                        .w_auto()
                         .role(Role::Status),
                     ),
             ));
@@ -472,20 +473,19 @@ impl Desktop {
                     "这种识别方式不支持当前模型。原选择保留，请明确选择支持的模型。",
                 ),
             };
-            view = view.child(settings_detail_row(
+            view = view.child(settings_status_row(
                 SharedString::from(format!("model-state-label-{key}")),
                 "模型状态",
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(badge(kind).child(label))
-                    .child(settings_value(
-                        SharedString::from(format!("model-state-{key}")),
-                        description,
-                    )),
+                badge(kind).child(label),
             ));
+            view = view.child(
+                settings_value(
+                    SharedString::from(format!("model-state-{key}")),
+                    description,
+                )
+                .text_size(TEXT_AUX)
+                .text_color(color(MUTED)),
+            );
             let detail_key = key.clone();
             let cache_open = self
                 .settings_ui
@@ -664,23 +664,14 @@ impl Desktop {
                 })
                 .enumerate()
             {
-                let label = progress.detail(stage, true);
-                view = view
-                    .child(
-                        settings_value(
-                            ("model-download-progress", index),
-                            format!("{} · {label}", activity::title(stage)),
-                        )
-                        .text_sm(),
-                    )
-                    .when_some(progress.fraction(), |view, fraction| {
-                        view.child(crate::motion::progress(
-                            ("model-download-bar", index),
-                            fraction,
-                            window,
-                            cx,
-                        ))
-                    });
+                view = view.child(crate::motion::transfer_status(
+                    ("model-download-progress", index),
+                    activity::title(stage),
+                    &progress.transfer_metrics(stage, true),
+                    progress.fraction(),
+                    window,
+                    cx,
+                ));
             }
             actions = actions.child(
                 control("stop-model-preparation")
