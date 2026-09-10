@@ -1070,6 +1070,59 @@ impl Store {
         Ok(())
     }
 
+    /// Remove a service from the visible list. In-flight tasks keep a tombstone so
+    /// they cannot dispatch to the deleted configuration.
+    pub fn delete_service(&mut self, service_id: &str) -> Result<()> {
+        let versions: Vec<_> = self
+            .services
+            .versions
+            .values()
+            .filter(|version| version.service_id == service_id)
+            .cloned()
+            .collect();
+        if versions.is_empty() {
+            bail!("找不到此服务");
+        }
+        let credentials: Vec<_> = versions
+            .iter()
+            .filter_map(|version| version.config.credential.clone())
+            .collect();
+        let mut next = self.services.clone();
+        next.stopped
+            .entry(service_id.to_owned())
+            .or_insert_with(now_seconds);
+        next.versions
+            .retain(|_, version| version.service_id != service_id);
+        next.drafts
+            .retain(|_, draft| draft.service_id != service_id);
+        if next
+            .defaults
+            .asr
+            .as_ref()
+            .is_some_and(|id| !next.versions.contains_key(id))
+        {
+            next.defaults.asr = None;
+        }
+        if next
+            .defaults
+            .llm
+            .as_ref()
+            .is_some_and(|id| !next.versions.contains_key(id))
+        {
+            next.defaults.llm = None;
+        }
+        atomic_write_with_retry(
+            &self.root.join("stopped-services").join(service_id),
+            b"deleted\n",
+        )?;
+        self.persist(PreferenceGroup::Services, &next)?;
+        self.services = next;
+        for reference in credentials {
+            let _ = self.vault.remove(&reference);
+        }
+        Ok(())
+    }
+
     pub fn check_dispatch(&self, reference: &str) -> Result<&ServiceVersion> {
         if self.is_blocked(PreferenceGroup::Services) {
             bail!("服务记录暂时不可用，已保留原文件");
@@ -2046,6 +2099,24 @@ mod tests {
         assert!(store.resolve_for_execution(&config, &refs).is_err());
         store.stop_service(&version.service_id).unwrap();
         assert!(store.config_for_preview(&config, &refs).is_err());
+    }
+
+    #[test]
+    fn deleting_a_service_removes_it_from_the_visible_list() {
+        let (_directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "model");
+        let version = store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        store.delete_service(&version.service_id).unwrap();
+        assert!(store.version(&version.id).is_none());
+        assert!(store.default_refs().llm.is_none());
+        assert!(store.check_dispatch(&version.id).is_err());
+        assert!(
+            store
+                .versions()
+                .all(|item| item.service_id != version.service_id)
+        );
     }
 
     #[test]

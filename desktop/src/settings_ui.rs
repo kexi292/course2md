@@ -310,7 +310,7 @@ fn settings_form_row(
     })
 }
 
-fn setting_surface() -> Div {
+pub(super) fn setting_surface() -> Div {
     v_flex()
         .w_full()
         .min_w_0()
@@ -1282,14 +1282,6 @@ impl Desktop {
             .min_w_0()
             .flex_shrink_0()
             .gap_6()
-            .child(
-                text(
-                    "generation-default-scope",
-                    "用于后续生成，也会更新当前未单独修改的选项。",
-                )
-                .text_sm()
-                .text_color(color(MUTED)),
-            )
             .child(languages)
             .child(recognition)
             .child(ai)
@@ -1566,10 +1558,12 @@ impl Desktop {
             ),
         ] {
             let mut section = group(heading_id, heading);
-            for version in latest
-                .values()
-                .filter(|version| version.config.protocol.purpose() == purpose)
-            {
+            for version in latest.values().filter(|version| {
+                version.config.protocol.purpose() == purpose
+                    && !self
+                        .preferences
+                        .service_stopped_in_snapshot(&version.service_id)
+            }) {
                 section = section.child(self.service_card(version, cx));
             }
             section = section.child(
@@ -1721,13 +1715,13 @@ impl Desktop {
                         )
                         .child(
                             quiet(SharedString::from(format!(
-                                "stop-saved-service-{service_id}"
+                                "delete-saved-service-{service_id}"
                             )))
-                            .icon(icons::close())
-                            .label("停用…")
+                            .icon(icons::delete())
+                            .label("删除…")
                             .on_click(cx.listener(
                                 move |this, _, window, cx| {
-                                    this.confirm_stop_service(service_id.clone(), window, cx)
+                                    this.confirm_delete_service(service_id.clone(), window, cx)
                                 },
                             )),
                         )
@@ -3627,7 +3621,7 @@ impl Desktop {
                 })
         });
     }
-    fn confirm_stop_service(
+    fn confirm_delete_service(
         &mut self,
         service_id: String,
         window: &mut Window,
@@ -3667,47 +3661,39 @@ impl Desktop {
             let weak = weak.clone();
             let id = service_id.clone();
             dialog
-                .title("停止使用此服务")
+                .title("删除此服务")
                 .child(text(
-                    "stop-service-consequence",
-                    "将不再通过此服务发送新请求。已经发出的请求无法撤回，收到的结果仍会保存。",
+                    "delete-service-consequence",
+                    "将删除此服务配置。已经发出的请求无法撤回，收到的结果和已有笔记仍会保存。需要时可以重新添加。",
                 ))
                 .when(affected > 0, |dialog| {
                     dialog.child(text(
-                        "stop-service-affected",
+                        "delete-service-affected",
                         format!("有 {affected} 个未完成任务引用此服务；相关后续请求会停止派发。"),
                     ))
                 })
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text("停止使用")
+                        .ok_text("删除服务")
                         .cancel_text("保留服务")
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    weak.update(cx, |this, cx| match this.preferences.stop_service(&id) {
+                    weak.update(cx, |this, cx| match this.preferences.delete_service(&id) {
                         Ok(()) => {
                             this.refresh_dispatch_controls(cx);
                             this.set_settings_feedback(
                                 PreferenceGroup::Services,
-                                "已停止使用此服务".into(),
+                                "已删除此服务".into(),
                                 false,
                             );
                             cx.notify();
                             true
                         }
                         Err(error) => {
-                            let stopped = this.preferences.is_service_stopped(&id);
                             this.set_settings_feedback(
                                 PreferenceGroup::Services,
-                                format!(
-                                    "{}：{error:#}",
-                                    if stopped {
-                                        "已停止派发，停用记录尚未完整保存"
-                                    } else {
-                                        "尚未停止使用此服务"
-                                    }
-                                ),
+                                format!("尚未删除此服务：{error:#}"),
                                 true,
                             );
                             this.refresh_dispatch_controls(cx);
@@ -4285,35 +4271,25 @@ impl Desktop {
             .into_iter()
             .enumerate()
             {
-                card = card.child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .min_h(CONTROL_HEIGHT)
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            setting_label(("diagnostic-capability", index), label)
-                                .flex_1()
-                                .min_w_0(),
-                        )
-                        .child(
-                            badge(if optional {
-                                BadgeKind::Neutral
-                            } else if ready {
-                                BadgeKind::Success
-                            } else {
-                                BadgeKind::Warning
-                            })
-                            .child(if optional {
-                                "当前未使用"
-                            } else if ready {
-                                "可用"
-                            } else {
-                                "待修复"
-                            }),
-                        ),
-                );
+                card = card.child(settings_row(
+                    ("diagnostic-capability", index),
+                    label,
+                    "",
+                    badge(if optional {
+                        BadgeKind::Neutral
+                    } else if ready {
+                        BadgeKind::Success
+                    } else {
+                        BadgeKind::Warning
+                    })
+                    .child(if optional {
+                        "当前未使用"
+                    } else if ready {
+                        "可用"
+                    } else {
+                        "待修复"
+                    }),
+                ));
             }
             if !e.engine {
                 card = card
@@ -4652,5 +4628,32 @@ impl Desktop {
         next.ai_summary = config.llm.summarize;
         next.vision = config.llm.vision;
         self.commit_generation(next, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn generation_settings_omit_the_abrupt_scope_sentence() {
+        let source = include_str!("settings_ui.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production settings");
+        assert!(
+            !source.contains("用于后续生成，也会更新当前未单独修改的选项。"),
+            "generation settings must not lead with that standalone sentence"
+        );
+        assert!(
+            source.contains("delete-saved-service-"),
+            "saved services must offer delete, not disable"
+        );
+        assert!(
+            !source.contains("\"停用…\""),
+            "停用 must not remain a user-facing service action"
+        );
+        assert!(
+            source.contains("diagnostic-capability") && source.contains("setting_surface"),
+            "application diagnostics must use shared setting cards"
+        );
     }
 }

@@ -763,18 +763,22 @@ impl Desktop {
         let request = self.default_model_request();
         let mut current = settings_detail_group("model-diagnostic-default", "默认识别模型");
         if request.provider == AsrProvider::Api {
-            current = current.child(settings_detail_row(
-                "default-asr-provider-label",
-                "识别方式",
-                settings_value("default-asr-is-service", "语音服务，本机模型不参与。"),
+            current = current.child(crate::settings_ui::setting_surface().child(
+                settings_detail_row(
+                    "default-asr-provider-label",
+                    "识别方式",
+                    settings_value("default-asr-is-service", "语音服务，本机模型不参与。"),
+                ),
             ));
         } else {
-            current = current.child(self.model_readiness_panel(
-                request.provider,
-                Some(&request.model),
-                &request.root,
-                window,
-                cx,
+            current = current.child(crate::settings_ui::setting_surface().child(
+                self.model_readiness_panel(
+                    request.provider,
+                    Some(&request.model),
+                    &request.root,
+                    window,
+                    cx,
+                ),
             ));
         }
         let mut view = v_flex().w_full().min_w_0().gap_6().child(current);
