@@ -188,7 +188,9 @@ pub fn install(
     let mut current = ACTIVE
         .get_or_init(|| Mutex::new(None))
         .lock()
-        .map_err(|_| anyhow::anyhow!("任务请求状态锁不可用 / Task request ledger lock unavailable"))?;
+        .map_err(|_| {
+            anyhow::anyhow!("任务请求状态锁不可用 / Task request ledger lock unavailable")
+        })?;
     anyhow::ensure!(
         current.is_none(),
         "同一进程不能同时执行两个任务 / Another task is already active"
@@ -301,7 +303,7 @@ impl Ledger {
             return Err(self.block(
                 "service_stopped",
                 None,
-                "此服务已停止使用，没有发送新请求 / Service stopped; no new request sent",
+                "此服务已删除，没有发送新请求 / Service deleted; no new request sent",
             ));
         }
         Ok(control)

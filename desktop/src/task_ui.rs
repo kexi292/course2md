@@ -1388,11 +1388,17 @@ impl Desktop {
                 authorizations.push(id);
             }
         }
-        let stopped: Vec<_> = self
-            .preferences
-            .versions()
-            .filter(|version| self.preferences.is_service_stopped(&version.service_id))
-            .map(|version| version.id.clone())
+        let retired = self.preferences.retired_version_ids();
+        let stopped: Vec<_> = [&task.plan.asr_service, &task.plan.ai_service]
+            .into_iter()
+            .flatten()
+            .filter(|id| {
+                retired.contains(*id)
+                    || self.preferences.version(id).is_none_or(|version| {
+                        self.preferences.is_service_retired(&version.service_id)
+                    })
+            })
+            .cloned()
             .collect();
         std::fs::create_dir_all(&task.work_dir)?;
         course2md::checkpoint::atomic_write(
@@ -2084,7 +2090,10 @@ impl Desktop {
             self.queue_rem = rem;
         }
         let header = (!tasks.is_empty()).then(|| {
-            let current_count = tasks.iter().filter(|task| task.handled_by.is_none()).count();
+            let current_count = tasks
+                .iter()
+                .filter(|task| task.handled_by.is_none())
+                .count();
             let pending = actionable_task_count(&tasks);
             self.queue_page_header(current_count, pending)
         });

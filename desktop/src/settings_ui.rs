@@ -1583,9 +1583,7 @@ impl Desktop {
             let mut section = group(heading_id, heading);
             for version in latest.values().filter(|version| {
                 version.config.protocol.purpose() == purpose
-                    && !self
-                        .preferences
-                        .service_stopped_in_snapshot(&version.service_id)
+                    && !self.preferences.is_service_retired(&version.service_id)
             }) {
                 section = section.child(self.service_card(version, cx));
             }
@@ -1605,9 +1603,6 @@ impl Desktop {
 
     /// A saved service with capability-specific test results and quiet actions.
     fn service_card(&self, version: &ServiceVersion, cx: &mut Context<Self>) -> Div {
-        let stopped = self
-            .preferences
-            .service_stopped_in_snapshot(&version.service_id);
         let id = version.id.clone();
         let service_id = version.service_id.clone();
         let purpose = version.config.protocol.purpose();
@@ -1654,10 +1649,10 @@ impl Desktop {
                 )
             });
         let mut status_badges = Vec::new();
-        if stopped || tests.is_empty() {
+        if tests.is_empty() {
             status_badges.push(badge(BadgeKind::Neutral).child(text(
                 SharedString::from(format!("saved-service-badge-{id}")),
-                if stopped { "已停用" } else { "尚未测试" },
+                "尚未测试",
             )));
         }
         for (kind, evidence) in &tests {
@@ -1709,46 +1704,44 @@ impl Desktop {
                         .min_w_0()
                         .whitespace_normal(),
                     )
-                    .when(!stopped, |row| {
-                        row.child(
-                            quiet(SharedString::from(format!("test-saved-service-{id}")))
-                                .icon(icons::science())
-                                .label("测试…")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_settings_service_editor(
-                                        purpose,
-                                        Some(test_id.clone()),
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            quiet(SharedString::from(format!("edit-saved-service-{id}")))
-                                .icon(icons::edit())
-                                .label("编辑")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_settings_service_editor(
-                                        purpose,
-                                        Some(edit_id.clone()),
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            quiet(SharedString::from(format!(
-                                "delete-saved-service-{service_id}"
-                            )))
-                            .icon(icons::delete())
-                            .label("删除…")
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.confirm_delete_service(service_id.clone(), window, cx)
-                                },
-                            )),
-                        )
-                    }),
+                    .child(
+                        quiet(SharedString::from(format!("test-saved-service-{id}")))
+                            .icon(icons::science())
+                            .label("测试…")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_settings_service_editor(
+                                    purpose,
+                                    Some(test_id.clone()),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        quiet(SharedString::from(format!("edit-saved-service-{id}")))
+                            .icon(icons::edit())
+                            .label("编辑")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_settings_service_editor(
+                                    purpose,
+                                    Some(edit_id.clone()),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        quiet(SharedString::from(format!(
+                            "delete-saved-service-{service_id}"
+                        )))
+                        .icon(icons::delete())
+                        .label("删除…")
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.confirm_delete_service(service_id.clone(), window, cx)
+                            },
+                        )),
+                    ),
             )
             .child(
                 text(
@@ -1780,20 +1773,14 @@ impl Desktop {
                             .text_size(TEXT_AUX)
                             .text_color(color(MUTED)),
                         )
-                        .when(!stopped, |row| {
-                            row.child(
-                                quiet(SharedString::from(format!("update-default-service-{id}")))
-                                    .icon(icons::check_circle())
-                                    .label("用于以后生成…")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.confirm_default_service(
-                                            default_id.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                        }),
+                        .child(
+                            quiet(SharedString::from(format!("update-default-service-{id}")))
+                                .icon(icons::check_circle())
+                                .label("用于以后生成…")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_default_service(default_id.clone(), window, cx);
+                                })),
+                        ),
                 )
             })
             .child(h_flex().gap_2().flex_wrap().children(status_badges))
@@ -1815,16 +1802,6 @@ impl Desktop {
                     )
                     .text_size(TEXT_AUX)
                     .text_color(color(GRAY)),
-                )
-            })
-            .when(stopped, |card| {
-                card.child(
-                    text(
-                        SharedString::from(format!("stopped-service-recovery-{id}")),
-                        "已停止发送新请求。已有笔记和历史配置保留；需要再次使用时请添加服务。",
-                    )
-                    .text_size(TEXT_AUX)
-                    .text_color(color(MUTED)),
                 )
             })
     }
@@ -1895,18 +1872,13 @@ impl Desktop {
         let editor_version = current
             .as_deref()
             .and_then(|id| self.preferences.version(id))
-            .filter(|version| {
-                !self
-                    .preferences
-                    .service_stopped_in_snapshot(&version.service_id)
-            })
+            .filter(|version| !self.preferences.is_service_retired(&version.service_id))
             .map(|version| version.id.clone());
         let mut latest = BTreeMap::<String, ServiceVersion>::new();
-        for version in self
-            .preferences
-            .versions()
-            .filter(|v| v.config.protocol.purpose() == purpose)
-        {
+        for version in self.preferences.versions().filter(|v| {
+            v.config.protocol.purpose() == purpose
+                && !self.preferences.is_service_retired(&v.service_id)
+        }) {
             if latest
                 .get(&version.service_id)
                 .is_none_or(|old| old.number < version.number)
@@ -1918,6 +1890,7 @@ impl Desktop {
         let current_version = current
             .as_deref()
             .and_then(|id| self.preferences.version(id))
+            .filter(|version| !self.preferences.is_service_retired(&version.service_id))
             .cloned();
         let old_current = current_version
             .as_ref()
@@ -1945,12 +1918,7 @@ impl Desktop {
                 .map(|version| version.config.name.clone())
                 .unwrap_or_else(|| "选择服务".into());
             let detail = current_version.as_ref().map(|version| {
-                let state = if self
-                    .preferences
-                    .service_stopped_in_snapshot(&version.service_id)
-                {
-                    " · 已停用".to_owned()
-                } else if old_current.is_some() {
+                let state = if old_current.is_some() {
                     format!(" · 当前使用旧配置 v{}", version.number)
                 } else {
                     String::new()
@@ -1960,10 +1928,7 @@ impl Desktop {
             let menu_choices = choices
                 .into_iter()
                 .map(|version| {
-                    let stopped = self
-                        .preferences
-                        .service_stopped_in_snapshot(&version.service_id);
-                    let mut state = if let Some(old) = old_current
+                    let state = if let Some(old) = old_current
                         .as_ref()
                         .filter(|old| old.service_id == version.service_id)
                     {
@@ -2003,13 +1968,7 @@ impl Desktop {
                     } else {
                         String::new()
                     };
-                    if stopped {
-                        if !state.is_empty() {
-                            state.push_str(" · ");
-                        }
-                        state.push_str("已停用");
-                    }
-                    (version, stopped, state)
+                    (version, state)
                 })
                 .collect::<Vec<_>>();
             let entity = cx.entity().downgrade();
@@ -2059,7 +2018,7 @@ impl Desktop {
                         menu.min_w(width.min(px(360.)))
                             .max_w(width)
                             .scrollable(true),
-                        |menu, (version, stopped, state)| {
+                        |menu, (version, state)| {
                             let id = version.id.clone();
                             let name = version.config.name.clone();
                             let detail =
@@ -2083,7 +2042,6 @@ impl Desktop {
                                         })
                                 })
                                 .checked(current.as_ref() == Some(&id))
-                                .disabled(*stopped)
                                 .on_click(move |_, _, cx| {
                                     let _ = entity.update(cx, |this, cx| {
                                         let selectable =
@@ -2091,9 +2049,7 @@ impl Desktop {
                                                 version.config.protocol.purpose() == purpose
                                                     && !this
                                                         .preferences
-                                                        .service_stopped_in_snapshot(
-                                                            &version.service_id,
-                                                        )
+                                                        .is_service_retired(&version.service_id)
                                             });
                                         if selectable {
                                             this.bind_service(
@@ -2267,7 +2223,7 @@ impl Desktop {
         };
         let draft = self
             .selected_task_service(purpose)
-            .filter(|version| !self.preferences.is_service_stopped(&version.service_id))
+            .filter(|version| !self.preferences.is_service_retired(&version.service_id))
             .map(|v| ServiceDraft::from_version(&v))
             .unwrap_or_else(|| ServiceDraft::new(purpose));
         self.open_service_draft(draft, Some(target), None, window, cx);
@@ -2293,7 +2249,7 @@ impl Desktop {
             .ai_service
             .as_deref()
             .and_then(|id| self.preferences.version(id))
-            .filter(|version| !self.preferences.is_service_stopped(&version.service_id))
+            .filter(|version| !self.preferences.is_service_retired(&version.service_id))
             .map(ServiceDraft::from_version)
             .unwrap_or_else(|| ServiceDraft::new(ServicePurpose::Ai));
         self.open_service_draft(draft, None, Some((task_id, components)), window, cx);
@@ -2384,10 +2340,7 @@ impl Desktop {
         let also_default = default
             .as_deref()
             .and_then(|id| self.preferences.version(id))
-            .is_none_or(|version| {
-                self.preferences
-                    .service_stopped_in_snapshot(&version.service_id)
-            });
+            .is_none_or(|version| self.preferences.is_service_retired(&version.service_id));
         self.settings_ui.editor = Some(ServiceEditor {
             draft,
             models: Default::default(),
@@ -4674,8 +4627,8 @@ mod tests {
             "saved services must offer delete, not disable"
         );
         assert!(
-            !source.contains("\"停用…\""),
-            "停用 must not remain a user-facing service action"
+            !source.contains("停用") && !source.contains("已停用"),
+            "停用 must not remain a user-facing service concept"
         );
         assert!(
             source.contains("diagnostic-capability") && source.contains("setting_surface"),
