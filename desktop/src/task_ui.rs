@@ -15,9 +15,19 @@ use std::rc::Rc;
 enum QueueItem {
     Unavailable,
     Empty,
-    Header { current_count: usize, pending: usize },
-    GroupLabel { group: TaskGroup, count: usize },
-    HistoryToggle { count: usize, open: Entity<bool> },
+    #[allow(dead_code)]
+    Header {
+        current_count: usize,
+        pending: usize,
+    },
+    GroupLabel {
+        group: TaskGroup,
+        count: usize,
+    },
+    HistoryToggle {
+        count: usize,
+        open: Entity<bool>,
+    },
     Task(usize),
 }
 
@@ -537,7 +547,8 @@ impl RenderOnce for TaskProcessingDetails {
                             this.task_panels_open.insert(key);
                         } else {
                             // Closing unmounts the detail; reopening re-enters.
-                            this.entered.remove(&format!("task-stage-details-{task_id}"));
+                            this.entered
+                                .remove(&format!("task-stage-details-{task_id}"));
                         }
                         cx.notify();
                     });
@@ -622,7 +633,8 @@ impl RenderOnce for TaskRawLogs {
                         if !this.task_panels_open.remove(&key) {
                             this.task_panels_open.insert(key);
                         } else {
-                            this.entered.remove(&format!("task-raw-log-disclosure-{task_id}"));
+                            this.entered
+                                .remove(&format!("task-raw-log-disclosure-{task_id}"));
                         }
                         cx.notify();
                     });
@@ -2033,10 +2045,6 @@ impl Desktop {
             Some(workspace) => {
                 tasks = workspace.state.tasks.clone();
                 tasks.sort_by_key(|task| (task_group(task), std::cmp::Reverse(task.created)));
-                items.push(QueueItem::Header {
-                    current_count: tasks.iter().filter(|task| task.handled_by.is_none()).count(),
-                    pending: actionable_task_count(&tasks),
-                });
                 let history_open = window.use_keyed_state("task-history-open", cx, |_, _| false);
                 let mut previous_group = None;
                 for (index, task) in tasks.iter().enumerate() {
@@ -2075,12 +2083,17 @@ impl Desktop {
             self.queue_list.remeasure();
             self.queue_rem = rem;
         }
+        let header = (!tasks.is_empty()).then(|| {
+            let current_count = tasks.iter().filter(|task| task.handled_by.is_none()).count();
+            let pending = actionable_task_count(&tasks);
+            self.queue_page_header(current_count, pending)
+        });
         let focus: Rc<Vec<FocusHandle>> = Rc::new(self.queue_focus.clone());
         let state = self.queue_list.clone();
         let items = Rc::new(items);
         let tasks = Rc::new(tasks);
         let desktop = cx.weak_entity();
-        list(state, move |index, _window, cx| {
+        let queue = list(state, move |index, _window, cx| {
             let Some(item) = items.get(index) else {
                 return div().into_any_element();
             };
@@ -2095,8 +2108,43 @@ impl Desktop {
         .h_full()
         .flex_1()
         .min_h_0()
-        .pb_6()
-        .into_any_element()
+        .pb_6();
+        v_flex()
+            .w_full()
+            .h_full()
+            .min_h_0()
+            .pt(px(24.))
+            .gap_4()
+            .when_some(header, |view, header| view.child(header))
+            .child(queue)
+            .into_any_element()
+    }
+
+    fn queue_page_header(&self, current_count: usize, pending: usize) -> Div {
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_3()
+            .items_center()
+            .flex_wrap()
+            .child(
+                accessible_text("tasks-page-title", "任务")
+                    .role(Role::Heading)
+                    .text_size(TEXT_DISPLAY)
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
+            .child(
+                accessible_text(
+                    "tasks-page-summary",
+                    if pending == 0 {
+                        format!("{current_count} 个任务 · 全部已结束")
+                    } else {
+                        format!("{current_count} 个任务 · {pending} 个进行中或待处理")
+                    },
+                )
+                .text_sm()
+                .text_color(color(MUTED)),
+            )
     }
 
     /// One row of the virtualized queue: every row keeps the spacing the old
@@ -2153,28 +2201,8 @@ impl Desktop {
             QueueItem::Header {
                 current_count,
                 pending,
-            } => h_flex()
-                .gap_3()
-                .items_center()
-                .flex_wrap()
-                .child(
-                    accessible_text("tasks-page-title", "任务")
-                        .role(Role::Heading)
-                        .text_size(TEXT_DISPLAY)
-                        .font_weight(FontWeight::SEMIBOLD),
-                )
-                .child(
-                    accessible_text(
-                        "tasks-page-summary",
-                        if *pending == 0 {
-                            format!("{current_count} 个任务 · 全部已结束")
-                        } else {
-                            format!("{current_count} 个任务 · {pending} 个进行中或待处理")
-                        },
-                    )
-                    .text_sm()
-                    .text_color(color(MUTED)),
-                )
+            } => self
+                .queue_page_header(*current_count, *pending)
                 .into_any_element(),
             QueueItem::GroupLabel { group, count } => semantic_label(
                 SharedString::from(format!("task-group-{group:?}")),
@@ -2185,7 +2213,7 @@ impl Desktop {
                     _ => icons::check_circle(),
                 },
             )
-            .pt_2()
+            .pt_4()
             .text_size(TEXT_TITLE)
             .into_any_element(),
             QueueItem::HistoryToggle { count, open } => {
@@ -2220,9 +2248,7 @@ impl Desktop {
             .w_full()
             .min_w_0()
             .when(!last, |view| view.mb_4())
-            .when(matches!(item, QueueItem::Header { .. }), |view| {
-                view.pt(px(24.))
-            })
+            .when(matches!(item, QueueItem::Header { .. }), |view| view.pt_2())
             .child(content)
             .id(("queue-item", index))
             .tab_stop(false);
@@ -2328,8 +2354,7 @@ impl Desktop {
                                 state.selected_task = None;
                                 Ok(())
                             }) {
-                                this.workspace_error =
-                                    Some(format!("任务选择尚未保存：{error:#}"));
+                                this.workspace_error = Some(format!("任务选择尚未保存：{error:#}"));
                             }
                         }
                         cx.notify();
@@ -2465,16 +2490,13 @@ impl Desktop {
                     control(SharedString::from(format!("followup-{id}")))
                         .icon(icons::arrow_forward())
                         .label("查看后续处理任务")
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.select_task(&next, cx)),
-                        ),
+                        .on_click(cx.listener(move |this, _, _, cx| this.select_task(&next, cx))),
                 );
             }
             if matches!(task.state, TaskState::Running | TaskState::Queued)
                 || (self.active_task.as_deref() == Some(&id) && self.job.is_some())
             {
-                let cancelling =
-                    task.state == TaskState::Pausing && task.intent == Intent::Cancel;
+                let cancelling = task.state == TaskState::Pausing && task.intent == Intent::Cancel;
                 actions = actions
                     .when(!cancelling, |actions| {
                         actions.child(
@@ -2523,9 +2545,7 @@ impl Desktop {
                         .label("继续任务")
                         .on_click(cx.listener({
                             let id = id.clone();
-                            move |this, _, _, cx| {
-                                this.set_task_intent(id.clone(), Intent::Run, cx)
-                            }
+                            move |this, _, _, cx| this.set_task_intent(id.clone(), Intent::Run, cx)
                         })),
                 );
             }
@@ -2675,13 +2695,13 @@ impl Desktop {
     fn clear_task_card_motion(&mut self, id: &str) {
         self.entered.remove(&format!("task-detail-{id}"));
         self.entered.remove(&format!("task-stage-details-{id}"));
-        self.entered.remove(&format!("task-raw-log-disclosure-{id}"));
+        self.entered
+            .remove(&format!("task-raw-log-disclosure-{id}"));
         self.task_panels_open
             .remove(&format!("task-stage-details-state-{id}"));
         self.task_panels_open
             .remove(&format!("task-raw-log-state-{id}"));
     }
-
 
     /// Live and retained stages use the same labels, status column and icon slot.
     fn task_stage_rows(&self, task: &TaskRecord) -> Vec<TaskStage> {
