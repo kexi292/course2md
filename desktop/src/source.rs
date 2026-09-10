@@ -350,6 +350,7 @@ pub fn video_links(input: &str) -> Vec<String> {
 }
 
 /// Compatibility wrapper. Call `probe` in the UI to present collection candidates.
+#[cfg(test)]
 pub fn inspect(input: String, online: bool, cancel: Arc<AtomicBool>) -> Result<Source> {
     match probe(input, online, cancel)? {
         SourceProbe::Single(source) => Ok(source),
@@ -876,6 +877,7 @@ pub fn read_subtitle(
 }
 
 /// An attached file can have any name/location; it never replaces the video.
+#[cfg(test)]
 pub fn attach_subtitle(
     source: &Source,
     path: PathBuf,

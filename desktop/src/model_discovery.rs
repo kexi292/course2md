@@ -124,6 +124,7 @@ impl Request {
         })
     }
 
+    #[cfg(test)]
     pub fn key(&self) -> &RequestKey {
         &self.key
     }

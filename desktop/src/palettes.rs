@@ -140,21 +140,6 @@ impl PaletteId {
         }
     }
 
-    pub fn description(self) -> &'static str {
-        match self {
-            Self::Paper => "纸白 · 清爽蓝",
-            Self::Ink => "墨色 · 柔和蓝",
-            Self::NordSnow => "雪原 · 冷灰蓝",
-            Self::Nord => "极夜 · 冰川蓝",
-            Self::TokyoDay => "晴昼 · 靛蓝",
-            Self::TokyoNight => "夜景 · 霓虹蓝",
-            Self::CatppuccinLatte => "拿铁 · 奶白",
-            Self::CatppuccinFrappe => "冰沙 · 灰紫",
-            Self::CatppuccinMacchiato => "玛奇朵 · 深紫",
-            Self::CatppuccinMocha => "摩卡 · 深夜紫",
-        }
-    }
-
     pub fn is_dark(self) -> bool {
         !matches!(
             self,

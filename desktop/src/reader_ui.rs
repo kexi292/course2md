@@ -688,9 +688,7 @@ fn note_capture_position(
         -9.
     });
     Some(workspace::ReadingPosition {
-        paragraph: blocks
-            .get(index)
-            .map(|block| block_anchor(block, index)),
+        paragraph: blocks.get(index).map(|block| block_anchor(block, index)),
         seconds: block_time(blocks, index),
         offset,
         within,
@@ -719,9 +717,9 @@ fn note_restore_target(
         .and_then(|(block, byte)| layout.search_within(block, byte))
         .or_else(|| {
             block.and_then(|block| {
-                layout.item_height(block).map(|height| {
-                    -nav::restore_within(position.fraction, position.within, height)
-                })
+                layout
+                    .item_height(block)
+                    .map(|height| -nav::restore_within(position.fraction, position.within, height))
             })
         });
     Some((item_ix, offset))
@@ -1201,9 +1199,10 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                 anchor,
                 seconds,
             } => {
-                let url = flow.source.as_ref().and_then(|source| {
-                    seconds.and_then(|seconds| nav::seek_url(source, seconds))
-                });
+                let url = flow
+                    .source
+                    .as_ref()
+                    .and_then(|source| seconds.and_then(|seconds| nav::seek_url(source, seconds)));
                 let marks = flow.highlight_runs(index);
                 let outlined = flow.chapter_title(*seconds).filter(|_| text != "摘要");
                 // 无大纲且标题文本就是时间戳时，chip 独自承担章节标题。
@@ -1267,17 +1266,19 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                             })
                             .children(heading)
                             .when_some(url, |row, url| {
-                                row.child(flow.reveal(
-                                    ("reveal-seek", index).into(),
-                                    (quiet(("seek", index))
-                                        .icon(icons::play_arrow())
-                                        .label("从此处观看")
-                                        .min_h(rems(1.6))
-                                        .accessibility_label(format!("在原视频打开 {text}"))
-                                        .on_click(move |_, _, cx| cx.open_url(&url)))
-                                    .into_any_element(),
-                                    false,
-                                ))
+                                row.child(
+                                    flow.reveal(
+                                        ("reveal-seek", index).into(),
+                                        (quiet(("seek", index))
+                                            .icon(icons::play_arrow())
+                                            .label("从此处观看")
+                                            .min_h(rems(1.6))
+                                            .accessibility_label(format!("在原视频打开 {text}"))
+                                            .on_click(move |_, _, cx| cx.open_url(&url)))
+                                        .into_any_element(),
+                                        false,
+                                    ),
+                                )
                             }),
                     )
                     .children(
@@ -1291,11 +1292,7 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                                     ("missing-body-image", frame_index),
                                     format!(
                                         "{}无法读取。对应正文保留在下方。",
-                                        frame_label(
-                                            &preview.course.title,
-                                            frame,
-                                            frame_index
-                                        )
+                                        frame_label(&preview.course.title, frame, frame_index)
                                     ),
                                 )
                                 .text_sm()
@@ -1330,9 +1327,7 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                         .into_any_element();
                 }
                 let label = frame
-                    .map(|frame| {
-                        frame_label(&preview.course.title, frame, frame_index.unwrap())
-                    })
+                    .map(|frame| frame_label(&preview.course.title, frame, frame_index.unwrap()))
                     .unwrap_or_else(|| format!("{}，正文图片", preview.course.title));
                 let aspect_ratio = frame
                     .filter(|frame| frame.width > 0 && frame.height > 0)
@@ -1345,55 +1340,54 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                 v_flex()
                     .w_full()
                     .gap_2()
-                    .child(flow.reveal(
-                        ("reveal-note-image", index).into(),
-                        control(("note-image", index))
-                            .ghost()
-                            .p_0()
-                            .w(px((available_height * 0.32).min(224.) * aspect_ratio))
-                            .max_w_full()
-                            .h_auto()
-                            .min_h(px(0.))
-                            .border_0()
-                            .rounded(RADIUS_SMALL)
-                            .aspect_ratio(aspect_ratio)
-                            .accessibility_label(format!("放大{label}"))
-                            .tooltip("点击放大截图")
-                            .disabled(frame_index.is_none())
-                            .child(
-                                img(path.clone())
-                                    .size_full()
-                                    .rounded(RADIUS_SMALL)
-                                    .object_fit(ObjectFit::Contain)
-                                    .with_fallback(|| {
-                                        theme::accessible_text(
-                                            "failed-reader-image",
-                                            "这张截图无法读取；对应正文仍可阅读。",
-                                        )
-                                        .into_any_element()
-                                    }),
-                            )
-                            .on_click(move |_, window, cx| {
-                                if let Some(index) = frame_index {
-                                    let _ = desktop.update(cx, |this, cx| {
-                                        this.open_reader_image(index, window, cx);
-                                    });
-                                }
-                            })
-                            .into_any_element(),
-                        true,
-                    ))
+                    .child(
+                        flow.reveal(
+                            ("reveal-note-image", index).into(),
+                            control(("note-image", index))
+                                .ghost()
+                                .p_0()
+                                .w(px((available_height * 0.32).min(224.) * aspect_ratio))
+                                .max_w_full()
+                                .h_auto()
+                                .min_h(px(0.))
+                                .border_0()
+                                .rounded(RADIUS_SMALL)
+                                .aspect_ratio(aspect_ratio)
+                                .accessibility_label(format!("放大{label}"))
+                                .tooltip("点击放大截图")
+                                .disabled(frame_index.is_none())
+                                .child(
+                                    img(path.clone())
+                                        .size_full()
+                                        .rounded(RADIUS_SMALL)
+                                        .object_fit(ObjectFit::Contain)
+                                        .with_fallback(|| {
+                                            theme::accessible_text(
+                                                "failed-reader-image",
+                                                "这张截图无法读取；对应正文仍可阅读。",
+                                            )
+                                            .into_any_element()
+                                        }),
+                                )
+                                .on_click(move |_, window, cx| {
+                                    if let Some(index) = frame_index {
+                                        let _ = desktop.update(cx, |this, cx| {
+                                            this.open_reader_image(index, window, cx);
+                                        });
+                                    }
+                                })
+                                .into_any_element(),
+                            true,
+                        ),
+                    )
                     .when_some(
                         frame.and_then(|frame| frame.caption.as_ref()),
                         |figure, caption| {
                             figure.child(
-                                theme::accessible_text(
-                                    ("figure-caption", index),
-                                    caption.clone(),
-                                )
-                                .text_size(TEXT_AUX)
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(color(GRAY)),
+                                theme::accessible_text(("figure-caption", index), caption.clone())
+                                    .text_size(TEXT_AUX)
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(color(GRAY)),
                             )
                         },
                     )
@@ -1618,7 +1612,9 @@ impl Desktop {
             cx.notify();
             return;
         };
-        let search_key = search.as_ref().map(|found| (found.block, found.range.start));
+        let search_key = search
+            .as_ref()
+            .map(|found| (found.block, found.range.start));
         let target = note_restore_target(
             &items,
             &preview.blocks,
@@ -2144,16 +2140,6 @@ impl Desktop {
             });
         })
         .detach();
-    }
-    pub fn export_note(
-        &mut self,
-        format: course2md::config::OutputFormat,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(preview) = &self.preview {
-            self.export_course(preview.course.clone(), format, window, cx);
-        }
     }
     pub fn export_course(
         &mut self,
@@ -5608,7 +5594,9 @@ mod flow_tests {
         let note = blocks(200);
         let items = note_items(&note, false);
         let list = ListState::new(items.len(), ListAlignment::Top, px(1000.));
-        let heights: Vec<f32> = (0..items.len()).map(|i| 40. + (i % 7) as f32 * 30.).collect();
+        let heights: Vec<f32> = (0..items.len())
+            .map(|i| 40. + (i % 7) as f32 * 30.)
+            .collect();
 
         // The document top is a boundary, not the first paragraph.
         assert_eq!(
@@ -5818,9 +5806,14 @@ mod flow_tests {
         }
 
         fn restore_rough(&mut self, position: &crate::workspace::ReadingPosition) {
-            let (item_ix, offset) =
-                note_restore_target(&self.items, &self.blocks, position, None, &self.layout.borrow())
-                    .unwrap();
+            let (item_ix, offset) = note_restore_target(
+                &self.items,
+                &self.blocks,
+                position,
+                None,
+                &self.layout.borrow(),
+            )
+            .unwrap();
             assert_eq!(offset, None, "the scrolled-away item is unmeasured");
             self.list.scroll_to(ListOffset {
                 item_ix,
@@ -5829,9 +5822,14 @@ mod flow_tests {
         }
 
         fn restore_precise(&mut self, position: &crate::workspace::ReadingPosition) {
-            let (item_ix, offset) =
-                note_restore_target(&self.items, &self.blocks, position, None, &self.layout.borrow())
-                    .unwrap();
+            let (item_ix, offset) = note_restore_target(
+                &self.items,
+                &self.blocks,
+                position,
+                None,
+                &self.layout.borrow(),
+            )
+            .unwrap();
             let offset = offset.expect("the landed item is measured by now");
             self.list.scroll_to(ListOffset {
                 item_ix,

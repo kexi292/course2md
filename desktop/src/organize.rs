@@ -136,6 +136,7 @@ pub fn recover_titles(root: &Path, reset: bool) -> Result<PathBuf> {
     recover_metadata::<Titles>(root, TITLES, reset).map(|(_, preserved)| preserved)
 }
 
+#[cfg(test)]
 pub fn title_alias(root: &Path, course: &Path) -> Result<Option<String>> {
     Ok(title_aliases(root)?
         .get(&relative_key(root, course)?)
@@ -219,6 +220,7 @@ impl Library {
         self.folders.remove(&id);
         self.courses.retain(|_, folder| *folder != id);
     }
+    #[cfg(test)]
     pub fn folder(&self, root: &Path, course: &Path) -> Option<u64> {
         self.folder_key(&relative_key(root, course).ok()?)
     }

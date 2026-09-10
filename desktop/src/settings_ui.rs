@@ -458,13 +458,6 @@ fn settings_tab_label(index: usize) -> &'static str {
     ["生成笔记", "服务与账号", "存储", "应用", "外观"][index.min(4)]
 }
 
-fn settings_tab_position(index: usize) -> usize {
-    SETTINGS_TABS
-        .iter()
-        .position(|(tab, _)| *tab == index)
-        .unwrap_or(0)
-}
-
 fn group(id: &'static str, title: &'static str) -> Div {
     let icon = match id {
         "language-settings" => icons::subtitles(),
@@ -3763,18 +3756,6 @@ impl Desktop {
             cx.notify();
             return;
         }
-        let mut next = self.generation_edit_base();
-        next.preferred_subtitle_languages = languages;
-        next.subtitle_languages_draft = None;
-        self.commit_generation(next, cx);
-    }
-    /// The workbench box's language capsule commits through the same validated
-    /// path as the settings form.
-    pub(crate) fn choose_preferred_subtitle_languages(
-        &mut self,
-        languages: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
         let mut next = self.generation_edit_base();
         next.preferred_subtitle_languages = languages;
         next.subtitle_languages_draft = None;

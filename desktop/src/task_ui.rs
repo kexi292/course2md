@@ -15,19 +15,8 @@ use std::rc::Rc;
 enum QueueItem {
     Unavailable,
     Empty,
-    #[allow(dead_code)]
-    Header {
-        current_count: usize,
-        pending: usize,
-    },
-    GroupLabel {
-        group: TaskGroup,
-        count: usize,
-    },
-    HistoryToggle {
-        count: usize,
-        open: Entity<bool>,
-    },
+    GroupLabel { group: TaskGroup, count: usize },
+    HistoryToggle { count: usize, open: Entity<bool> },
     Task(usize),
 }
 
@@ -38,7 +27,6 @@ impl QueueItem {
         match self {
             QueueItem::Unavailable => "unavailable".to_owned(),
             QueueItem::Empty => "empty".to_owned(),
-            QueueItem::Header { .. } => "header".to_owned(),
             QueueItem::GroupLabel { group, .. } => format!("group-{group:?}"),
             QueueItem::HistoryToggle { .. } => "history-toggle".to_owned(),
             QueueItem::Task(index) => format!("task-{}", tasks[*index].id),
@@ -2207,12 +2195,6 @@ impl Desktop {
                         })),
                 )
                 .into_any_element(),
-            QueueItem::Header {
-                current_count,
-                pending,
-            } => self
-                .queue_page_header(*current_count, *pending)
-                .into_any_element(),
             QueueItem::GroupLabel { group, count } => semantic_label(
                 SharedString::from(format!("task-group-{group:?}")),
                 format!("{} · {count}", group.label()),
@@ -2257,7 +2239,6 @@ impl Desktop {
             .w_full()
             .min_w_0()
             .when(!last, |view| view.mb_4())
-            .when(matches!(item, QueueItem::Header { .. }), |view| view.pt_2())
             .child(content)
             .id(("queue-item", index))
             .tab_stop(false);
@@ -3549,10 +3530,6 @@ mod tests {
             let tasks = vec![task_record("task-a"), task_record("task-b")];
             let open = cx.new(|_| false);
             let items = [
-                QueueItem::Header {
-                    current_count: 2,
-                    pending: 1,
-                },
                 QueueItem::GroupLabel {
                     group: TaskGroup::Processing,
                     count: 1,

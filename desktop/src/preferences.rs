@@ -1319,6 +1319,7 @@ impl Store {
 
     /// Async tests may finish after an edit. Only evidence for this exact content is attached
     /// to the current draft; stale results cannot label replacement fields as tested.
+    #[cfg(test)]
     pub fn record_draft_test(
         &mut self,
         draft_id: &str,

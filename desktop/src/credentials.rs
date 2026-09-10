@@ -55,19 +55,22 @@ fn validate_reference(reference: &str) -> Result<()> {
     Ok(())
 }
 
-/// In-memory isolated store for tests, preview sessions and caller-controlled temporary use.
+/// In-memory isolated store for tests and caller-controlled temporary use.
 /// It intentionally does not provide a plaintext file fallback.
+#[cfg(test)]
 #[derive(Default)]
 pub struct MemoryCredentialVault {
     values: Mutex<BTreeMap<CredentialRef, Zeroizing<String>>>,
 }
 
+#[cfg(test)]
 impl MemoryCredentialVault {
     pub fn new() -> Self {
         Self::default()
     }
 }
 
+#[cfg(test)]
 impl CredentialVault for MemoryCredentialVault {
     fn insert(&self, secret: Secret) -> Result<CredentialRef> {
         if secret.is_empty() {

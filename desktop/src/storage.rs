@@ -134,6 +134,7 @@ impl LibraryAccess {
 
 /// A missing or unreadable location is an unknown part of the library, not an
 /// empty collection. Keep that distinction when presenting search results.
+#[cfg(test)]
 pub fn library_access(roots: impl IntoIterator<Item = PathBuf>) -> LibraryAccess {
     let mut access = LibraryAccess {
         available: Vec::new(),

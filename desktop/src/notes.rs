@@ -252,7 +252,6 @@ pub struct Preview {
     pub course: Course,
     pub blocks: Vec<PreviewBlock>,
     pub frames: Vec<PathBuf>,
-    pub has_markdown: bool,
     pub outputs: Vec<String>,
     pub plain_text: String,
     pub markdown_text: String,
@@ -359,7 +358,6 @@ pub fn read_preview(mut course: Course) -> Result<Preview> {
             course,
             blocks,
             frames,
-            has_markdown: true,
             outputs: manifest.outputs,
             plain_text,
             markdown_text,
@@ -379,8 +377,7 @@ pub fn without_image_references(markdown: &str) -> String {
     let mut ranges = Vec::new();
     let mut definitions = Vec::new();
     for (event, range) in
-        pulldown_cmark::Parser::new_ext(markdown, pulldown_cmark::Options::all())
-            .into_offset_iter()
+        pulldown_cmark::Parser::new_ext(markdown, pulldown_cmark::Options::all()).into_offset_iter()
     {
         if let Event::Start(Tag::Image { id, .. }) = event {
             ranges.push(range);

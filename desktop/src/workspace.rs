@@ -131,6 +131,7 @@ impl Draft {
         }
     }
 
+    #[cfg(test)]
     pub fn accept_source(&mut self, revision: u64, source: crate::source::Source) -> bool {
         if self.revision != revision {
             return false;

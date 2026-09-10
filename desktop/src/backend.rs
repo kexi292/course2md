@@ -592,7 +592,6 @@ mod tests {
         })
         .unwrap();
         assert!(preview.outputs.is_empty());
-        assert!(preview.has_markdown);
         assert!(preview.plain_text.contains("Manually added explanation."));
     }
 
