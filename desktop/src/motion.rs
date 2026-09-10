@@ -1,5 +1,5 @@
 //! Small, shared motion vocabulary: entrances, retargetable values and live work.
-use crate::activity::TransferMetrics;
+use crate::activity::{TransferEta, TransferMetrics};
 use crate::theme::{
     ACCENT, GRAY, INK, MUTED, PROGRESS_FILL, PROGRESS_TRACK, TEXT_AUX, TEXT_BODY, accessible_text,
     color,
@@ -170,7 +170,7 @@ pub fn transfer_status(
             .text_color(color(INK)),
         );
     }
-    if metrics.speed.is_some() || metrics.eta.as_deref().is_some_and(looks_like_remaining) {
+    if metrics.speed.is_some() || matches!(&metrics.eta, Some(TransferEta::Remaining(_))) {
         let mut meters = h_flex().w_full().min_w_0().gap_6().flex_wrap();
         if let Some(speed) = &metrics.speed {
             meters = meters.child(transfer_meter(
@@ -179,25 +179,24 @@ pub fn transfer_status(
                 speed.clone(),
             ));
         }
-        if let Some(eta) = &metrics.eta {
-            if looks_like_remaining(eta) {
-                meters = meters.child(transfer_meter(
-                    SharedString::from(format!("{id:?}-eta")),
-                    "预计剩余",
-                    eta.clone(),
-                ));
-            }
+        if let Some(TransferEta::Remaining(value)) = &metrics.eta {
+            meters = meters.child(transfer_meter(
+                SharedString::from(format!("{id:?}-eta")),
+                "预计剩余",
+                value.clone(),
+            ));
         }
         view = view.child(meters);
     }
-    if let Some(eta) = &metrics.eta {
-        if !looks_like_remaining(eta) {
-            view = view.child(
-                accessible_text(SharedString::from(format!("{id:?}-eta-note")), eta.clone())
-                    .text_size(TEXT_AUX)
-                    .text_color(color(MUTED)),
-            );
-        }
+    if let Some(TransferEta::Note(value)) = &metrics.eta {
+        view = view.child(
+            accessible_text(
+                SharedString::from(format!("{id:?}-eta-note")),
+                value.clone(),
+            )
+            .text_size(TEXT_AUX)
+            .text_color(color(MUTED)),
+        );
     }
     if let Some(note) = &metrics.note {
         view = view.child(
@@ -236,10 +235,6 @@ fn transfer_meter(
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(color(INK)),
         )
-}
-
-fn looks_like_remaining(value: &str) -> bool {
-    value.contains("秒") || value.contains("分") || value.contains("小时") || value == "计算中"
 }
 
 pub fn disclosure(

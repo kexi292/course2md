@@ -105,17 +105,19 @@ impl Activity {
         });
         let eta = if self.total > self.current {
             match rate {
-                Some(rate) => Some(duration((self.total - self.current) as f64 / rate)),
-                None if byte_download => Some("计算中".into()),
+                Some(rate) => Some(TransferEta::Remaining(duration(
+                    (self.total - self.current) as f64 / rate,
+                ))),
+                None if byte_download => Some(TransferEta::Remaining("计算中".into())),
                 None => None,
             }
         } else if self.total > 0 {
-            Some("收尾中…".into())
+            Some(TransferEta::Note("收尾中…".into()))
         } else if !byte_download {
-            Some(format!(
+            Some(TransferEta::Note(format!(
                 "已用 {}",
                 duration(self.started.elapsed().as_secs_f64())
-            ))
+            )))
         } else {
             None
         };
@@ -131,11 +133,20 @@ impl Activity {
     }
 }
 
+/// A labeled 预计剩余 value, or a loose note shown without the label.
+/// The producer knows which it is emitting; consumers must not re-infer it
+/// from the wording.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransferEta {
+    Remaining(String),
+    Note(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransferMetrics {
     pub quantity: String,
     pub speed: Option<String>,
-    pub eta: Option<String>,
+    pub eta: Option<TransferEta>,
     pub note: Option<String>,
 }
 
@@ -149,10 +160,9 @@ impl TransferMetrics {
             parts.push(format!("速度 {speed}"));
         }
         if let Some(eta) = &self.eta {
-            parts.push(if looks_like_duration(eta) || eta == "计算中" {
-                format!("预计剩余 {eta}")
-            } else {
-                eta.clone()
+            parts.push(match eta {
+                TransferEta::Remaining(value) => format!("预计剩余 {value}"),
+                TransferEta::Note(value) => value.clone(),
             });
         }
         if let Some(note) = &self.note {
@@ -164,10 +174,6 @@ impl TransferMetrics {
 
 fn is_byte_download(stage: &str) -> bool {
     stage.starts_with("model/") && stage != "model/apple"
-}
-
-fn looks_like_duration(value: &str) -> bool {
-    value.contains("秒") || value.contains("分") || value.contains("小时")
 }
 
 pub fn quantity(stage: &str, current: u64, total: u64) -> String {
@@ -352,10 +358,7 @@ mod tests {
         assert_eq!(metrics.quantity, "4.0 MB / 8.0 MB");
         assert_eq!(metrics.speed.as_deref(), Some("410 KB/s"));
         assert!(
-            metrics
-                .eta
-                .as_deref()
-                .is_some_and(|eta| eta.ends_with("秒")),
+            matches!(&metrics.eta, Some(TransferEta::Remaining(value)) if value.ends_with("秒")),
             "{metrics:?}"
         );
         let detail = activity.detail("model/model.gguf", true);
@@ -372,7 +375,7 @@ mod tests {
         activity.update(1_048_576, 8 * 1024 * 1024, None);
         let metrics = activity.transfer_metrics("model/model.gguf", true);
         assert_eq!(metrics.speed.as_deref(), Some("正在测量"));
-        assert_eq!(metrics.eta.as_deref(), Some("计算中"));
+        assert_eq!(metrics.eta, Some(TransferEta::Remaining("计算中".into())));
         let detail = metrics.summary();
         assert!(
             detail.contains("速度 正在测量") && detail.contains("计算中"),
