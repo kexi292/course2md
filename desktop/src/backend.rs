@@ -530,23 +530,54 @@ mod tests {
     }
 
     #[test]
-    fn legacy_run_format_flags_do_not_hide_readable_manual_notes() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("course.md"),
-            "# Updated notes\n\nManually added explanation.",
-        )
+    fn notes_without_requested_file_exports_stay_readable() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let sections = vec![course2md::timeline::Section {
+            t: 0.,
+            end: 1.,
+            image: String::new(),
+            speech: vec![course2md::timeline::TranscriptEvent {
+                start: 0.,
+                end: 1.,
+                text: "Manually added explanation.".into(),
+                raw: None,
+            }],
+        }];
+        let target = course2md::artifact::Target {
+            task_id: "task-1".into(),
+            course_id: "course-1".into(),
+            source_id: "source-1".into(),
+            version_id: "v1".into(),
+            course_dir: root.path().join("note"),
+        };
+        let meta = course2md::fetch::VideoMeta {
+            title: "course".into(),
+            uploader: String::new(),
+            duration: 0.,
+            webpage_url: String::new(),
+            extractor: "local".into(),
+            id: "source".into(),
+        };
+        let manifest = smol::block_on(course2md::artifact::publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[],
+            Default::default(),
+        ))
         .unwrap();
-        std::fs::write(dir.path().join("structured.json"), "{}").unwrap();
-        std::fs::write(dir.path().join("run.json"), r#"{"formats":["md"]}"#).unwrap();
         let preview = read_preview(Course {
-            dir: dir.path().into(),
+            dir: target.version_dir(),
             title: "course".into(),
             modified: SystemTime::now(),
             slides: 0,
-            segments: 0,
+            segments: 1,
             thumbnail: None,
-            manifest: None,
+            manifest: Some(manifest),
             warning: None,
         })
         .unwrap();
@@ -558,19 +589,70 @@ mod tests {
     #[test]
     fn preview_resolves_only_images_inside_the_course() {
         let dir = tempfile::tempdir().unwrap();
-        let course_dir = dir.path().join("course");
-        std::fs::create_dir_all(course_dir.join("frames")).unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(work.join("frames")).unwrap();
         image::RgbImage::new(2, 2)
-            .save(course_dir.join("frames/slide.jpg"))
+            .save(work.join("frames/slide.jpg"))
             .unwrap();
         std::fs::write(dir.path().join("outside.jpg"), b"private").unwrap();
+        let sections = vec![course2md::timeline::Section {
+            t: 0.,
+            end: 1.,
+            image: "frames/slide.jpg".into(),
+            speech: vec![course2md::timeline::TranscriptEvent {
+                start: 0.,
+                end: 1.,
+                text: "Readable explanation.".into(),
+                raw: None,
+            }],
+        }];
+        let target = course2md::artifact::Target {
+            task_id: "task-1".into(),
+            course_id: "course-1".into(),
+            source_id: "source-1".into(),
+            version_id: "v1".into(),
+            course_dir: dir.path().join("course"),
+        };
+        let meta = course2md::fetch::VideoMeta {
+            title: "Course".into(),
+            uploader: String::new(),
+            duration: 0.,
+            webpage_url: String::new(),
+            extractor: "local".into(),
+            id: "source".into(),
+        };
+        smol::block_on(course2md::artifact::publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[],
+            Default::default(),
+        ))
+        .unwrap();
+        let version = target.version_dir();
+        // Tamper with the published records: the frame reference now escapes the note.
+        let mut manifest: course2md::artifact::Manifest =
+            serde_json::from_slice(&std::fs::read(version.join("manifest.json")).unwrap())
+                .unwrap();
+        manifest.frames[0].image = "../../outside.jpg".into();
         std::fs::write(
-            course_dir.join("course.md"),
-            "# Course\n\nReadable explanation.\n![slide](frames/slide.jpg)\n![escape](frames/../../outside.jpg)\n",
+            version.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut document: course2md::artifact::Document =
+            serde_json::from_slice(&std::fs::read(version.join("document.json")).unwrap())
+                .unwrap();
+        document.sections[0].image = "../../outside.jpg".into();
+        std::fs::write(
+            version.join("document.json"),
+            serde_json::to_vec_pretty(&document).unwrap(),
         )
         .unwrap();
         let preview = read_preview(Course {
-            dir: course_dir,
+            dir: version,
             title: "Course".into(),
             modified: SystemTime::now(),
             slides: 0,
@@ -586,7 +668,7 @@ mod tests {
                 .iter()
                 .filter(|b| matches!(b, PreviewBlock::Image(_)))
                 .count(),
-            1
+            0
         );
         assert!(
             !preview

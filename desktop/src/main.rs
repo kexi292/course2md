@@ -13,7 +13,6 @@ mod focus_scroll;
 #[allow(dead_code)]
 mod icons;
 mod import_ui;
-mod legacy_settings;
 mod library_ui;
 mod model_discovery;
 mod motion;
@@ -196,7 +195,6 @@ struct Desktop {
     library_root: PathBuf,
     library_error: Option<String>,
     library_issues: Vec<String>,
-    library_materials: Vec<PathBuf>,
     library_indexes: BTreeMap<PathBuf, organize::Library>,
     library_view_cache: course_library::LibraryViewCache,
     library_generation: u64,
@@ -223,7 +221,6 @@ struct Desktop {
     scrolls: [ScrollHandle; 5],
     inputs: BTreeMap<Field, Entity<InputState>>,
     config: course2md::settings::ConfigFile,
-    config_error: bool,
     task_options: ConversionOptions,
     settings_options: ConversionOptions,
     job: Option<Job>,
@@ -363,10 +360,10 @@ impl Desktop {
     }
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let configuration_directory = course2md::config::config_dir();
-        let legacy = legacy_settings::Inspection::inspect(course2md::settings::config_path());
-        let config_error = legacy.problem.is_some();
         let message = None;
-        let output = legacy_settings::startup_output(&configuration_directory, &legacy);
+        // Fresh installs bootstrap managed local storage so the welcome screen does not
+        // synchronously access a protected Documents folder before the user chooses a location.
+        let output = configuration_directory.join("desktop-local-library");
         let preferences = preferences::Store::open(
             configuration_directory.join("desktop-preferences"),
             credentials::system_vault(),
@@ -548,7 +545,6 @@ impl Desktop {
             library_root: output,
             library_error: None,
             library_issues: Vec::new(),
-            library_materials: Vec::new(),
             library_indexes: BTreeMap::new(),
             library_view_cache: Default::default(),
             library_generation: 0,
@@ -579,7 +575,6 @@ impl Desktop {
             settings_status: String::new(),
             last_tick: Instant::now(),
             config,
-            config_error,
             task_options: options.clone(),
             settings_options: options,
             job: None,
@@ -1069,49 +1064,11 @@ impl Desktop {
         self.storage_ui
             .begin_location_checks(generation, &locations);
         self.loading = true;
-        let missing_outcomes = self
-            .workspace
-            .as_ref()
-            .map(|workspace| {
-                workspace
-                    .state
-                    .tasks
-                    .iter()
-                    .filter(|task| task.outcomes.is_none())
-                    .filter_map(|task| {
-                        Some((
-                            task.id.clone(),
-                            task.plan.source_id.clone(),
-                            task.plan.library_id.clone(),
-                            task.artifact.clone()?,
-                        ))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         let task = storage_ui::scan_locations(locations, move |location| {
             let scan = backend::scan_library(&location.root);
             let organization = organize::Library::load(&location.root);
             let cache = course_library::LibraryViewCache::inspect(location, scan.as_ref().ok());
-            let outcomes = missing_outcomes
-                .iter()
-                .filter(|(_, _, library_id, _)| library_id == &location.id)
-                .filter_map(|(id, source, library, path)| {
-                    let manifest =
-                        course2md::artifact::read_manifest(&path.join("manifest.json")).ok()?;
-                    if manifest.task_id != *id || manifest.source_id != *source {
-                        return None;
-                    }
-                    Some((
-                        id.clone(),
-                        source.clone(),
-                        library.clone(),
-                        path.clone(),
-                        serde_json::to_value(manifest.outcomes).ok()?,
-                    ))
-                })
-                .collect::<Vec<_>>();
-            (scan, organization, cache, outcomes)
+            (scan, organization, cache)
         });
         cx.spawn(async move |this, cx| {
             let results = task.await;
@@ -1134,29 +1091,14 @@ impl Desktop {
                 this.loading = false;
                 this.courses.clear();
                 this.library_issues.clear();
-                this.library_materials.clear();
                 this.library_indexes.clear();
                 this.library_view_cache = Default::default();
-                for (location, _, (scan, organization, cache, outcomes)) in results {
+                for (location, _, (scan, organization, cache)) in results {
                     this.library_view_cache.merge(cache);
-                    if let Some(workspace) = &mut this.workspace {
-                        for (id, source, library, path, outcomes) in outcomes {
-                            if let Some(task) = workspace.state.tasks.iter_mut().find(|task| {
-                                task.id == id
-                                    && task.plan.source_id == source
-                                    && task.plan.library_id == library
-                                    && task.artifact.as_ref() == Some(&path)
-                                    && task.outcomes.is_none()
-                            }) {
-                                task.outcomes = Some(outcomes);
-                            }
-                        }
-                    }
                     match scan {
                         Ok(scan) => {
                             this.courses.extend(scan.courses);
                             this.library_issues.extend(scan.issues);
-                            this.library_materials.extend(scan.materials);
                         }
                         Err(error) => this
                             .library_issues

@@ -98,7 +98,7 @@ fn inspect_location(location: &workspace::LibraryLocation) -> LocationCheck {
         needs_reassociation: false,
         problem: None,
     };
-    if !available || location.id == "legacy" {
+    if !available || location.id.is_empty() {
         return check;
     }
     match std::fs::read_to_string(location.root.join(".course2md-library-id")) {
@@ -191,8 +191,10 @@ impl Desktop {
             .as_ref()
             .map(|workspace| workspace.state.libraries.clone())
             .unwrap_or_else(|| {
+                // Without a workspace record the root has no registered id; an
+                // empty id skips the marker identity check for this placeholder.
                 vec![workspace::LibraryLocation {
-                    id: "legacy".into(),
+                    id: String::new(),
                     name: "课程库".into(),
                     root: self.library_root.clone(),
                     previous_roots: Vec::new(),
@@ -1649,13 +1651,47 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let old = directory.path().join("old");
         let new = directory.path().join("moved");
-        std::fs::create_dir_all(old.join("note")).unwrap();
-        std::fs::write(
-            old.join("note/structured.json"),
-            include_str!("../../tests/fixtures/legacy/json/structured.json"),
-        )
-        .unwrap();
+        std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join("video.mp4"), "original video").unwrap();
+        let work = old.join("note-work");
+        std::fs::create_dir_all(&work).unwrap();
+        let target = course2md::artifact::Target {
+            task_id: "task-relocate".into(),
+            course_id: "course-relocate".into(),
+            source_id: "local:original-video".into(),
+            version_id: "v1".into(),
+            course_dir: old.join("note"),
+        };
+        let sections = vec![course2md::timeline::Section {
+            t: 0.,
+            end: 1.,
+            image: String::new(),
+            speech: vec![course2md::timeline::TranscriptEvent {
+                start: 0.,
+                end: 1.,
+                text: "Relocation must preserve this body.".into(),
+                raw: None,
+            }],
+        }];
+        let meta = course2md::fetch::VideoMeta {
+            title: "Original title".into(),
+            uploader: String::new(),
+            duration: 0.,
+            webpage_url: String::new(),
+            extractor: "local".into(),
+            id: "original-video".into(),
+        };
+        smol::block_on(course2md::artifact::publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[],
+            Default::default(),
+        ))
+        .unwrap();
+        std::fs::remove_dir_all(&work).unwrap();
         let old = old.canonicalize().unwrap();
         let record = directory.path().join("workspace.json");
         let mut workspace = workspace::Workspace::open_at(

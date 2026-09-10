@@ -280,7 +280,6 @@ pub fn read_subtitle_text(path: &Path) -> Result<String> {
 
 /// 解码 UTF-8 / UTF-16（按 BOM 判端序）文本：UTF-8 BOM 与 UTF-16 BOM 都会剥掉，
 /// 无 BOM 按 UTF-8 处理。拒绝不完整的 UTF-16 与非法编码，不做有损替换。
-/// （subtitle 侧车与 legacy 旧稿导入共用）
 pub(crate) fn decode_text_with_bom(bytes: &[u8]) -> Result<String> {
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         ensure!(
@@ -483,8 +482,8 @@ fn clean_cue_text(line: &str) -> String {
     s.trim().to_string()
 }
 
-/// Legacy filesystem helper. New callers fetch one explicit track into an isolated
-/// directory; this must never choose from artifacts belonging to another source.
+/// 在已有目录中挑一个字幕文件。新调用方会把确定的一条字幕抓取到独立目录；
+/// 这里绝不能选中属于其他来源的产物。
 pub fn pick_subtitle_file(dir: &Path) -> Option<PathBuf> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
@@ -499,7 +498,7 @@ pub fn pick_subtitle_file(dir: &Path) -> Option<PathBuf> {
     files.into_iter().next()
 }
 
-/// Legacy ranking used only when inspecting pre-existing converted SRT files.
+/// 已有转换产物里的 SRT 文件名排序：中文优先，其次英文。
 fn lang_rank(p: &Path) -> (u8, String) {
     let stem = p
         .file_stem()

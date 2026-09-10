@@ -24,23 +24,12 @@ pub fn file_name(format: OutputFormat) -> &'static str {
 /// Exact destination, with no overwrite. UI may explicitly confirm replacing a separate
 /// exported file, but must never mutate the immutable note version itself.
 pub fn export(version_dir: &Path, format: OutputFormat, destination: &Path) -> Result<PathBuf> {
-    if !version_dir.join("manifest.json").is_file() && crate::legacy::is_candidate(version_dir) {
-        let note = crate::legacy::read(version_dir)?.context("这份旧资料没有可读正文 / This legacy archive has no readable document")?;
-        let temporary = crate::runtime::TempWorkDir::new("legacy-export")?;
-        let imported = crate::legacy::import_note(temporary.path(), note)?;
-        return export(&imported.version_dir, format, destination);
-    }
     let manifest = artifact::read_manifest(&version_dir.join("manifest.json"))?;
     artifact::validate_version(version_dir, &manifest)?;
     let document: Document = serde_json::from_slice(&std::fs::read(artifact::safe_asset_path(
         version_dir,
         &manifest.document,
     )?)?)?;
-    if let Some(provenance) = crate::legacy::provenance(version_dir)?
-        && format != OutputFormat::Json
-    {
-        return write_legacy(version_dir, &document, &provenance, format, destination);
-    }
     write_document(version_dir, &document, format, destination)
 }
 
@@ -51,6 +40,21 @@ struct ImageAsset {
     bytes: Vec<u8>,
     sha256: String,
 }
+
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
 fn images(root: &Path, document: &Document) -> Result<BTreeMap<String, ImageAsset>> {
     let mut images = BTreeMap::new();
     for section in document.sections.iter().filter(|s| !s.image.is_empty()) {
@@ -61,7 +65,7 @@ fn images(root: &Path, document: &Document) -> Result<BTreeMap<String, ImageAsse
         let sha256 = execution::digest(&bytes);
         let id = format!("image-{}", &sha256[..24]);
         let mime =
-            crate::legacy::image_mime(&bytes).context("截图不是可识别的图片，原文件已保留 / Screenshot is not a recognized image; original file kept")?;
+            image_mime(&bytes).context("截图不是可识别的图片，原文件已保留 / Screenshot is not a recognized image; original file kept")?;
         let ext = match mime {
             "image/png" => "png",
             "image/gif" => "gif",
@@ -80,109 +84,6 @@ fn images(root: &Path, document: &Document) -> Result<BTreeMap<String, ImageAsse
         );
     }
     Ok(images)
-}
-
-fn write_legacy(
-    root: &Path,
-    document: &Document,
-    provenance: &crate::legacy::Provenance,
-    format: OutputFormat,
-    destination: &Path,
-) -> Result<PathBuf> {
-    anyhow::ensure!(
-        !destination.exists(),
-        "导出位置已有文件，未覆盖 / A file already exists at the export destination; not overwritten: {}",
-        destination.display()
-    );
-    let parent = destination
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    if format == OutputFormat::Md {
-        let mut zip = zip::ZipWriter::new(file.as_file_mut());
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
-        zip.start_file("course.md", options)?;
-        zip.write_all(&std::fs::read(artifact::safe_asset_path(
-            root,
-            "course.md",
-        )?)?)?;
-        let manifest = artifact::read_manifest(&root.join("manifest.json"))?;
-        for asset in &manifest.assets {
-            if (asset.path.starts_with("original/")
-                && !matches!(
-                    asset.path.as_str(),
-                    "original/run.json" | "original/meta.json"
-                ))
-                || asset.path.starts_with("assets/")
-            {
-                zip.start_file(&asset.path, options)?;
-                zip.write_all(&std::fs::read(artifact::safe_asset_path(
-                    root,
-                    &asset.path,
-                )?)?)?;
-            }
-        }
-        zip.start_file("import-source.json", options)?;
-        let originals = provenance
-            .originals
-            .iter()
-            .filter(|file| !matches!(file.name.as_str(), "run.json" | "meta.json"))
-            .collect::<Vec<_>>();
-        zip.write_all(&serde_json::to_vec_pretty(&serde_json::json!({"schema":1,"primary":provenance.primary,"originals":originals,"warnings":provenance.warnings}))?)?;
-        zip.finish()?;
-    } else {
-        let mut html = format!(
-            "<!doctype html><html lang=\"zh\"><meta charset=\"utf-8\"><title>{}</title><style>body{{max-width:920px;margin:2rem auto;padding:1rem;font-family:system-ui;line-height:1.7}}img{{max-width:100%}}p{{white-space:pre-wrap}}</style><body>",
-            render::esc(&document.meta.title)
-        );
-        for block in &provenance.blocks {
-            match block {
-                crate::legacy::Block::Heading { text, level, .. } => {
-                    html.push_str(&format!("<h{level}>{}</h{level}>", render::esc(text)))
-                }
-                crate::legacy::Block::Paragraph { text } => {
-                    html.push_str(&format!("<p>{}</p>", render::esc(text)))
-                }
-                crate::legacy::Block::Image { reference, alt } => {
-                    if let Some(resource) = provenance
-                        .resources
-                        .iter()
-                        .find(|r| &r.reference == reference)
-                    {
-                        let bytes =
-                            std::fs::read(artifact::safe_asset_path(root, &resource.path)?)?;
-                        html.push_str(&format!(
-                            "<img alt=\"{}\" src=\"data:{};base64,{}\">",
-                            render::esc(alt),
-                            resource.mime,
-                            base64::engine::general_purpose::STANDARD.encode(bytes)
-                        ));
-                    }
-                }
-            }
-        }
-        if url::Url::parse(&document.meta.webpage_url)
-            .is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
-        {
-            html.push_str(&format!(
-                "<p>来源：<a href=\"{}\">{}</a></p>",
-                render::esc(&document.meta.webpage_url),
-                render::esc(&document.meta.webpage_url)
-            ));
-        }
-        for warning in &provenance.warnings {
-            html.push_str(&format!("<p>{}</p>", render::esc(warning)));
-        }
-        html.push_str("</body></html>");
-        file.write_all(html.as_bytes())?;
-    }
-    file.as_file().sync_all()?;
-    file.persist_noclobber(destination)?;
-    artifact::sync_dir(parent)?;
-    Ok(destination.to_path_buf())
 }
 
 pub(crate) fn write_document(

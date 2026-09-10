@@ -1,6 +1,6 @@
 //! Independently committed preferences, incomplete service drafts and immutable service versions.
 //!
-//! This is the desktop's authority after legacy import. Credentials never enter these files.
+//! This is the desktop's configuration authority. Credentials never enter these files.
 //! Calling `apply_defaults` or submitting a task cannot publish a service editor draft.
 
 use crate::credentials::{CredentialRef, CredentialVault, Secret};
@@ -129,27 +129,6 @@ pub fn save_failure_message(group: PreferenceGroup, error: &anyhow::Error) -> St
     format!("{name}未保存：{reason}")
 }
 
-/// A remembered output path and retired onboarding flags do not create an import task.
-pub fn has_importable_legacy(config: &ConfigFile) -> bool {
-    let baseline = ConfigFile::default();
-    GenerationPreferences::from_legacy(config) != GenerationPreferences::from_legacy(&baseline)
-        || config.desktop.library_cards
-        || config.desktop.library_group_folders
-        || config.desktop.reduce_motion
-        || config.defaults.provider == Some(AsrProvider::Api)
-        || !config.asr_api.api_key.trim().is_empty()
-        || config.llm.enabled
-        || config.llm.summarize
-        || !config.llm.base_url.trim().is_empty()
-        || !config.llm.api_key.trim().is_empty()
-}
-
-/// Validate the fields that desktop import will use. Service configuration may intentionally
-/// be incomplete and becomes a draft; it must not prevent recovery of the original file.
-pub(crate) fn validate_legacy(config: &ConfigFile) -> Result<()> {
-    GenerationPreferences::from_legacy(config).validate_value()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct GenerationPreferences {
@@ -194,31 +173,6 @@ impl Default for GenerationPreferences {
 }
 
 impl GenerationPreferences {
-    pub fn from_legacy(config: &ConfigFile) -> Self {
-        let mut options = config.defaults.clone();
-        options.out = None;
-        options.resume = Some(true);
-        if options.formats.is_none() {
-            options.formats = Some(Vec::new());
-        }
-        Self {
-            options,
-            ai_proofread: config.llm.enabled,
-            ai_summary: config.llm.summarize,
-            vision: config.llm.vision,
-            prompt: config.llm.prompt.clone(),
-            prompt_draft: None,
-            local_model_draft: None,
-            last_local_provider: config
-                .defaults
-                .provider
-                .filter(|provider| *provider != AsrProvider::Api),
-            subtitle_languages_draft: None,
-            ai_concurrency: config.llm.concurrency.max(1),
-            preferred_subtitle_languages: Vec::new(),
-        }
-    }
-
     pub fn needs_ai(&self) -> bool {
         self.ai_proofread || self.ai_summary
     }
@@ -574,7 +528,6 @@ struct ServicesState {
     stopped: BTreeMap<ServiceId, u64>,
     tests: BTreeMap<String, ServiceTestEvidence>,
     discarded_drafts: BTreeSet<ServiceDraftId>,
-    legacy_imported: bool,
 }
 
 /// Runtime-only configuration. Deliberately neither Debug nor Serialize. Consume immediately
@@ -1264,132 +1217,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn legacy_imported(&self) -> bool {
-        self.services.legacy_imported
-    }
-
-    /// Import is explicit and one-time; callers must not continue saving/reading the old TOML
-    /// as a runtime authority. All groups commit independently, and service publication does
-    /// not occur until its captured credential and full configuration are durable.
-    pub fn import_legacy(&mut self, legacy: &ConfigFile) -> Result<()> {
-        if self.services.legacy_imported {
-            return Ok(());
-        }
-        if self
-            .revisions
-            .get(&PreferenceGroup::Generation)
-            .copied()
-            .unwrap_or(0)
-            == 0
-        {
-            self.save_generation(GenerationPreferences::from_legacy(legacy))?;
-        }
-        if self
-            .revisions
-            .get(&PreferenceGroup::Application)
-            .copied()
-            .unwrap_or(0)
-            == 0
-        {
-            self.save_application(ApplicationPreferences {
-                desktop: legacy.desktop.clone(),
-                ..ApplicationPreferences::default()
-            })?;
-        }
-        let mut next = self.services.clone();
-        let mut new_credentials = Vec::new();
-        let import_service_defaults = self
-            .revisions
-            .get(&PreferenceGroup::Services)
-            .copied()
-            .unwrap_or(0)
-            == 0;
-        for (purpose, address, model, key, protocol) in [
-            (
-                ServicePurpose::Speech,
-                &legacy.asr_api.base_url,
-                &legacy.asr_api.model,
-                &legacy.asr_api.api_key,
-                if legacy.asr_api.mode == AsrApiMode::Chat {
-                    ServiceProtocol::SpeechChat
-                } else {
-                    ServiceProtocol::SpeechTranscriptions
-                },
-            ),
-            (
-                ServicePurpose::Ai,
-                &legacy.llm.base_url,
-                &legacy.llm.model,
-                &legacy.llm.api_key,
-                ServiceProtocol::AiChat,
-            ),
-        ] {
-            // Legacy speech placeholders are not real configured services without either an
-            // explicit cloud selection or a credential. Do not manufacture an active service.
-            let used = match purpose {
-                ServicePurpose::Speech => {
-                    legacy.defaults.provider == Some(AsrProvider::Api) || !key.trim().is_empty()
-                }
-                ServicePurpose::Ai => {
-                    legacy.llm.enabled
-                        || legacy.llm.summarize
-                        || !address.trim().is_empty()
-                        || !key.trim().is_empty()
-                }
-            };
-            if !used {
-                continue;
-            }
-            let mut draft = ServiceDraft::new(purpose);
-            draft.protocol = protocol;
-            draft.address = address.clone();
-            draft.model = model.clone();
-            draft.revision = 1;
-            if !key.trim().is_empty() {
-                match self.vault.insert(Secret::new(key.clone())) {
-                    Ok(reference) => {
-                        draft.credential = Some(reference.clone());
-                        new_credentials.push(reference);
-                    }
-                    Err(error) => {
-                        for reference in &new_credentials {
-                            let _ = self.vault.remove(reference);
-                        }
-                        return Err(error);
-                    }
-                }
-            }
-            if let Ok(config) = draft.configuration() {
-                let version = ServiceVersion {
-                    id: new_id("service-version"),
-                    service_id: draft.service_id,
-                    number: 1,
-                    saved_at: now_seconds(),
-                    published_from: Some(draft.id.clone()),
-                    config,
-                };
-                if import_service_defaults {
-                    match purpose {
-                        ServicePurpose::Speech => next.defaults.asr = Some(version.id.clone()),
-                        ServicePurpose::Ai => next.defaults.llm = Some(version.id.clone()),
-                    }
-                }
-                next.versions.insert(version.id.clone(), version);
-            } else {
-                next.drafts.insert(draft.id.clone(), draft);
-            }
-        }
-        next.legacy_imported = true;
-        if let Err(error) = self.persist(PreferenceGroup::Services, &next) {
-            for reference in new_credentials {
-                let _ = self.vault.remove(&reference);
-            }
-            return Err(error);
-        }
-        self.services = next;
-        Ok(())
-    }
-
     /// Only the explicitly affected group is reset. Originals and the last backup are copied
     /// before publication, and failure leaves the old files and effective state untouched.
     pub fn reset_group(&mut self, group: PreferenceGroup) -> Result<()> {
@@ -1550,8 +1377,6 @@ impl Store {
                 self.services.drafts.insert(draft.id.clone(), draft);
             }
         }
-        // Keep legacy private edits readable for compatibility, but they are
-        // neither active services nor a user-facing recovery collection.
     }
 
     fn persist<T: Serialize + DeserializeOwned + Validate>(
@@ -2077,21 +1902,6 @@ mod tests {
         assert!(!config.llm.enabled && config.llm.summarize && !config.llm.vision);
         assert_eq!(config.defaults.out, Some(PathBuf::from("/test-library")));
         assert!(config.llm.api_key.is_empty());
-    }
-
-    #[test]
-    fn old_storage_and_onboarding_markers_do_not_create_an_empty_settings_import() {
-        let mut config = ConfigFile::default();
-        config.defaults.out = Some(PathBuf::from("/isolated/existing-library"));
-        config.defaults.resume = Some(false);
-        config.desktop.setup_completed = true;
-        config.desktop.system_titlebar = true;
-        assert!(!has_importable_legacy(&config));
-        config.defaults.asr_model = Some("qwen3-0.6b".into());
-        assert!(has_importable_legacy(&config));
-        config.defaults.asr_model = None;
-        config.llm.prompt = Some("Preserve scientific terms.".into());
-        assert!(has_importable_legacy(&config));
     }
 
     #[test]

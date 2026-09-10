@@ -2621,11 +2621,7 @@ impl Desktop {
             if label == "来源" || value.trim().is_empty() {
                 continue;
             }
-            facts.push(if label == "原稿" {
-                format!("{label}：{value}")
-            } else {
-                value.clone()
-            });
+            facts.push(value.clone());
         }
         if let Some(document) = &preview.document {
             let platform = match document.meta.extractor.as_str() {
@@ -4887,146 +4883,51 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
     let mut data = ReaderData::default();
     let dir = &preview.course.dir;
     data.export_folder = existing_export_folder(dir, &preview.outputs);
-    let provenance = if preview.course.manifest.is_some() {
-        course2md::legacy::provenance(dir)
-    } else {
-        course2md::legacy::read(dir).map(|note| note.map(|note| note.provenance))
-    };
-    match provenance {
-        Ok(Some(provenance)) => {
-            // One indexing pass: per-image transcript and body-anchor lookups
-            // below are slice lookups instead of rescanning the blocks.
-            let resources: HashMap<&str, _> =
-                provenance
-                    .resources
-                    .iter()
-                    .fold(HashMap::new(), |mut map, resource| {
-                        map.entry(resource.reference.as_str()).or_insert(resource);
-                        map
-                    });
-            let blocks = &provenance.blocks;
-            let mut run_end = vec![blocks.len(); blocks.len() + 1];
-            let mut next_anchor: Vec<Option<String>> = vec![None; blocks.len() + 1];
-            for index in (0..blocks.len()).rev() {
-                run_end[index] = match &blocks[index] {
-                    course2md::legacy::Block::Paragraph { .. } => run_end[index + 1].max(index + 1),
-                    _ => index,
-                };
-                next_anchor[index] = match &blocks[index] {
-                    course2md::legacy::Block::Heading { .. } => {
-                        Some(format!("legacy-heading-{index}"))
-                    }
-                    course2md::legacy::Block::Paragraph { .. } => {
-                        Some(format!("legacy-paragraph-{index}"))
-                    }
-                    _ => next_anchor[index + 1].clone(),
-                };
-            }
-            let mut seconds = None;
-            let mut anchor = None;
-            for (index, block) in blocks.iter().enumerate() {
-                match block {
-                    course2md::legacy::Block::Heading { seconds: time, .. } => {
-                        seconds = *time;
-                        anchor = Some(format!("legacy-heading-{index}"));
-                    }
-                    course2md::legacy::Block::Paragraph { .. } => {
-                        anchor = Some(format!("legacy-paragraph-{index}"));
-                    }
-                    course2md::legacy::Block::Image { reference, alt } => {
-                        let resource = resources.get(reference.as_str()).copied();
-                        let path = resource.and_then(|resource| {
-                            let relative = if preview.course.manifest.is_some() {
-                                Some(resource.path.as_str())
-                            } else {
-                                resource
-                                    .original_path
-                                    .as_deref()
-                                    .and_then(|path| path.strip_prefix("original/"))
-                            }?;
-                            course2md::artifact::safe_asset_path(dir, relative).ok()
-                        });
-                        let transcript = blocks[index + 1..run_end[index + 1]]
-                            .iter()
-                            .filter_map(|block| {
-                                if let course2md::legacy::Block::Paragraph { text } = block {
-                                    Some(text.as_str())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        let body_anchor = anchor
-                            .clone()
-                            .or_else(|| next_anchor[index + 1].clone());
-                        data.frames.push(checked_frame(Frame {
-                            anchor: format!("legacy-image-{index}"),
-                            path,
-                            seconds,
-                            caption: (!alt.trim().is_empty()).then(|| alt.clone()),
-                            transcript,
-                            body_anchor,
-                            width: 16,
-                            height: 9,
-                        }));
-                    }
-                }
-            }
-        }
-        Ok(None) => {
-            if let Some(manifest) = &preview.course.manifest {
-                for (index, frame) in manifest.frames.iter().enumerate() {
-                    let section = preview.document.as_ref().and_then(|document| {
-                        document
-                            .sections
-                            .iter()
-                            .enumerate()
-                            .find(|(_, section)| section.image == frame.image)
-                    });
-                    data.frames.push(checked_frame(Frame {
-                        anchor: format!("frame:{index}:{}", frame.image),
-                        path: course2md::artifact::safe_asset_path(dir, &frame.image).ok(),
-                        seconds: Some(frame.t),
-                        caption: None,
-                        transcript: section
-                            .map(|(_, section)| {
-                                section
-                                    .speech
-                                    .iter()
-                                    .map(|speech| speech.text.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("\n\n")
-                            })
-                            .unwrap_or_default(),
-                        body_anchor: section
-                            .map(|(index, _)| format!("section-{index}"))
-                            .or_else(|| {
-                                nav::nearest_time(
-                                    preview.blocks.iter().enumerate().map(|(index, block)| {
-                                        (
-                                            index,
-                                            match block {
-                                                PreviewBlock::Heading { seconds, .. } => *seconds,
-                                                _ => None,
-                                            },
-                                        )
-                                    }),
-                                    frame.t,
-                                )
-                                .map(|(i, _)| block_anchor(&preview.blocks[i], i))
-                            }),
-                        width: 16,
-                        height: 9,
-                    }));
-                }
-            }
-        }
-        Err(error) => data.issues.push(format!(
-            "图片来源记录暂时无法读取：{error:#}。正文仍可阅读。"
-        )),
-    }
     if let Some(manifest) = &preview.course.manifest {
+        for (index, frame) in manifest.frames.iter().enumerate() {
+            let section = preview.document.as_ref().and_then(|document| {
+                document
+                    .sections
+                    .iter()
+                    .enumerate()
+                    .find(|(_, section)| section.image == frame.image)
+            });
+            data.frames.push(checked_frame(Frame {
+                anchor: format!("frame:{index}:{}", frame.image),
+                path: course2md::artifact::safe_asset_path(dir, &frame.image).ok(),
+                seconds: Some(frame.t),
+                caption: None,
+                transcript: section
+                    .map(|(_, section)| {
+                        section
+                            .speech
+                            .iter()
+                            .map(|speech| speech.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    })
+                    .unwrap_or_default(),
+                body_anchor: section
+                    .map(|(index, _)| format!("section-{index}"))
+                    .or_else(|| {
+                        nav::nearest_time(
+                            preview.blocks.iter().enumerate().map(|(index, block)| {
+                                (
+                                    index,
+                                    match block {
+                                        PreviewBlock::Heading { seconds, .. } => *seconds,
+                                        _ => None,
+                                    },
+                                )
+                            }),
+                            frame.t,
+                        )
+                        .map(|(i, _)| block_anchor(&preview.blocks[i], i))
+                    }),
+                width: 16,
+                height: 9,
+            }));
+        }
         let parent = dir
             .parent()
             .filter(|parent| parent.file_name().is_some_and(|name| name == "versions"));
@@ -5481,7 +5382,7 @@ mod tests {
             stages: Default::default(),
             error: None,
             artifact: Some(course.dir.clone()),
-            outcomes: None,
+            outcomes: serde_json::Value::Null,
             unread: false,
             logs: Vec::new(),
             blocked: Vec::new(),
@@ -5621,37 +5522,9 @@ mod tests {
                 .starts_with(&old.dir)
         );
     }
-    #[test]
-    fn legacy_images_keep_authored_captions_and_unknown_times() {
-        let root = tempfile::tempdir().unwrap();
-        image::RgbImage::new(6, 4)
-            .save(root.path().join("slide.png"))
-            .unwrap();
-        std::fs::write(
-            root.path().join("course.md"),
-            "# 人工课程\n\n## 补充主题\n\n![手写图注](slide.png)\n\n这段说明来自人工原稿。\n",
-        )
-        .unwrap();
-        let scan = crate::notes::scan_library(root.path()).unwrap();
-        let preview = crate::notes::read_preview(scan.courses[0].clone()).unwrap();
-        let data = load_reader_data(&preview);
-        assert_eq!(data.frames.len(), 1);
-        assert_eq!(data.frames[0].seconds, None);
-        assert_eq!(data.frames[0].caption.as_deref(), Some("手写图注"));
-        assert!(data.frames[0].transcript.contains("人工原稿"));
-        assert!(data.frames[0].path.is_some());
-        assert!(
-            data.frames[0]
-                .body_anchor
-                .as_deref()
-                .unwrap()
-                .starts_with("legacy-")
-        );
-    }
 }
 
-/// Tests for the virtualized note flow: item flattening, bounded rendering and
-/// reading-position round trips through the persistent list state.
+/// Tests for the virtualized note flow: item flattening, bounded rendering and/// reading-position round trips through the persistent list state.
 #[cfg(test)]
 mod flow_tests {
     use super::{

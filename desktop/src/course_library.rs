@@ -25,8 +25,6 @@ enum LibraryItem {
     Recovery,
     Coverage(String),
     Issues(Vec<String>),
-    MaterialsNote(usize),
-    MaterialsMenu(Vec<PathBuf>),
     Loading,
     Empty { partial: bool },
     SearchScope(String),
@@ -62,8 +60,6 @@ impl LibraryItem {
             LibraryItem::Recovery => "recovery".to_owned(),
             LibraryItem::Coverage(_) => "coverage".to_owned(),
             LibraryItem::Issues(_) => "issues".to_owned(),
-            LibraryItem::MaterialsNote(_) => "materials-note".to_owned(),
-            LibraryItem::MaterialsMenu(_) => "materials-menu".to_owned(),
             LibraryItem::Loading => "loading".to_owned(),
             LibraryItem::Empty { .. } => "empty".to_owned(),
             LibraryItem::SearchScope(_) => "search-scope".to_owned(),
@@ -173,7 +169,6 @@ pub(super) struct CourseLocation {
 #[derive(Default)]
 pub(super) struct LibraryViewCache {
     pub locations: BTreeMap<PathBuf, CourseLocation>,
-    pub materials: BTreeMap<PathBuf, PathBuf>,
     pub recovery: BTreeMap<PathBuf, organize::Recovery>,
     pub title_recovery: BTreeMap<PathBuf, organize::Recovery>,
     aliases: BTreeMap<PathBuf, BTreeMap<PathBuf, String>>,
@@ -224,9 +219,6 @@ impl LibraryViewCache {
                     cache.locations.insert(path, membership.clone());
                 }
             }
-            for path in &scan.materials {
-                cache.materials.insert(path.clone(), location.root.clone());
-            }
         }
         cache
     }
@@ -238,15 +230,6 @@ impl LibraryViewCache {
             });
             if replace {
                 self.locations.insert(path, location);
-            }
-        }
-        for (path, root) in other.materials {
-            let replace = self
-                .materials
-                .get(&path)
-                .is_none_or(|previous| root.components().count() > previous.components().count());
-            if replace {
-                self.materials.insert(path, root);
             }
         }
         self.recovery.extend(other.recovery);
@@ -783,21 +766,6 @@ impl Desktop {
         {
             items.push(LibraryItem::Issues(remaining_issues));
         }
-        let materials = self
-            .library_materials
-            .iter()
-            .filter(|path| {
-                self.library_view_cache
-                    .materials
-                    .get(*path)
-                    .is_some_and(|root| scope.available.contains(root))
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        if !materials.is_empty() {
-            items.push(LibraryItem::MaterialsNote(materials.len()));
-            items.push(LibraryItem::MaterialsMenu(materials));
-        }
         if self.loading {
             items.push(LibraryItem::Loading);
             return self.library_list_page(items, layout, rem, cx);
@@ -808,7 +776,6 @@ impl Desktop {
         if courses.is_empty() {
             if query.is_empty()
                 && (coverage == crate::storage::LibraryCoverage::Partial
-                    || !self.library_materials.is_empty()
                     || !self.library_issues.is_empty())
             {
                 return self.library_list_page(items, layout, rem, cx);
@@ -852,7 +819,9 @@ impl Desktop {
                     .and_then(|w| w.state.libraries.iter().find(|lib| lib.root == root));
                 let key = format!(
                     "{}:{id}",
-                    location.map(|lib| lib.id.as_str()).unwrap_or("legacy")
+                    location
+                        .map(|lib| lib.id.clone())
+                        .unwrap_or_else(|| root.display().to_string())
                 );
                 let collapsed = query.is_empty()
                     && self
@@ -1047,30 +1016,6 @@ impl Desktop {
                     messages: messages.clone(),
                 })
                 .into_any_element(),
-            LibraryItem::MaterialsNote(count) => accessible_text(
-                "library-materials-state",
-                format!("有 {count} 份历史任务尚未生成可读笔记。"),
-            )
-            .text_sm()
-            .text_color(color(MUTED))
-            .into_any_element(),
-            LibraryItem::MaterialsMenu(paths) => {
-                let materials = paths.clone();
-                control("open-library-materials")
-                    .self_start()
-                    .icon(IconName::FolderOpen)
-                    .label("查看保留的任务材料")
-                    .dropdown_menu(move |menu, _, _| {
-                        materials.iter().fold(menu, |menu, path| {
-                            let path = path.clone();
-                            menu.item(
-                                PopupMenuItem::new(path.display().to_string())
-                                    .on_click(move |_, _, cx| cx.open_with_system(&path)),
-                            )
-                        })
-                    })
-                    .into_any_element()
-            }
             LibraryItem::Loading => h_flex()
                 .gap_2()
                 .items_center()

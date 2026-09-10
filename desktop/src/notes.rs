@@ -31,9 +31,6 @@ impl Course {
         }
     }
     pub fn description(&self) -> String {
-        if self.warning.is_some() && self.manifest.is_none() {
-            return "已有笔记 · 正在只读原稿".into();
-        }
         let content = if self.slides > 0 {
             format!("含 {} 张截图", self.slides)
         } else {
@@ -47,20 +44,11 @@ impl Course {
     }
     pub fn storage_dir(&self) -> PathBuf {
         if self.manifest.is_some() {
-            let storage = self
-                .dir
+            self.dir
                 .parent()
                 .and_then(|p| p.parent())
                 .unwrap_or(&self.dir)
-                .to_path_buf();
-            if storage
-                .file_name()
-                .is_some_and(|name| name == course2md::legacy::IMPORT_DIR)
-            {
-                storage.parent().unwrap_or(&storage).to_path_buf()
-            } else {
-                storage
-            }
+                .to_path_buf()
         } else {
             self.dir.clone()
         }
@@ -74,7 +62,6 @@ pub(crate) fn has_incomplete_content(manifest: &course2md::artifact::Manifest) -
 pub struct LibraryScan {
     pub courses: Vec<Course>,
     pub issues: Vec<String>,
-    pub materials: Vec<PathBuf>,
 }
 
 fn version_course(dir: &Path) -> Result<Course> {
@@ -147,134 +134,10 @@ fn current_course(dir: &Path) -> Result<Course> {
     }
 }
 
-fn legacy_image(
-    dir: &Path,
-    resource: &course2md::legacy::Resource,
-    normalized: bool,
-) -> Option<PathBuf> {
-    let relative = if normalized {
-        resource.path.as_str()
-    } else {
-        resource
-            .original_path
-            .as_deref()?
-            .strip_prefix("original/")?
-    };
-    course2md::artifact::safe_asset_path(dir, relative).ok()
-}
-fn legacy_course(
-    dir: &Path,
-    note: &course2md::legacy::Note,
-    manifest: Option<course2md::artifact::Manifest>,
-) -> Course {
-    let images = note
-        .provenance
-        .resources
-        .iter()
-        .filter_map(|r| legacy_image(dir, r, false))
-        .collect::<Vec<_>>();
-    Course {
-        dir: dir.to_path_buf(),
-        title: note.document.meta.title.clone(),
-        modified: note.modified,
-        slides: images.len(),
-        segments: note.document.sections.iter().map(|s| s.speech.len()).sum(),
-        thumbnail: images.first().cloned(),
-        manifest,
-        warning: note.provenance.warnings.first().cloned(),
-    }
-}
-fn legacy_preview(
-    mut course: Course,
-    document: course2md::artifact::Document,
-    markdown: String,
-    provenance: course2md::legacy::Provenance,
-    normalized: bool,
-) -> Preview {
-    let mut blocks = Vec::new();
-    let mut plain_text = String::new();
-    let mut frames = Vec::new();
-    for (index, block) in provenance.blocks.iter().enumerate() {
-        match block {
-            course2md::legacy::Block::Heading { text, seconds, .. } => {
-                blocks.push(PreviewBlock::Heading {
-                    text: text.clone(),
-                    anchor: format!("legacy-heading-{index}"),
-                    seconds: *seconds,
-                });
-                plain_text.push_str(text);
-                plain_text.push_str("\n\n");
-            }
-            course2md::legacy::Block::Paragraph { text } => {
-                blocks.push(PreviewBlock::Paragraph {
-                    text: text.clone(),
-                    anchor: format!("legacy-paragraph-{index}"),
-                });
-                plain_text.push_str(text);
-                plain_text.push_str("\n\n");
-            }
-            course2md::legacy::Block::Image { reference, .. } => {
-                if let Some(path) = provenance
-                    .resources
-                    .iter()
-                    .find(|r| &r.reference == reference)
-                    .and_then(|r| legacy_image(&course.dir, r, normalized))
-                {
-                    blocks.push(PreviewBlock::Image(path.clone()));
-                    if !frames.contains(&path) {
-                        frames.push(path);
-                    }
-                }
-            }
-        }
-    }
-    let mut metadata = vec![("原稿".into(), provenance.primary.clone())];
-    if !document.meta.uploader.is_empty() {
-        metadata.push(("作者".into(), document.meta.uploader.clone()));
-    }
-    if document.meta.duration > 0. {
-        metadata.push((
-            "时长".into(),
-            course2md::render::fmt_ts(document.meta.duration),
-        ));
-    }
-    if !document.meta.webpage_url.is_empty() {
-        metadata.push(("来源".into(), document.meta.webpage_url.clone()));
-    }
-    let mut issues = provenance.warnings;
-    if let Some(warning) = &course.warning {
-        if !issues.contains(warning) {
-            issues.push(warning.clone());
-        }
-    }
-    course.title = document.meta.title.clone();
-    course.slides = frames.len();
-    course.segments = document.sections.iter().map(|s| s.speech.len()).sum();
-    let processing_issues = course
-        .manifest
-        .as_ref()
-        .map(processing_issues)
-        .unwrap_or_default();
-    Preview {
-        markdown_text: without_image_references(&markdown),
-        course,
-        blocks,
-        frames,
-        has_markdown: true,
-        outputs: vec![],
-        plain_text,
-        document: Some(document),
-        metadata,
-        issues,
-        processing_issues,
-    }
-}
-
 pub fn scan_library(root: &Path) -> Result<LibraryScan> {
     let mut scan = LibraryScan {
         courses: Vec::new(),
         issues: Vec::new(),
-        materials: Vec::new(),
     };
     if !root.exists() {
         return Ok(scan);
@@ -285,52 +148,6 @@ pub fn scan_library(root: &Path) -> Result<LibraryScan> {
             match current_course(&dir) {
                 Ok(course) => scan.courses.push(course),
                 Err(error) => scan.issues.push(format!("{}：{error:#}", dir.display())),
-            }
-            continue;
-        }
-        if course2md::legacy::is_candidate(&dir)
-            || dir
-                .join(course2md::legacy::IMPORT_DIR)
-                .join("current.json")
-                .is_file()
-        {
-            match course2md::legacy::read(&dir) {
-                Ok(Some(note)) => {
-                    let mut fallback = legacy_course(&dir, &note, None);
-                    match course2md::legacy::import_note(&dir, note) {
-                        Ok(imported) => match version_course(&imported.version_dir) {
-                            Ok(course) => scan.courses.push(course),
-                            Err(error) => {
-                                fallback.warning =
-                                    Some(format!("内部副本暂时无法读取，正在读取原稿：{error:#}"));
-                                scan.courses.push(fallback);
-                            }
-                        },
-                        Err(error) => {
-                            fallback.warning =
-                                Some(format!("正在只读原稿；内部副本尚未保存：{error:#}"));
-                            scan.courses.push(fallback);
-                        }
-                    }
-                }
-                Ok(None) => match current_course(&dir.join(course2md::legacy::IMPORT_DIR)) {
-                    Ok(mut course) => {
-                        course.warning = Some(
-                            "原稿目前没有可读正文；正在显示此前导入的版本，原文件已保留。".into(),
-                        );
-                        scan.courses.push(course);
-                    }
-                    Err(_) => scan.materials.push(dir),
-                },
-                Err(error) => match current_course(&dir.join(course2md::legacy::IMPORT_DIR)) {
-                    Ok(mut course) => {
-                        course.warning = Some(format!(
-                            "原稿暂时无法读取；正在显示此前导入的版本：{error:#}"
-                        ));
-                        scan.courses.push(course);
-                    }
-                    Err(_) => scan.issues.push(format!("{}：{error:#}", dir.display())),
-                },
             }
             continue;
         }
@@ -461,10 +278,6 @@ pub fn read_preview(mut course: Course) -> Result<Preview> {
             .unwrap_or_else(|_| {
                 course2md::render::render_markdown(&document.meta, &document.sections)
             });
-        if let Some(provenance) = course2md::legacy::provenance(&course.dir)? {
-            course.manifest = Some(manifest);
-            return Ok(legacy_preview(course, document, markdown, provenance, true));
-        }
         let mut plain_text = format!("{}\n\n", manifest.title);
         let mut blocks = Vec::new();
         if let Some(summary) = &document.summary {
@@ -556,41 +369,111 @@ pub fn read_preview(mut course: Course) -> Result<Preview> {
             processing_issues,
         });
     }
-    let note =
-        course2md::legacy::read(&course.dir)?.context("这份旧资料没有可读正文；原文件已保留")?;
-    match course2md::legacy::import_note(&course.dir, note) {
-        Ok(imported) => {
-            course.dir = imported.version_dir;
-            read_preview(course)
-        }
-        Err(error) => {
-            let note = course2md::legacy::read(&course.dir)?.context("原稿暂时无法读取")?;
-            let mut preview =
-                legacy_preview(course, note.document, note.markdown, note.provenance, false);
-            preview
-                .issues
-                .push(format!("正在只读原稿；内部副本尚未保存：{error:#}"));
-            Ok(preview)
-        }
-    }
+    anyhow::bail!("笔记正文无法读取，原文件已保留")
 }
 
+/// Copy-friendly markdown: strips image spans and their reference definitions while
+/// leaving authored prose, inline code, lists, tables and links untouched.
 pub fn without_image_references(markdown: &str) -> String {
-    course2md::legacy::without_images(markdown)
+    use pulldown_cmark::{Event, Tag};
+    let mut ranges = Vec::new();
+    let mut definitions = Vec::new();
+    for (event, range) in
+        pulldown_cmark::Parser::new_ext(markdown, pulldown_cmark::Options::all())
+            .into_offset_iter()
+    {
+        if let Event::Start(Tag::Image { id, .. }) = event {
+            ranges.push(range);
+            if !id.is_empty() {
+                definitions.push(id.into_string());
+            }
+        }
+    }
+    let mut result = markdown.to_owned();
+    for range in ranges.into_iter().rev() {
+        result.replace_range(range, "");
+    }
+    result
+        .lines()
+        .filter(|line| {
+            !definitions
+                .iter()
+                .any(|id| line.trim_start().starts_with(&format!("[{id}]:")))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A published current-format note: one frame, one paragraph, no file exports.
+    fn fixture_note(root: &Path) -> Course {
+        use course2md::{
+            artifact,
+            fetch::VideoMeta,
+            timeline::{Section, TranscriptEvent},
+        };
+        let work = root.join("work");
+        std::fs::create_dir_all(work.join("frames")).unwrap();
+        image::RgbImage::new(4, 3)
+            .save(work.join("frames/frame-0.png"))
+            .unwrap();
+        let sections = vec![Section {
+            t: 10.,
+            end: 20.,
+            image: "frames/frame-0.png".into(),
+            speech: vec![TranscriptEvent {
+                start: 10.,
+                end: 20.,
+                text: "真实正文".into(),
+                raw: None,
+            }],
+        }];
+        let target = artifact::Target {
+            task_id: "task-1".into(),
+            course_id: "course-1".into(),
+            source_id: "source-1".into(),
+            version_id: "v1".into(),
+            course_dir: root.join("note"),
+        };
+        let meta = VideoMeta {
+            title: "测试课程".into(),
+            uploader: String::new(),
+            duration: 0.,
+            webpage_url: String::new(),
+            extractor: "local".into(),
+            id: "source".into(),
+        };
+        let manifest = smol::block_on(artifact::publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[],
+            Default::default(),
+        ))
+        .unwrap();
+        Course {
+            dir: target.version_dir(),
+            title: meta.title,
+            modified: SystemTime::now(),
+            slides: 1,
+            segments: 1,
+            thumbnail: None,
+            manifest: Some(manifest),
+            warning: None,
+        }
+    }
+
     #[test]
     fn optional_export_failure_does_not_describe_readable_content_as_incomplete() {
         let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("structured.json"),
-            include_str!("../../tests/fixtures/legacy/json/structured.json"),
-        )
-        .unwrap();
+        let note = fixture_note(root.path());
         let mut course = scan_library(root.path()).unwrap().courses.remove(0);
+        assert_eq!(course.dir, note.dir);
         let manifest = course.manifest.as_mut().unwrap();
         manifest.partial = true;
         manifest.outcomes.transcript = course2md::artifact::Outcome::succeeded();
@@ -607,27 +490,21 @@ mod tests {
             course2md::artifact::Outcome::failed("service unavailable");
         assert!(course.description().contains("待补全"));
     }
+
     #[test]
-    fn library_discovers_json_body_without_run_and_keeps_failure_materials_separate() {
+    fn library_discovers_published_notes_and_ignores_task_leftovers() {
         let root = tempfile::tempdir().unwrap();
-        let note = root.path().join("only-json");
-        let failure = root.path().join("failed");
-        std::fs::create_dir_all(&note).unwrap();
-        std::fs::create_dir_all(&failure).unwrap();
-        std::fs::write(
-            note.join("structured.json"),
-            include_str!("../../tests/fixtures/legacy/json/structured.json"),
-        )
-        .unwrap();
-        std::fs::write(failure.join("run.json"), r#"{"success":false}"#).unwrap();
+        let note = fixture_note(root.path());
+        let leftover = root.path().join("failed");
+        std::fs::create_dir_all(&leftover).unwrap();
+        std::fs::write(leftover.join("run.json"), r#"{"success":false}"#).unwrap();
         let first = scan_library(root.path()).unwrap();
         assert_eq!(first.courses.len(), 1);
-        assert_eq!(first.materials, vec![failure]);
+        assert!(first.issues.is_empty());
         assert_eq!(
             first.courses[0].storage_dir().canonicalize().unwrap(),
-            note.canonicalize().unwrap()
+            root.path().join("note").canonicalize().unwrap()
         );
-        let version = first.courses[0].dir.clone();
         let preview = read_preview(first.courses[0].clone()).unwrap();
         assert!(preview.plain_text.contains("真实正文"));
         assert!(preview.document.is_some());
@@ -638,47 +515,15 @@ mod tests {
                 .any(|b| matches!(b,PreviewBlock::Heading{seconds:Some(t),..} if *t==10.))
         );
         let second = scan_library(root.path()).unwrap();
-        assert_eq!(second.courses[0].dir, version);
+        assert_eq!(second.courses[0].dir, note.dir);
     }
+
     #[test]
-    fn normalization_failure_does_not_hide_existing_html_and_still_allows_export() {
-        let root = tempfile::tempdir().unwrap();
-        std::fs::write(
-            root.path().join("course.html"),
-            include_str!("../../tests/fixtures/legacy/html/course.html"),
-        )
-        .unwrap();
-        let reserved = root.path().join(course2md::legacy::IMPORT_DIR);
-        std::fs::create_dir_all(&reserved).unwrap();
-        std::fs::write(reserved.join("unrelated"), "用户文件").unwrap();
-        let scan = scan_library(root.path()).unwrap();
-        assert_eq!(scan.courses.len(), 1);
-        assert!(scan.courses[0].manifest.is_none());
-        let preview = read_preview(scan.courses[0].clone()).unwrap();
-        assert!(preview.document.is_some());
-        assert!(preview.plain_text.contains("第一条手工备注"));
-        assert!(!preview.plain_text.contains("do_not_execute"));
-        assert!(
-            preview.blocks.iter().any(
-                |b| matches!(b,PreviewBlock::Heading{text,seconds:None,..} if text=="补充主题")
-            )
-        );
-        let export = root.path().join("exported.html");
-        course2md::portable::export(
-            &preview.course.dir,
-            course2md::config::OutputFormat::Html,
-            &export,
-        )
-        .unwrap();
-        assert!(
-            std::fs::read_to_string(export)
-                .unwrap()
-                .contains("人工说明")
-        );
-        assert_eq!(
-            std::fs::read_to_string(reserved.join("unrelated")).unwrap(),
-            "用户文件"
-        );
-        assert!(!reserved.join("owner.json").exists());
+    fn copy_markdown_removes_real_images_but_keeps_inline_code_and_surrounding_words() {
+        let value = "before ![inline](frames/a.png) after\n\n![ref][pic]\n\n[pic]: frames/a.png\n\n`![example](literal)`";
+        let copied = without_image_references(value);
+        assert!(copied.contains("before  after"));
+        assert!(!copied.contains("frames/a.png"));
+        assert!(copied.contains("`![example](literal)`"));
     }
 }

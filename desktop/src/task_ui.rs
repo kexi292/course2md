@@ -19,7 +19,6 @@ enum QueueItem {
     GroupLabel { group: TaskGroup, count: usize },
     HistoryToggle { count: usize, open: Entity<bool> },
     Task(usize),
-    Historical,
 }
 
 impl QueueItem {
@@ -33,7 +32,6 @@ impl QueueItem {
             QueueItem::GroupLabel { group, .. } => format!("group-{group:?}"),
             QueueItem::HistoryToggle { .. } => "history-toggle".to_owned(),
             QueueItem::Task(index) => format!("task-{}", tasks[*index].id),
-            QueueItem::Historical => "historical".to_owned(),
         }
     }
 }
@@ -395,7 +393,7 @@ fn task_service_repair_reason(task: &TaskRecord) -> Option<&'static str> {
     {
         return None;
     }
-    let outcomes = task.outcomes.as_ref()?;
+    let outcomes = &task.outcomes;
     let failures: Vec<_> = ["proofreading", "summary"]
         .into_iter()
         .filter_map(|component| outcomes.get(component))
@@ -1884,7 +1882,8 @@ impl Desktop {
                     manifest
                         .as_ref()
                         .and_then(|manifest| serde_json::to_value(&manifest.outcomes).ok())
-                });
+                })
+                .unwrap_or(serde_json::Value::Null);
             workspace::reconcile_receipts(task)?;
             if let (Some(done), Some(manifest)) = (&done, &manifest) {
                 task.artifact = Some(done.out_dir.clone());
@@ -2028,9 +2027,7 @@ impl Desktop {
         let mut tasks: Vec<TaskRecord> = Vec::new();
         match &self.workspace {
             None => items.push(QueueItem::Unavailable),
-            Some(workspace)
-                if workspace.state.tasks.is_empty() && self.library_materials.is_empty() =>
-            {
+            Some(workspace) if workspace.state.tasks.is_empty() => {
                 items.push(QueueItem::Empty);
             }
             Some(workspace) => {
@@ -2063,9 +2060,6 @@ impl Desktop {
                         continue;
                     }
                     items.push(QueueItem::Task(index));
-                }
-                if !self.library_materials.is_empty() {
-                    items.push(QueueItem::Historical);
                 }
             }
         }
@@ -2221,7 +2215,6 @@ impl Desktop {
                     == Some(&task.id);
                 self.queue_task_card(task, task_group(task), is_selected, cx)
             }
-            QueueItem::Historical => self.queue_historical(),
         };
         let mut wrapper = v_flex()
             .w_full()
@@ -2237,38 +2230,6 @@ impl Desktop {
             wrapper = wrapper.track_focus(focus);
         }
         wrapper.into_any_element()
-    }
-
-    /// Retained materials of historical tasks, listed at the end of the queue.
-    fn queue_historical(&self) -> AnyElement {
-        let mut historical = v_flex()
-            .gap_3()
-            .p_4()
-            .bg(color(SURFACE))
-            .child(accessible_text("historical-tasks", "历史任务材料").role(Role::Heading))
-            .child(accessible_text(
-                "historical-tasks-description",
-                "这些目录尚无可读正文。原文件与处理材料已保留，没有自动重新识别或发送。",
-            ));
-        for (index, path) in self.library_materials.iter().enumerate() {
-            let target = path.clone();
-            historical = historical.child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        accessible_text(("history-path", index), path.display().to_string())
-                            .text_sm(),
-                    )
-                    .child(
-                        control(("history-open", index))
-                            .self_start()
-                            .icon(icons::folder_open())
-                            .label("查看保留材料")
-                            .on_click(move |_, _, cx| cx.reveal_path(&target)),
-                    ),
-            );
-        }
-        historical.into_any_element()
     }
 
     /// One task card in the virtualized queue: the heading row, live progress
@@ -2744,7 +2705,7 @@ impl Desktop {
                         .as_ref()
                         .and_then(|done| done.outcomes.as_ref())
                 } else {
-                    task.outcomes.as_ref()
+                    Some(&task.outcomes)
                 };
                 let status = if let Some(outcome) = ai_stage_outcome(&name, outcomes) {
                     outcome
@@ -3570,7 +3531,6 @@ mod tests {
                 QueueItem::Task(0),
                 QueueItem::HistoryToggle { count: 1, open },
                 QueueItem::Task(1),
-                QueueItem::Historical,
             ];
             let keys: Vec<String> = items.iter().map(|item| item.key(&tasks)).collect();
             let unique: std::collections::HashSet<_> = keys.iter().collect();
@@ -3612,7 +3572,7 @@ mod tests {
             stages: Default::default(),
             error: None,
             artifact: None,
-            outcomes: None,
+            outcomes: serde_json::Value::Null,
             unread: false,
             logs: Vec::new(),
             blocked: Vec::new(),
@@ -4170,7 +4130,7 @@ mod tests {
             stages: Default::default(),
             error: None,
             artifact: Some(path.clone()),
-            outcomes: Some(serde_json::to_value(&outcomes).unwrap()),
+            outcomes: serde_json::to_value(&outcomes).unwrap(),
             unread: false,
             logs: Vec::new(),
             blocked: Vec::new(),
@@ -4209,7 +4169,7 @@ mod tests {
             ("请求超时，请稍后重试。", false),
         ] {
             outcomes.proofreading.message = Some(message.into());
-            task.outcomes = Some(serde_json::to_value(&outcomes).unwrap());
+            task.outcomes = serde_json::to_value(&outcomes).unwrap();
             assert_eq!(
                 super::task_requires_service_repair(&task),
                 requires_repair,
@@ -4217,7 +4177,7 @@ mod tests {
             );
         }
         outcomes.proofreading.message = Some("服务拒绝凭据".into());
-        task.outcomes = Some(serde_json::to_value(&outcomes).unwrap());
+        task.outcomes = serde_json::to_value(&outcomes).unwrap();
         task.blocked.push(crate::workspace::BlockedRequest {
             reason: "uncertain".into(),
             request_id: Some("pending".into()),
@@ -4233,11 +4193,11 @@ mod tests {
 
         outcomes.proofreading = Outcome::succeeded();
         outcomes.exports.insert("html".into(), Outcome::succeeded());
-        task.outcomes = Some(serde_json::to_value(outcomes).unwrap());
+        task.outcomes = serde_json::to_value(outcomes).unwrap();
         assert!(super::task_component_failures(&task, &path).is_empty());
         task.error = Some("服务拒绝凭据".into());
         assert!(!super::task_requires_service_repair(&task));
-        task.outcomes = None;
+        task.outcomes = serde_json::Value::Null;
         assert!(super::task_component_failures(&task, &path).is_empty());
 
         let mut completed = task.clone();
@@ -4262,10 +4222,7 @@ pub(crate) fn task_component_failures(
     task: &TaskRecord,
     _path: &std::path::Path,
 ) -> Vec<(String, String, course2md::artifact::Outcome)> {
-    // Missing legacy outcomes are hydrated by the background library refresh.
-    let Some(value) = &task.outcomes else {
-        return Vec::new();
-    };
+    let value = &task.outcomes;
     let mut results = Vec::new();
     for (key, label) in [
         ("screenshots", "截图"),

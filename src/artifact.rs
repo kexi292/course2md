@@ -115,7 +115,6 @@ pub struct Manifest {
     pub version_id: String,
     pub title: String,
     pub created_at_ms: u64,
-    #[serde(default)]
     pub revision: u64,
     pub document: String,
     pub markdown: String,

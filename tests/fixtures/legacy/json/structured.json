@@ -1,8 +1,0 @@
-{
-  "schema_version": 1,
-  "generator": {"name": "course2md", "version": "1.0"},
-  "meta": {"title": "只有 JSON 的旧笔记", "uploader": "", "duration": 30.0, "webpage_url": "", "extractor": "", "id": ""},
-  "sections": [
-    {"t": 10.0, "end": 30.0, "image": "frames/slide%20one.png", "speech": [{"start": 10.0, "end": 20.0, "text": "这是 JSON 文件里保留的真实正文。"}]}
-  ]
-}

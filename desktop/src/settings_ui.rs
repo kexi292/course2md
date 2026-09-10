@@ -88,11 +88,6 @@ pub(crate) struct State {
     generation_block_messages: std::collections::BTreeSet<String>,
     pending_generation: Option<GenerationPreferences>,
     pending_application: Option<ApplicationPreferences>,
-    legacy_status: Option<String>,
-    legacy: crate::legacy_settings::Inspection,
-    legacy_details_open: bool,
-    legacy_action_detail: Option<String>,
-    legacy_preserved: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -166,11 +161,6 @@ impl State {
             generation_block_messages: Default::default(),
             pending_generation: None,
             pending_application: None,
-            legacy_status: None,
-            legacy: crate::legacy_settings::Inspection::inspect(course2md::settings::config_path()),
-            legacy_details_open: false,
-            legacy_action_detail: None,
-            legacy_preserved: None,
             _subscriptions: subscriptions,
         }
     }
@@ -4228,12 +4218,6 @@ impl Desktop {
             )
     }
     fn application_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let legacy = &self.settings_ui.legacy;
-        let show_legacy = legacy.problem.is_some()
-            || (!self.preferences.legacy_imported() && legacy.importable)
-            || self.settings_ui.legacy_status.is_some()
-            || self.settings_ui.legacy_preserved.is_some()
-            || self.settings_ui.legacy_action_detail.is_some();
         v_flex()
             .w_full()
             .min_w_0()
@@ -4250,12 +4234,6 @@ impl Desktop {
                         this.start_onboarding(window, cx);
                     })),
             ))
-            .when(show_legacy, |view| {
-                view.child(
-                    group("legacy-settings-heading", "旧版设置")
-                        .child(self.legacy_migration_panel(cx)),
-                )
-            })
             .child(group("about-heading", "关于").child(self.about_page(cx)))
             .into_any_element()
     }
@@ -4280,168 +4258,6 @@ impl Desktop {
                 false
             }
         }
-    }
-    fn refresh_legacy_inspection(&mut self) {
-        self.settings_ui.legacy =
-            crate::legacy_settings::Inspection::inspect(course2md::settings::config_path());
-        self.config_error = self.settings_ui.legacy.problem.is_some();
-    }
-    fn repair_legacy_configuration(&mut self, use_backup: bool, cx: &mut Context<Self>) {
-        let path = self.settings_ui.legacy.path.clone();
-        let result = if use_backup {
-            crate::legacy_settings::restore_backup(&path)
-        } else {
-            crate::legacy_settings::reset_preserving_original(&path)
-        };
-        self.settings_ui.legacy_action_detail = None;
-        match result {
-            Ok(original) => {
-                self.settings_ui.legacy_preserved = Some(original);
-                self.settings_ui.legacy_status = Some(
-                    if use_backup {
-                        "已恢复旧配置备份。可明确导入；当前设置继续使用。"
-                    } else {
-                        "已保留损坏原文件并重建旧配置。当前设置与笔记保持原样。"
-                    }
-                    .into(),
-                );
-            }
-            Err(error) => {
-                self.settings_ui.legacy_status =
-                    Some(crate::legacy_settings::failure_message(&error).into());
-                self.settings_ui.legacy_action_detail = Some(format!("{error:#}"));
-            }
-        }
-        self.refresh_legacy_inspection();
-        cx.notify();
-    }
-    fn legacy_migration_panel(&self, cx: &mut Context<Self>) -> Div {
-        let legacy = &self.settings_ui.legacy;
-        let mut view = v_flex().gap_2();
-        if let Some(problem) = &legacy.problem {
-            view = view
-                .child(text("legacy-settings-problem", problem.message.clone()))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .when(legacy.backup_available, |row| {
-                            row.child(
-                                control("restore-legacy-backup")
-                                    .icon(icons::refresh())
-                                    .label("恢复已验证的旧配置备份")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.repair_legacy_configuration(true, cx)
-                                    })),
-                            )
-                        })
-                        .child(
-                            control("reset-legacy-preserving-original")
-                                .icon(icons::refresh())
-                                .label("保留原文件并重建旧配置")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.repair_legacy_configuration(false, cx)
-                                })),
-                        ),
-                );
-        } else if !self.preferences.legacy_imported() && legacy.importable {
-            view = view.child(text("legacy-settings-found", "发现旧版配置。导入前会备份原文件；已修改的当前设置保持原样。"))
-                .child(control("import-legacy-settings").icon(icons::file_upload()).label("备份并导入旧版设置").self_start()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.settings_ui.legacy_action_detail = None;
-                        match crate::legacy_settings::import_preferences(&this.settings_ui.legacy.path, &mut this.preferences) {
-                            Ok(original) => {
-                                this.settings_ui.legacy_preserved = Some(original);
-                                this.settings_ui.legacy_status = Some("已导入旧版设置；原文件及备份保留，后续以当前设置为准。".into());
-                                this.settings_ui.initialized = false;
-                                this.hydrate_settings_inputs(window, cx);
-                                this.refresh_preference_defaults(cx);
-                            }
-                            Err(error) => {
-                                this.settings_ui.legacy_status = Some("旧版设置尚未完整导入。现有设置与原文件均保留，可查看原因后重试。".into());
-                                this.settings_ui.legacy_action_detail = Some(format!("{error:#}"));
-                            }
-                        }
-                        this.refresh_legacy_inspection();
-                        cx.notify();
-                    })));
-        }
-        if let Some(message) = &self.settings_ui.legacy_status {
-            view = view.child(text("legacy-import-status", message.clone()).text_sm());
-        }
-        if let Some(original) = &self.settings_ui.legacy_preserved {
-            let path = original.clone();
-            view = view
-                .child(
-                    text(
-                        "legacy-original-backup",
-                        format!("原文件备份：{}", original.display()),
-                    )
-                    .text_sm(),
-                )
-                .child(
-                    control("reveal-legacy-original")
-                        .icon(icons::folder_open())
-                        .label("显示原文件备份")
-                        .self_start()
-                        .on_click(move |_, _, cx| cx.reveal_path(&path)),
-                );
-        }
-        if legacy.problem.is_some() || self.settings_ui.legacy_action_detail.is_some() {
-            let original = legacy.path.clone();
-            view = view.child(
-                h_flex()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(
-                        control("recheck-legacy-settings")
-                            .icon(icons::refresh())
-                            .label("重新检查旧配置")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_legacy_inspection();
-                                this.settings_ui.legacy_action_detail = None;
-                                this.settings_ui.legacy_status = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        control("reveal-legacy-settings")
-                            .icon(icons::folder_open())
-                            .label("显示旧配置文件")
-                            .on_click(move |_, _, cx| cx.reveal_path(&original)),
-                    )
-                    .child(
-                        control("legacy-settings-details")
-                            .icon(icons::info())
-                            .label(if self.settings_ui.legacy_details_open {
-                                "收起旧配置详情"
-                            } else {
-                                "查看旧配置详情"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_ui.legacy_details_open =
-                                    !this.settings_ui.legacy_details_open;
-                                cx.notify();
-                            })),
-                    ),
-            );
-            if self.settings_ui.legacy_details_open {
-                let details = [
-                    legacy
-                        .problem
-                        .as_ref()
-                        .map(|problem| problem.detail.as_str()),
-                    legacy.backup_detail.as_deref(),
-                    self.settings_ui.legacy_action_detail.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("\n");
-                view = view.child(text("legacy-settings-detail-text", details).text_sm());
-            }
-        }
-        view
     }
     fn environment_page(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let mut card = v_flex().w_full().min_w_0().gap_3();

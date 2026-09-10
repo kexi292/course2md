@@ -191,10 +191,7 @@ impl Library {
         ensure!(!name.is_empty(), "请输入文件夹名称");
         ensure!(name.chars().count() <= 60, "文件夹名称最多 60 个字符");
         ensure!(
-            name != "未分类"
-                || id
-                    .and_then(|id| self.folders.get(&id))
-                    .is_some_and(|existing| existing == name),
+            name != "未分类",
             "「未分类」是系统分类，请使用其他文件夹名称"
         );
         ensure!(!self.folders.iter().any(|(key, value)| Some(*key) != id && value.to_lowercase() == name.to_lowercase()), "已有同名文件夹");
@@ -405,31 +402,6 @@ mod tests {
         let reopened = Library::load(root.path()).unwrap();
         assert_eq!(reopened.folders[&id], "数学");
         assert_eq!(reopened.folder(root.path(), &course), Some(id));
-    }
-
-    #[test]
-    fn legacy_reserved_name_can_be_loaded_saved_unchanged_and_renamed() {
-        let root = tempfile::tempdir().unwrap();
-        let course = root.path().join("lecture");
-        std::fs::write(
-            root.path().join(".course2md-library.json"),
-            r#"{"folders":{"1":"未分类"},"courses":{"lecture":1},"next_id":1}"#,
-        )
-        .unwrap();
-        let reopened = Library::load(root.path()).unwrap();
-        assert_eq!(reopened.folder(root.path(), &course), Some(1));
-        Library::edit(root.path(), |library| {
-            assert_eq!(library.rename(Some(1), "未分类")?, 1);
-            Ok(())
-        })
-        .unwrap();
-        let renamed = Library::edit(root.path(), |library| {
-            library.rename(Some(1), "历史课程")?;
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(renamed.folders[&1], "历史课程");
-        assert_eq!(renamed.folder(root.path(), &course), Some(1));
     }
 
     #[test]

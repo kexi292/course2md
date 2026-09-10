@@ -320,8 +320,7 @@ pub struct TaskRecord {
     pub error: Option<String>,
     #[serde(default)]
     pub artifact: Option<PathBuf>,
-    #[serde(default)]
-    pub outcomes: Option<serde_json::Value>,
+    pub outcomes: serde_json::Value,
     #[serde(default)]
     pub unread: bool,
     #[serde(default)]
@@ -387,8 +386,7 @@ pub(crate) fn task_export_files(task: &TaskRecord, location: &LibraryLocation) -
     }
     let Some(exports) = task
         .outcomes
-        .as_ref()
-        .and_then(|outcomes| outcomes.get("exports"))
+        .get("exports")
         .and_then(|exports| exports.as_object())
     else {
         return Vec::new();
@@ -444,22 +442,15 @@ pub struct ReadingPosition {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct State {
     pub schema: u32,
-    #[serde(default)]
-    pub marker_registry_version: u32,
     pub libraries: Vec<LibraryLocation>,
     pub default_library: String,
     pub drafts: Vec<Draft>,
     pub current_draft: String,
     pub tasks: Vec<TaskRecord>,
-    #[serde(default)]
     pub selected_task: Option<String>,
-    #[serde(default)]
     pub positions: BTreeMap<String, ReadingPosition>,
-    #[serde(default)]
     pub reader_sources: BTreeMap<String, PathBuf>,
-    #[serde(default)]
     pub collapsed: BTreeSet<String>,
-    #[serde(default)]
     pub storage_backups: Vec<crate::storage::BackupRecord>,
 }
 
@@ -474,7 +465,6 @@ impl State {
         let draft = Draft::new(true, library.id.clone(), options);
         Self {
             schema: SCHEMA,
-            marker_registry_version: 1,
             default_library: library.id.clone(),
             libraries: vec![library],
             current_draft: draft.id.clone(),
@@ -687,7 +677,7 @@ impl State {
             stages: BTreeMap::new(),
             error: None,
             artifact: None,
-            outcomes: None,
+            outcomes: serde_json::Value::Null,
             unread: false,
             logs: Vec::new(),
             blocked: Vec::new(),
@@ -869,10 +859,7 @@ impl State {
             manifest.source_id == original.plan.source_id,
             "笔记来源与任务不匹配"
         );
-        let value = original
-            .outcomes
-            .clone()
-            .unwrap_or(serde_json::to_value(&manifest.outcomes)?);
+        let value = original.outcomes.clone();
         components.sort();
         components.dedup();
         ensure!(!components.is_empty(), "请选择需要补做的内容");
@@ -1144,93 +1131,8 @@ fn create_library_marker(location: &LibraryLocation) -> Result<()> {
     check_library(location)
 }
 
-fn upgrade_library_markers(state: &mut State) -> Vec<String> {
-    if state.marker_registry_version >= 1 {
-        return Vec::new();
-    }
-    let mut issues = Vec::new();
-    for library in &state.libraries {
-        if !library.root.is_dir() || library.root.join(".course2md-library-id").exists() {
-            continue;
-        }
-        let evidence = state
-            .tasks
-            .iter()
-            .filter(|task| task.plan.library_id == library.id)
-            .any(|task| {
-                if validate_record_location(task, &state.libraries).is_err() {
-                    return false;
-                }
-                let binding = task.work_dir.join("task-identity.json");
-                if task
-                    .work_dir
-                    .canonicalize()
-                    .ok()
-                    .zip(library.root.canonicalize().ok())
-                    .is_some_and(|(work, root)| !work.starts_with(root))
-                {
-                    return false;
-                }
-                if let Ok(bytes) = read_record_bytes(&binding)
-                    && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes)
-                    && value.get("task_id").and_then(|v| v.as_str()) == Some(task.id.as_str())
-                    && value.get("source_id").and_then(|v| v.as_str())
-                        == Some(task.plan.source_id.as_str())
-                {
-                    return true;
-                }
-                let course_id = format!(
-                    "course-{}",
-                    &course2md::execution::digest(task.plan.source_id.as_bytes())[..32]
-                );
-                let version = library
-                    .root
-                    .join(&course_id)
-                    .join("versions")
-                    .join(&task.id);
-                let Ok(manifest) =
-                    course2md::artifact::read_manifest(&version.join("manifest.json"))
-                else {
-                    return false;
-                };
-                manifest.course_id == course_id
-                    && manifest.task_id == task.id
-                    && manifest.source_id == task.plan.source_id
-                    && course2md::artifact::validate_version(&version, &manifest).is_ok()
-            });
-        if evidence {
-            if let Err(error) = create_library_marker(library) {
-                issues.push(format!(
-                    "《{}》的保存位置关联尚未完成：{error:#}",
-                    library.name
-                ));
-            }
-        } else {
-            issues.push(format!(
-                "《{}》需要重新关联。在设置的存储中确认此保存位置后，可继续原任务；文件仍保留。",
-                library.name
-            ));
-        }
-    }
-    state.marker_registry_version = 1;
-    issues
-}
-
 fn reconcile_artifact(task: &mut TaskRecord, location: &LibraryLocation) -> Result<()> {
     if task.artifact.is_some() && !task.exports_only() {
-        if task.outcomes.is_none()
-            && let Some(manifest) = task
-                .artifact
-                .as_ref()
-                .and_then(|version| {
-                    course2md::artifact::read_manifest(&version.join("manifest.json")).ok()
-                })
-                .filter(|manifest| {
-                    manifest.task_id == task.id && manifest.source_id == task.plan.source_id
-                })
-        {
-            task.outcomes = Some(serde_json::to_value(&manifest.outcomes)?);
-        }
         return Ok(());
     }
     let course = format!(
@@ -1246,7 +1148,7 @@ fn reconcile_artifact(task: &mut TaskRecord, location: &LibraryLocation) -> Resu
         );
         course2md::artifact::validate_version(&version, &manifest)?;
         task.artifact = Some(version);
-        task.outcomes = Some(serde_json::to_value(&manifest.outcomes)?);
+        task.outcomes = serde_json::to_value(&manifest.outcomes)?;
         task.state = if manifest.partial {
             TaskState::Partial
         } else {
@@ -1291,7 +1193,7 @@ fn reconcile_artifact(task: &mut TaskRecord, location: &LibraryLocation) -> Resu
             }
         }
         let partial = outcomes.values().any(failed_outcome);
-        let next_outcomes = Some(serde_json::json!({"exports":outcomes}));
+        let next_outcomes = serde_json::json!({"exports":outcomes});
         let next_state = if partial {
             TaskState::Partial
         } else {
@@ -1360,10 +1262,7 @@ impl Workspace {
         self.mirror_snapshots
             .borrow_mut()
             .retain(|_, (_, location)| location.id != id);
-        self.transaction(|state| {
-            state.marker_registry_version = 1;
-            Ok(())
-        })
+        Ok(())
     }
 
     /// Explicit repair. Originals are archived first; no recovered task may dispatch work.
@@ -1679,15 +1578,6 @@ impl Workspace {
             }
             initial
         };
-        if state.drafts.len() > 1 {
-            Self::upgrade_to_single_input(&path, &mut state)?;
-        }
-        let marker_issues = upgrade_library_markers(&mut state);
-        if !marker_issues.is_empty() {
-            let detail = marker_issues.join("；");
-            recovery =
-                Some(recovery.map_or_else(|| detail.clone(), |prior| format!("{prior} {detail}")));
-        }
         state.recover();
         for task in &mut state.tasks {
             let result = state
@@ -1712,24 +1602,6 @@ impl Workspace {
         })
     }
 
-    fn upgrade_to_single_input(path: &Path, state: &mut State) -> Result<()> {
-        let parent = path.parent().context("输入记录缺少保存目录")?;
-        let _lock = course2md::runtime::lock_file(&path.with_extension("lock"))?;
-        let archive = parent.join(new_id("workspace-single-input-upgrade"));
-        std::fs::create_dir(&archive).context("无法备份原输入记录，尚未升级")?;
-        for original in [path.to_owned(), path.with_extension("json.bak")] {
-            if original.exists() {
-                let bytes = read_record_bytes(&original)?;
-                course2md::checkpoint::atomic_write(
-                    &archive.join(original.file_name().context("原记录缺少文件名")?),
-                    &bytes,
-                )
-                .context("原输入记录备份未完成，尚未升级")?;
-            }
-        }
-        state.retain_current_input();
-        course2md::checkpoint::atomic_write(path, &serde_json::to_vec_pretty(state)?)
-    }
     fn read(path: &Path) -> Result<State> {
         let state: State = serde_json::from_slice(
             &read_record_bytes(path).with_context(|| format!("读取 {}", path.display()))?,
@@ -1956,74 +1828,6 @@ mod tests {
                     .contains("secret-do-not-store")
             );
         }
-    }
-
-    #[test]
-    fn legacy_inputs_are_archived_once_before_only_the_current_form_is_retained() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ws = test_workspace(dir.path());
-        let library = ws.state.default_library.clone();
-        let frozen = plan(&library);
-        let task_id = ws.state.enqueue(frozen.clone(), None).unwrap().0;
-        let mut current = Draft::new(false, library.clone(), Default::default());
-        current.change_source("current-video.mp4".into());
-        current.title = "当前输入".into();
-        let mut other = Draft::new(true, library, Default::default());
-        other.change_source("https://example.test/older-form".into());
-        other.updated = current.updated + 100;
-        ws.state.drafts.extend([current.clone(), other]);
-        ws.state.current_draft = current.id.clone();
-        ws.save().unwrap();
-        ws.save().unwrap();
-        let primary = std::fs::read(ws.storage_path()).unwrap();
-        let backup = std::fs::read(ws.storage_path().with_extension("json.bak")).unwrap();
-        let mut reopened = test_workspace(dir.path());
-        assert_eq!(reopened.state.drafts.len(), 1);
-        assert_eq!(reopened.state.draft().unwrap(), &current);
-        assert!(reopened.state.task(&task_id).unwrap().plan == frozen);
-        let archives = || {
-            std::fs::read_dir(dir.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .filter(|path| {
-                    path.file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .starts_with("workspace-single-input-upgrade-")
-                })
-                .collect::<Vec<_>>()
-        };
-        let archived = archives();
-        assert_eq!(archived.len(), 1);
-        let primary_name = ws.storage_path().file_name().unwrap();
-        let backup_path = ws.storage_path().with_extension("json.bak");
-        let backup_name = backup_path.file_name().unwrap();
-        assert_eq!(
-            std::fs::read(archived[0].join(primary_name)).unwrap(),
-            primary
-        );
-        assert_eq!(
-            std::fs::read(archived[0].join(backup_name)).unwrap(),
-            backup
-        );
-        reopened
-            .transaction(|state| {
-                state.reset_input(true, Default::default(), None);
-                Ok(())
-            })
-            .unwrap();
-        reopened.save().unwrap();
-        let final_workspace = test_workspace(dir.path());
-        assert_eq!(final_workspace.state.drafts.len(), 1);
-        assert_eq!(archives().len(), 1);
-        assert_eq!(
-            std::fs::read(archived[0].join(primary_name)).unwrap(),
-            primary
-        );
-        assert_eq!(
-            std::fs::read(archived[0].join(backup_name)).unwrap(),
-            backup
-        );
     }
 
     #[test]
@@ -2672,10 +2476,11 @@ mod tests {
         outcomes.transcript = course2md::artifact::Outcome::succeeded();
         outcomes.proofreading = course2md::artifact::Outcome::failed("校对请求结果尚不确定");
         outcomes.summary = summary;
-        let version = publish_note_with_outcomes(&ws.state, &id, outcomes);
+        let version = publish_note_with_outcomes(&ws.state, &id, outcomes.clone());
         let task = ws.state.task_mut(&id).unwrap();
         task.state = TaskState::Uncertain;
         task.artifact = Some(version);
+        task.outcomes = serde_json::to_value(&outcomes).unwrap();
         let request = write_unknown(task, 1);
         (id, request)
     }
@@ -2875,9 +2680,13 @@ mod tests {
             .unwrap()
             .0;
         let version = publish_note(&ws.state, &id, true);
+        let outcomes = course2md::artifact::read_manifest(&version.join("manifest.json"))
+            .unwrap()
+            .outcomes;
         let original = ws.state.task_mut(&id).unwrap();
         original.state = TaskState::Partial;
         original.artifact = Some(version);
+        original.outcomes = serde_json::to_value(&outcomes).unwrap();
         ws.state
             .draft_mut()
             .unwrap()
@@ -2920,9 +2729,13 @@ mod tests {
         snapshot.config.llm.model = "old-model".into();
         let id = ws.state.enqueue(snapshot.clone(), None).unwrap().0;
         let version = publish_note(&ws.state, &id, true);
+        let outcomes = course2md::artifact::read_manifest(&version.join("manifest.json"))
+            .unwrap()
+            .outcomes;
         let original = ws.state.task_mut(&id).unwrap();
         original.state = TaskState::Partial;
         original.artifact = Some(version.clone());
+        original.outcomes = serde_json::to_value(&outcomes).unwrap();
         ws.state
             .draft_mut()
             .unwrap()
@@ -3155,9 +2968,9 @@ mod tests {
         original.plan.config.llm.enabled = true;
         original.plan.config.llm.summarize = true;
         original.plan.config.defaults.formats = Some(vec![OutputFormat::Md, OutputFormat::Html]);
-        original.outcomes = Some(serde_json::json!({"exports":{
+        original.outcomes = serde_json::json!({"exports":{
             "md":{"status":"succeeded"}, "html":{"status":"failed","message":"disk full"}
-        }}));
+        }});
         let next = ws
             .state
             .reprocess(&id, vec!["exports".into()], vec![])
@@ -3196,12 +3009,8 @@ mod tests {
             outcomes,
             &[OutputFormat::Md, OutputFormat::Html],
         );
-        let mut restored = test_workspace(dir.path());
-        assert_eq!(restored.state.task(&id).unwrap().state, TaskState::Complete);
-        // Older desktop records did not always retain the done event's outcomes.
-        restored.state.task_mut(&id).unwrap().outcomes = None;
-        restored.save().unwrap();
         let restored = test_workspace(dir.path());
+        assert_eq!(restored.state.task(&id).unwrap().state, TaskState::Complete);
         let task = restored.state.task(&id).unwrap();
         let location = restored.state.library(&task.plan.library_id).unwrap();
         let markdown = version
@@ -3248,7 +3057,7 @@ mod tests {
         let original = ws.state.task_mut(&id).unwrap();
         original.state = TaskState::Partial;
         original.artifact = Some(base.clone());
-        original.outcomes = Some(serde_json::to_value(&manifest.outcomes).unwrap());
+        original.outcomes = serde_json::to_value(&manifest.outcomes).unwrap();
         let original_plan = original.plan.clone();
         let old_markdown = base
             .join("exports")
@@ -3327,38 +3136,6 @@ mod tests {
         );
         assert!(missing.state.task(&next).unwrap().plan == next_plan);
         assert!(missing.state.task(&id).unwrap().plan == original_plan);
-    }
-
-    #[test]
-    fn old_registered_library_is_upgraded_only_with_matching_owned_artifact_evidence() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut ws = test_workspace(dir.path());
-        let id = ws
-            .state
-            .enqueue(plan(&ws.state.default_library), None)
-            .unwrap()
-            .0;
-        publish_note(&ws.state, &id, false);
-        ws.save().unwrap();
-        let mut old = serde_json::to_value(&ws.state).unwrap();
-        old.as_object_mut()
-            .unwrap()
-            .remove("marker_registry_version");
-        let marker = ws.state.libraries[0].root.join(".course2md-library-id");
-        std::fs::remove_file(&marker).unwrap();
-        std::fs::write(ws.storage_path(), serde_json::to_vec(&old).unwrap()).unwrap();
-        let reopened = test_workspace(dir.path());
-        assert_eq!(
-            std::fs::read_to_string(&marker).unwrap(),
-            ws.state.default_library
-        );
-        assert_eq!(reopened.state.task(&id).unwrap().state, TaskState::Complete);
-        // Once upgraded, later marker loss is a different event and needs association.
-        reopened.save().unwrap();
-        std::fs::remove_file(&marker).unwrap();
-        let after_loss = test_workspace(dir.path());
-        assert!(!marker.exists());
-        assert!(check_library(&after_loss.state.libraries[0]).is_err());
     }
 
     #[test]
