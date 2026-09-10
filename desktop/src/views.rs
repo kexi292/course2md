@@ -12,6 +12,12 @@ const SETTINGS_SHELL_WIDTH: f32 =
     SETTINGS_SIDEBAR_WIDTH + SETTINGS_COLUMN_GAP + SETTINGS_CONTENT_MAX_WIDTH + SHELL_GUTTER * 2.;
 const SETTINGS_SIDEBAR_BREAKPOINT: f32 = 1100.;
 
+/// Capsule tabs already mark the current page. TitleBar's default bottom
+/// hairline would be unused chrome under 工作台 / 我的笔记 / 任务 / 设置.
+pub(crate) fn apply_shell_title_bar_chrome(bar: TitleBar) -> TitleBar {
+    bar.pl_0().bg(color(CANVAS)).border_b_0()
+}
+
 fn shell_column_for(page: Page) -> Div {
     shell_column_at(shell_column_width(page))
 }
@@ -145,20 +151,15 @@ impl Desktop {
                     this.navigate(page, cx);
                 })),
         );
-        TitleBar::new()
-            .h(px(40. * scale + 16.))
-            .pl_0()
-            .bg(color(CANVAS))
-            .border_color(color(HAIRLINE))
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .h_full()
-                    .child(div().w(px(side_width)).flex_shrink_0())
-                    .child(h_flex().flex_1().min_w_0().justify_center().child(nav))
-                    .child(div().w(px(side_width)).flex_shrink_0()),
-            )
+        apply_shell_title_bar_chrome(TitleBar::new().h(px(40. * scale + 16.))).child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .h_full()
+                .child(div().w(px(side_width)).flex_shrink_0())
+                .child(h_flex().flex_1().min_w_0().justify_center().child(nav))
+                .child(div().w(px(side_width)).flex_shrink_0()),
+        )
     }
 
     fn task_result_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -593,5 +594,48 @@ impl Render for Desktop {
             ))
             .children(Root::render_dialog_layer(window, cx))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn shell_title_bar_omits_unused_bottom_hairline() {
+        let source = include_str!("views.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production views");
+        assert!(
+            source.contains("apply_shell_title_bar_chrome"),
+            "shell_topbar must style the title bar through the shared chrome helper"
+        );
+        let helper = source
+            .split("pub(crate) fn apply_shell_title_bar_chrome")
+            .nth(1)
+            .expect("shell title bar chrome helper");
+        let helper_body = helper.split('}').next().expect("helper body");
+        assert!(
+            helper_body.contains("border_b_0"),
+            "capsule nav must not keep TitleBar's default hairline"
+        );
+        assert!(
+            !helper_body.contains("HAIRLINE"),
+            "shell title bar chrome must not paint the unused hairline"
+        );
+        let topbar = source
+            .split("fn shell_topbar")
+            .nth(1)
+            .expect("shell_topbar")
+            .split("fn task_result_notice")
+            .next()
+            .expect("shell_topbar body");
+        assert!(
+            topbar.contains("apply_shell_title_bar_chrome"),
+            "the live title bar must use the hairline-free chrome helper"
+        );
+        assert!(
+            !topbar.contains("HAIRLINE"),
+            "shell_topbar must not restore the unused full-width hairline"
+        );
     }
 }

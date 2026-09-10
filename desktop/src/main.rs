@@ -216,7 +216,6 @@ struct Desktop {
     show_options: bool,
     show_export_options: bool,
     show_logs: bool,
-    show_engine_details: bool,
     environment: Option<backend::Environment>,
     scrolls: [ScrollHandle; 5],
     inputs: BTreeMap<Field, Entity<InputState>>,
@@ -565,7 +564,6 @@ impl Desktop {
             show_options: false,
             show_export_options: false,
             show_logs: false,
-            show_engine_details: false,
             environment: None,
             scrolls: std::array::from_fn(|_| ScrollHandle::new()),
             inputs,
@@ -741,9 +739,6 @@ impl Desktop {
         self.opening_course = None;
         if self.page == Page::New {
             self.save_current_draft(cx);
-        }
-        if self.page != page {
-            self.show_engine_details = false;
         }
         self.page = page;
         self.message = None;

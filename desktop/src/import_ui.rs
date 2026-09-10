@@ -4,7 +4,6 @@ use crate::{motion, preferences::ServicePurpose, theme::*};
 use anyhow::Context as _;
 use course2md::subtitle::{SubtitleEvidence, SubtitleReadError, SubtitleTrack};
 use gpui_component::{
-    button::*,
     checkbox::Checkbox,
     menu::{DropdownMenu, PopupMenuItem},
     switch::Switch,
@@ -69,6 +68,108 @@ fn preference_icon(icon: Icon) -> Div {
         .flex_shrink_0()
         .child(icon.size_5().text_color(color(GRAY)))
 }
+
+/// Idle 工作台 conversion-options chrome. 高级选项 is the only disclosure;
+/// conversion defaults live there as real controls, not a standalone callout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IdleWorkbenchOptionsChrome {
+    pub conversion_defaults_callout: bool,
+    pub advanced_options_toggle: bool,
+}
+
+pub(crate) fn idle_workbench_options_chrome() -> IdleWorkbenchOptionsChrome {
+    IdleWorkbenchOptionsChrome {
+        conversion_defaults_callout: false,
+        advanced_options_toggle: true,
+    }
+}
+
+/// Recognition and engine controls belong at the 高级选项 level.
+pub(crate) fn local_engine_choices_use_nested_disclosure() -> bool {
+    false
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConversionAiOption {
+    Proofread,
+    Vision,
+    Summary,
+}
+
+pub(crate) fn conversion_ai_option_label(option: ConversionAiOption) -> &'static str {
+    match option {
+        ConversionAiOption::Proofread => "AI 校对",
+        ConversionAiOption::Vision => "发送截图辅助校对",
+        ConversionAiOption::Summary => "生成摘要",
+    }
+}
+
+pub(crate) fn conversion_ai_option_composes_leading_icon() -> bool {
+    false
+}
+
+pub(crate) fn conversion_ai_option_enabled(
+    options: &ConversionOptions,
+    option: ConversionAiOption,
+) -> bool {
+    match option {
+        ConversionAiOption::Proofread => options.llm,
+        ConversionAiOption::Vision => options.vision,
+        ConversionAiOption::Summary => options.summarize,
+    }
+}
+
+pub(crate) fn apply_conversion_ai_option(
+    options: &mut ConversionOptions,
+    option: ConversionAiOption,
+    enabled: bool,
+) {
+    match option {
+        ConversionAiOption::Proofread => options.llm = enabled,
+        ConversionAiOption::Vision => options.vision = enabled,
+        ConversionAiOption::Summary => options.summarize = enabled,
+    }
+}
+
+pub(crate) fn apply_text_source_mode(options: &mut ConversionOptions, mode: usize) {
+    options.source_mode = mode;
+}
+
+pub(crate) fn apply_speech_location(
+    options: &mut ConversionOptions,
+    cloud: bool,
+    local_provider: usize,
+) {
+    options.provider = if cloud { 5 } else { local_provider };
+}
+
+pub(crate) fn apply_local_engine(options: &mut ConversionOptions, provider: usize) {
+    options.provider = provider;
+}
+
+fn conversion_ai_preference_row(
+    option: ConversionAiOption,
+    hint: &'static str,
+    control: Switch,
+) -> Div {
+    let preference =
+        crate::settings_ui::preference(conversion_ai_option_label(option), hint, control);
+    if conversion_ai_option_composes_leading_icon() {
+        let icon = match option {
+            ConversionAiOption::Proofread => icons::auto_fix(),
+            ConversionAiOption::Vision => icons::image(),
+            ConversionAiOption::Summary => icons::summarize(),
+        };
+        return h_flex()
+            .gap_3()
+            .items_start()
+            .line_height(rems(1.5))
+            .child(preference_icon(icon))
+            .child(preference.flex_1().min_w_0());
+    }
+    preference
+}
+
 /// A shared heading for related conversion options.
 pub(crate) fn box_section(label: &'static str) -> Div {
     let icon = match label {
@@ -1718,7 +1819,7 @@ impl Desktop {
                         if mode == 2 {
                             this.use_speech(cx);
                         } else {
-                            this.task_options.source_mode = mode;
+                            apply_text_source_mode(&mut this.task_options, mode);
                             this.save_current_draft(cx);
                             this.advance_conversion_when_ready(cx);
                             cx.notify();
@@ -1732,30 +1833,28 @@ impl Desktop {
                 window,
                 cx,
             ));
-        let vision_options = h_flex()
-            .gap_3()
-            .items_start()
-            .line_height(rems(1.5))
-            .child(preference_icon(icons::image()))
-            .child(
-                crate::settings_ui::preference(
-                    "发送截图辅助校对",
-                    "文字及对应截图会发送到所选服务",
-                    coral_switch(
-                        Switch::new("import-vision")
-                            .checked(self.task_options.vision)
-                            .on_click(cx.listener(|this, value, _, cx| {
-                                this.task_options.vision = *value;
-                                if this.save_current_draft(cx) {
-                                    this.advance_conversion_when_ready(cx);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-                )
-                .flex_1()
-                .min_w_0(),
-            );
+        let vision_options = conversion_ai_preference_row(
+            ConversionAiOption::Vision,
+            "文字及对应截图会发送到所选服务",
+            coral_switch(
+                Switch::new("import-vision")
+                    .checked(conversion_ai_option_enabled(
+                        &self.task_options,
+                        ConversionAiOption::Vision,
+                    ))
+                    .on_click(cx.listener(|this, value, _, cx| {
+                        apply_conversion_ai_option(
+                            &mut this.task_options,
+                            ConversionAiOption::Vision,
+                            *value,
+                        );
+                        if this.save_current_draft(cx) {
+                            this.advance_conversion_when_ready(cx);
+                        }
+                        cx.notify();
+                    })),
+            ),
+        );
         let vision_disclosure = motion::disclosure(
             "ai-vision-options",
             self.task_options.llm,
@@ -1775,59 +1874,51 @@ impl Desktop {
             v_flex()
                 .gap_3()
                 .pt_2()
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .items_start()
-                        .line_height(rems(1.5))
-                        .child(preference_icon(icons::auto_fix()))
-                        .child(
-                            crate::settings_ui::preference(
-                                "AI 校对",
-                                "修正识别错误和标点，保留原意",
-                                coral_switch(
-                                    Switch::new("import-proofread")
-                                        .checked(self.task_options.llm)
-                                        .on_click(cx.listener(|this, value, _, cx| {
-                                            this.task_options.llm = *value;
-                                            if this.save_current_draft(cx) {
-                                                this.advance_conversion_when_ready(cx);
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                            )
-                            .flex_1()
-                            .min_w_0(),
-                        ),
-                )
+                .child(conversion_ai_preference_row(
+                    ConversionAiOption::Proofread,
+                    "修正识别错误和标点，保留原意",
+                    coral_switch(
+                        Switch::new("import-proofread")
+                            .checked(conversion_ai_option_enabled(
+                                &self.task_options,
+                                ConversionAiOption::Proofread,
+                            ))
+                            .on_click(cx.listener(|this, value, _, cx| {
+                                apply_conversion_ai_option(
+                                    &mut this.task_options,
+                                    ConversionAiOption::Proofread,
+                                    *value,
+                                );
+                                if this.save_current_draft(cx) {
+                                    this.advance_conversion_when_ready(cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                ))
                 .child(vision_disclosure)
-                .child(
-                    h_flex()
-                        .gap_3()
-                        .items_start()
-                        .line_height(rems(1.5))
-                        .child(preference_icon(icons::summarize()))
-                        .child(
-                            crate::settings_ui::preference(
-                                "生成摘要",
-                                "提炼课程要点，正文继续保留",
-                                coral_switch(
-                                    Switch::new("import-summary")
-                                        .checked(self.task_options.summarize)
-                                        .on_click(cx.listener(|this, value, _, cx| {
-                                            this.task_options.summarize = *value;
-                                            if this.save_current_draft(cx) {
-                                                this.advance_conversion_when_ready(cx);
-                                            }
-                                            cx.notify();
-                                        })),
-                                ),
-                            )
-                            .flex_1()
-                            .min_w_0(),
-                        ),
-                ),
+                .child(conversion_ai_preference_row(
+                    ConversionAiOption::Summary,
+                    "提炼课程要点，正文继续保留",
+                    coral_switch(
+                        Switch::new("import-summary")
+                            .checked(conversion_ai_option_enabled(
+                                &self.task_options,
+                                ConversionAiOption::Summary,
+                            ))
+                            .on_click(cx.listener(|this, value, _, cx| {
+                                apply_conversion_ai_option(
+                                    &mut this.task_options,
+                                    ConversionAiOption::Summary,
+                                    *value,
+                                );
+                                if this.save_current_draft(cx) {
+                                    this.advance_conversion_when_ready(cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+                )),
         );
         let ai_enabled = self.task_options.llm || self.task_options.summarize;
         let mut ai_options = v_flex().gap_3();
@@ -1932,16 +2023,18 @@ impl Desktop {
                     .options([("local", "本机识别"), ("cloud", "识别服务")])
                     .selected(if cloud { "cloud" } else { "local" })
                     .on_change(cx.listener(|this, value: &SharedString, _, cx| {
-                        this.task_options.provider = if value.as_ref() == "cloud" {
-                            5
-                        } else {
-                            this.workspace
-                                .as_ref()
-                                .and_then(|workspace| workspace.state.draft())
-                                .and_then(|draft| draft.local_provider)
-                                .filter(|provider| *provider < 5)
-                                .unwrap_or(0)
-                        };
+                        let local = this
+                            .workspace
+                            .as_ref()
+                            .and_then(|workspace| workspace.state.draft())
+                            .and_then(|draft| draft.local_provider)
+                            .filter(|provider| *provider < 5)
+                            .unwrap_or(0);
+                        apply_speech_location(
+                            &mut this.task_options,
+                            value.as_ref() == "cloud",
+                            local,
+                        );
                         if this.save_current_draft(cx) {
                             this.advance_conversion_when_ready(cx);
                         }
@@ -1964,33 +2057,13 @@ impl Desktop {
                 cx,
             ));
         }
-        view = view
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(icons::computer().size(px(20.)).text_color(color(GRAY)))
-                    .child(help("音频在这台电脑上处理")),
-            )
-            .child(
-                control("local-engine-choices")
-                    .ghost()
-                    .self_start()
-                    .icon(if self.show_engine_details {
-                        IconName::ChevronUp
-                    } else {
-                        IconName::ChevronDown
-                    })
-                    .label(if self.show_engine_details {
-                        "收起识别选项"
-                    } else {
-                        "识别选项"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_engine_details = !this.show_engine_details;
-                        cx.notify();
-                    })),
-            );
+        view = view.child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(icons::computer().size(px(20.)).text_color(color(GRAY)))
+                .child(help("音频在这台电脑上处理")),
+        );
         let engine_options = v_flex()
             .gap_2()
             .child(help(format!("当前方式：{}", self.local_engine_name())))
@@ -2027,7 +2100,7 @@ impl Desktop {
                     .selected(self.task_options.provider.to_string())
                     .on_change(cx.listener(|this, value: &SharedString, _, cx| {
                         if let Ok(index) = value.parse::<usize>() {
-                            this.task_options.provider = index;
+                            apply_local_engine(&mut this.task_options, index);
                             if this.save_current_draft(cx) {
                                 this.advance_conversion_when_ready(cx);
                             }
@@ -2035,13 +2108,11 @@ impl Desktop {
                         }
                     })),
             );
-        view = view.child(motion::disclosure(
-            "local-engine-options",
-            self.show_engine_details,
-            engine_options,
-            window,
-            cx,
-        ));
+        if local_engine_choices_use_nested_disclosure() {
+            unreachable!("recognition controls are shown directly in 高级选项");
+        } else {
+            view = view.child(engine_options);
+        }
         let (provider, model, root) = self.import_model_request();
         let readiness = self.model_readiness_panel(provider, Some(&model), &root, window, cx);
         view.child(motion::enter("local-speech-readiness", readiness, cx))
@@ -2462,42 +2533,6 @@ impl Desktop {
         )
     }
 
-    fn conversion_defaults_summary(&self) -> Div {
-        let mut summary = vec![match self.task_options.source_mode {
-            1 => "使用视频字幕生成笔记".to_owned(),
-            2 => "识别视频声音生成笔记".to_owned(),
-            _ => "优先使用字幕，字幕不可用时自动识别视频声音".to_owned(),
-        }];
-        if self.task_options.provider == 5
-            && self.task_options.source_mode != 1
-            && let Some(service) = self.selected_task_service(ServicePurpose::Speech)
-        {
-            summary.push(format!(
-                "需要识别声音时，音频会发送到「{}」",
-                service.config.name,
-            ));
-        }
-        if (self.task_options.llm || self.task_options.summarize)
-            && let Some(service) = self.selected_task_service(ServicePurpose::Ai)
-        {
-            summary.push(format!(
-                "{}会发送到「{}」{}",
-                if self.task_options.llm && self.task_options.vision {
-                    "文字与截图"
-                } else {
-                    "文字"
-                },
-                service.config.name,
-                match (self.task_options.llm, self.task_options.summarize) {
-                    (true, true) => "进行校对并生成摘要",
-                    (true, false) => "进行校对",
-                    _ => "生成摘要",
-                },
-            ));
-        }
-        info_callout("conversion-defaults-summary", summary.join("\n"))
-    }
-
     pub(super) fn current_input_task(&self, cx: &App) -> Option<&workspace::TaskRecord> {
         let state = &self.workspace.as_ref()?.state;
         submitted_input_task(state.draft()?, &state.tasks, &self.value(Field::Source, cx))
@@ -2694,22 +2729,21 @@ impl Desktop {
                     .child(content_options)
                     .child(self.import_destination(cx))
                     .child(self.import_exports(window, cx));
-                view = view
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .min_w_0()
-                            .gap_2()
-                            .child(self.conversion_defaults_summary())
-                            .child(self.generation_options_toggle(cx)),
-                    )
-                    .child(disclosure(
-                        "generation-options-body",
-                        options_open,
-                        options,
-                        window,
-                        cx,
-                    ));
+                let chrome = idle_workbench_options_chrome();
+                let mut options_header = v_flex().w_full().min_w_0().gap_2();
+                if chrome.conversion_defaults_callout {
+                    unreachable!("idle 工作台 does not compose a conversion-defaults callout");
+                }
+                if chrome.advanced_options_toggle {
+                    options_header = options_header.child(self.generation_options_toggle(cx));
+                }
+                view = view.child(options_header).child(disclosure(
+                    "generation-options-body",
+                    options_open,
+                    options,
+                    window,
+                    cx,
+                ));
             }
         }
         if let Some(recent) = self.recent_notes_section(cx) {
@@ -2973,11 +3007,23 @@ impl Desktop {
 #[cfg(test)]
 mod tests {
     use super::{
-        ConversionFollow, ConversionGate, automatic_subtitle_fallback, completed_input_task,
-        conversion_gate, submitted_input_task, subtitle_needs_confirmation, uses_speech,
+        ConversionAiOption, ConversionFollow, ConversionGate, apply_conversion_ai_option,
+        apply_local_engine, apply_speech_location, apply_text_source_mode,
+        automatic_subtitle_fallback, completed_input_task,
+        conversion_ai_option_composes_leading_icon, conversion_ai_option_enabled,
+        conversion_ai_option_label, conversion_gate, idle_workbench_options_chrome,
+        local_engine_choices_use_nested_disclosure, submitted_input_task,
+        subtitle_needs_confirmation, uses_speech,
     };
-    use crate::{source, workspace};
+    use crate::{ConversionOptions, source, workspace};
     use course2md::subtitle::{CachedSubtitle, SubtitleEvidence, SubtitleReadError};
+
+    fn shipped_import_ui() -> &'static str {
+        include_str!("import_ui.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production import_ui")
+    }
 
     #[test]
     fn one_start_continues_metadata_subtitles_and_environment_without_a_confirmation_stage() {
@@ -3692,5 +3738,122 @@ mod tests {
         };
         assert!(uses_speech(&source, 0));
         assert!(!uses_speech(&source, 1));
+    }
+
+    #[test]
+    fn idle_workbench_omits_conversion_defaults_callout() {
+        let chrome = idle_workbench_options_chrome();
+        assert!(
+            !chrome.conversion_defaults_callout,
+            "idle 工作台 must not show the unused conversion-defaults callout"
+        );
+        assert!(
+            chrome.advanced_options_toggle,
+            "高级选项 remains the opt-in disclosure for conversion controls"
+        );
+        let source = shipped_import_ui();
+        assert!(
+            source.contains("idle_workbench_options_chrome"),
+            "new_page must compose idle chrome through the shipped helper"
+        );
+        assert!(
+            !source.contains("conversion-defaults-summary"),
+            "idle workbench must not compose the unused conversion-defaults callout"
+        );
+        assert!(
+            !source.contains("conversion_defaults_summary"),
+            "the unused conversion-defaults summary must not remain in the workbench"
+        );
+    }
+
+    #[test]
+    fn open_advanced_options_shows_recognition_without_nested_disclosure() {
+        assert!(
+            !local_engine_choices_use_nested_disclosure(),
+            "recognition/engine controls belong at the 高级选项 level"
+        );
+        let source = shipped_import_ui();
+        assert!(
+            !source.contains("\"识别选项\""),
+            "高级选项 must not nest a 识别选项 disclosure"
+        );
+        assert!(
+            !source.contains("\"收起识别选项\""),
+            "高级选项 must not nest a 收起识别选项 control"
+        );
+        assert!(
+            source.contains("import-local-engine"),
+            "local engine choices must still be composed when 高级选项 is open"
+        );
+        assert!(
+            source.contains("import-speech-location"),
+            "speech location choices must still be composed when 高级选项 is open"
+        );
+
+        let mut options = ConversionOptions::default();
+        let initial_mode = options.source_mode;
+        let next_mode = if initial_mode == 0 { 1 } else { 0 };
+        apply_text_source_mode(&mut options, next_mode);
+        assert_eq!(options.source_mode, next_mode);
+        apply_text_source_mode(&mut options, 2);
+        assert_eq!(options.source_mode, 2);
+
+        let local_provider = 3;
+        apply_speech_location(&mut options, true, local_provider);
+        assert_eq!(options.provider, 5);
+        apply_speech_location(&mut options, false, local_provider);
+        assert_eq!(options.provider, local_provider);
+        apply_local_engine(&mut options, 0);
+        assert_eq!(options.provider, 0);
+        apply_local_engine(&mut options, 1);
+        assert_eq!(options.provider, 1);
+    }
+
+    #[test]
+    fn conversion_ai_rows_have_no_leading_icon_column_and_toggles_update_options() {
+        assert!(
+            !conversion_ai_option_composes_leading_icon(),
+            "AI option rows must not compose an extra leading icon column"
+        );
+        assert_eq!(
+            conversion_ai_option_label(ConversionAiOption::Proofread),
+            "AI 校对"
+        );
+        assert_eq!(
+            conversion_ai_option_label(ConversionAiOption::Vision),
+            "发送截图辅助校对"
+        );
+        assert_eq!(
+            conversion_ai_option_label(ConversionAiOption::Summary),
+            "生成摘要"
+        );
+        let source = shipped_import_ui();
+        assert!(
+            source.contains("conversion_ai_preference_row"),
+            "the three AI rows must compose through the shipped preference helper"
+        );
+
+        let mut options = ConversionOptions::default();
+        for option in [
+            ConversionAiOption::Proofread,
+            ConversionAiOption::Vision,
+            ConversionAiOption::Summary,
+        ] {
+            let before = conversion_ai_option_enabled(&options, option);
+            apply_conversion_ai_option(&mut options, option, !before);
+            assert_eq!(
+                conversion_ai_option_enabled(&options, option),
+                !before,
+                "{} must update conversion options",
+                conversion_ai_option_label(option)
+            );
+            apply_conversion_ai_option(&mut options, option, before);
+            assert_eq!(
+                conversion_ai_option_enabled(&options, option),
+                before,
+                "{} must restore conversion options",
+                conversion_ai_option_label(option)
+            );
+        }
     }
 }
