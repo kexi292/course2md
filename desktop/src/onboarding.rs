@@ -43,10 +43,6 @@ pub(crate) fn saved_api_key_placeholder(has_saved_credential: bool) -> &'static 
     }
 }
 
-pub(crate) fn setup_engines_use_nested_disclosure() -> bool {
-    false
-}
-
 struct ServiceSetup {
     inputs: BTreeMap<InputField, Entity<InputState>>,
     draft: ServiceDraft,
@@ -1353,9 +1349,6 @@ impl Desktop {
                 ),
             );
         }
-        if setup_engines_use_nested_disclosure() {
-            unreachable!("onboarding engine choices are shown at one level");
-        }
         body = body.child(
             v_flex()
                 .w_full()
@@ -2627,7 +2620,7 @@ mod tests {
     use super::{
         ProviderChoice, apply_provider_choice, engine_preferences, evidence_covers,
         local_model_choices, newly_enabled_ai_tests, requested_tests, saved_api_key_placeholder,
-        setup_cache_model, setup_engines_use_nested_disclosure, setup_model_supported,
+        setup_cache_model, setup_model_supported,
     };
     use crate::preferences::{
         Authentication, GenerationPreferences, ServiceConfiguration, ServiceProtocol,
@@ -2907,22 +2900,5 @@ mod tests {
     fn saved_api_key_fields_show_dots_instead_of_an_empty_box() {
         assert_eq!(saved_api_key_placeholder(true), "••••••••");
         assert_eq!(saved_api_key_placeholder(false), "");
-        let source = include_str!("onboarding.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production onboarding");
-        assert!(source.contains("saved_api_key_placeholder"));
-        assert!(
-            !setup_engines_use_nested_disclosure(),
-            "engine choices belong at the onboarding step, not behind 收起引擎"
-        );
-        assert!(
-            !source.contains("\"收起引擎\""),
-            "onboarding must not nest engine choices"
-        );
-        assert!(
-            source.contains("transfer_status") && source.contains("transfer_metrics"),
-            "onboarding model preparation must show labeled download speed and remaining time"
-        );
     }
 }

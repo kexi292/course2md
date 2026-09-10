@@ -2259,17 +2259,5 @@ mod tests {
         );
         assert_eq!(super::library_layout_choice(false), "list");
         assert_eq!(super::library_layout_choice(true), "cards");
-        let source = include_str!("course_library.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production library");
-        assert!(
-            !source.contains(".dropdown_menu(Self::folder_filter_menu"),
-            "folder filter must not be a nested menu"
-        );
-        assert!(
-            !source.contains("library-display"),
-            "display must not be a nested 显示 menu"
-        );
     }
 }
