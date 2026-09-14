@@ -237,6 +237,27 @@ pub const TEXT_READER: Rems = rems(1.143);
 /// Main page headline.
 pub const TEXT_DISPLAY: Rems = rems(2.);
 
+/// 页标题共享槽位：有意义图标 + 强调标签（SKILL.md 主 UI 标题约定）。
+pub fn page_heading(
+    id: impl Into<gpui::ElementId>,
+    icon: impl gpui::IntoElement,
+    title: impl Into<gpui::SharedString>,
+) -> gpui::Div {
+    use gpui::{prelude::*, *};
+    div()
+        .flex()
+        .items_center()
+        .min_w_0()
+        .gap(rems(10. / 14.))
+        .child(icon)
+        .child(
+            accessible_text(id, title.into())
+                .role(Role::Heading)
+                .text_size(TEXT_DISPLAY)
+                .font_weight(FontWeight::SEMIBOLD),
+        )
+}
+
 /* ---------- 中性阴影 ---------- */
 fn shadow_color(alpha: f32) -> gpui::Hsla {
     gpui::hsla(0., 0., 0., alpha)

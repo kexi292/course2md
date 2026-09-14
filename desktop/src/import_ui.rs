@@ -2633,11 +2633,11 @@ impl Desktop {
             .gap_6()
             .w_full()
             .min_w_0()
-            .child(
-                accessible_text("workbench-title", "把视频整理成笔记")
-                    .text_size(TEXT_DISPLAY)
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
+            .child(theme::page_heading(
+                "workbench-title",
+                icons::dashboard().size(px(24.)).text_color(color(ACCENT_STRONG)),
+                "把视频整理成笔记",
+            ))
             .when(show_source_input, |view| view.child(input));
         if let Some((id, message)) = cancelled_notice {
             view = view.child(info_callout(

@@ -811,11 +811,12 @@ impl Desktop {
             } else {
                 0.
             };
-        let header = text("settings-page-title", "设置")
-            .role(Role::Heading)
-            .text_size(TEXT_DISPLAY)
-            .font_weight(FontWeight::SEMIBOLD)
-            .flex_shrink_0();
+        let header = theme::page_heading(
+            "settings-page-title",
+            icons::settings().size(px(24.)).text_color(color(ACCENT_STRONG)),
+            "设置",
+        )
+        .flex_shrink_0();
         let header = h_flex()
             .w_full()
             .min_w_0()

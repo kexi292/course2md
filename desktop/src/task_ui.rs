@@ -2128,12 +2128,11 @@ impl Desktop {
             .gap_3()
             .items_center()
             .flex_wrap()
-            .child(
-                accessible_text("tasks-page-title", "任务")
-                    .role(Role::Heading)
-                    .text_size(TEXT_DISPLAY)
-                    .font_weight(FontWeight::SEMIBOLD),
-            )
+            .child(theme::page_heading(
+                "tasks-page-title",
+                icons::task().size(px(24.)).text_color(color(ACCENT_STRONG)),
+                "任务",
+            ))
             .child(
                 accessible_text(
                     "tasks-page-summary",

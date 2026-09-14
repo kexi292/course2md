@@ -303,20 +303,19 @@ impl Desktop {
             .items_center()
             .justify_between()
             .child(
-                accessible_text("page-title", self.page_title())
-                    .role(Role::Heading)
-                    .flex_1()
-                    .min_w_0()
-                    .whitespace_normal()
-                    .text_size(TEXT_DISPLAY)
-                    .font_weight(FontWeight::SEMIBOLD),
+                theme::page_heading(
+                    "page-title",
+                    icons::book_open().size(px(24.)).text_color(color(ACCENT_STRONG)),
+                    self.page_title(),
+                )
+                .flex_1()
+                .min_w_0(),
             )
             .when(self.library_controls_visible(cx), |row| {
                 row.child(
                     quiet("refresh-library")
                         .icon(icons::refresh())
-                        .accessibility_label("刷新课程库")
-                        .tooltip("刷新笔记")
+                        .label("刷新")
                         .loading(self.loading)
                         .disabled(self.loading)
                         .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
