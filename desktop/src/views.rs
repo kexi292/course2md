@@ -4,7 +4,6 @@ use crate::theme::*;
 use gpui_component::button::*;
 
 const SHELL_GUTTER: f32 = 24.;
-const WIDE_COLUMN: Rems = rems(82.);
 pub(super) const SETTINGS_SIDEBAR_WIDTH: f32 = 200.;
 pub(super) const SETTINGS_COLUMN_GAP: f32 = 32.;
 const SETTINGS_CONTENT_MAX_WIDTH: f32 = 800.;
@@ -24,8 +23,8 @@ fn shell_column_for(page: Page) -> Div {
 
 fn shell_column_width(page: Page) -> AbsoluteLength {
     match page {
+        // 全产品一条内容标尺：工作台/任务/笔记库/阅读共用 COLUMN（设置是侧栏构图，自成一体）
         Page::Settings => rems(SETTINGS_SHELL_WIDTH / 14.).into(),
-        Page::Library | Page::Result => WIDE_COLUMN.into(),
         _ => COLUMN.into(),
     }
 }

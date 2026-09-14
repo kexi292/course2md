@@ -440,10 +440,12 @@ impl RenderOnce for SingleChoiceGroup {
             .max_w_full()
             .p(px(inset))
             .rounded_full()
+            // 轨道用内嵌面色（与输入框同一 recessed 语义）：4.5% 混合在深色下与卡片底无法区分，
+            // 导致「选中段跳出轨道」的错觉（system.md：角色映射失败应在共享层修正）
             .bg(if vertical {
                 gpui::transparent_black()
             } else {
-                super::blend(super::color(super::CANVAS), super::color(super::INK), 0.045).into()
+                super::color(super::INSET).into()
             })
             .when(self.full_width, |group| group.w_full())
             .when(!self.full_width, |group| {
