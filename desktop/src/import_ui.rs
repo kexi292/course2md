@@ -139,7 +139,7 @@ fn conversion_ai_preference_row(
     control: Switch,
 ) -> Div {
     // AI 选项行不组合前导图标列（见文件顶部设计决定注释）
-    crate::settings_ui::preference(conversion_ai_option_label(option), hint, control)
+    crate::settings_ui::preference(None, conversion_ai_option_label(option), hint, control)
 }
 
 /// A shared heading for related conversion options. 图标由调用方显式给出（不做文案子串匹配）。
@@ -2423,9 +2423,9 @@ impl Desktop {
                     .gap_3()
                     .items_start()
                     .line_height(rems(1.5))
-                    .child(preference_icon(icons::movie()))
                     .child(
                         crate::settings_ui::preference(
+                            Some(icons::movie()),
                             "保留视频供离线播放",
                             "生成后保留下载的视频，会占用额外空间",
                             coral_switch(

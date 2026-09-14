@@ -77,7 +77,7 @@ impl Desktop {
                     ),
             )
             .child(
-                settings_detail_group("about-license-title", "开源许可")
+                settings_detail_group("about-license-title", icons::code(), "开源许可")
                     .child(
                         h_flex()
                             .w_full()

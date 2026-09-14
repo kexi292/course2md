@@ -190,42 +190,10 @@ pub(super) fn field_label(
         .font_weight(FontWeight::SEMIBOLD)
 }
 
-fn setting_label(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Div {
-    let value = value.into();
-    let icon = if value.contains("文字大小") {
-        icons::zoom_in()
-    } else if value.contains("外观") {
-        icons::palette()
-    } else if value.contains("动态效果") {
-        icons::play_arrow()
-    } else if value.contains("引导") {
-        icons::book_open()
-    } else if value == "视频处理与导出" {
-        icons::movie()
-    } else if value == "读取在线视频" {
-        icons::link()
-    } else if value.contains("认证") || value.contains("密钥") || value == "API Key" {
-        icons::shield()
-    } else if value.contains("名称") {
-        icons::edit()
-    } else if value.contains("字幕") || value.contains("语言") {
-        icons::subtitles()
-    } else if value.contains("识别") || value.contains("音频") {
-        icons::microphone()
-    } else if value.contains("AI") || value.contains("摘要") || value.contains("校对") {
-        icons::auto_fix()
-    } else if value.contains("服务") || value.contains("地址") || value.contains("接口") {
-        icons::cloud()
-    } else if value.contains("保存") || value.contains("位置") || value.contains("缓存") {
-        icons::folder_open()
-    } else if value.contains("模型") {
-        icons::storage()
-    } else {
-        icons::tune()
-    };
+fn setting_label(id: impl Into<ElementId>, icon: Icon, value: impl Into<SharedString>) -> Div {
     semantic_label(
         id,
-        value,
+        value.into(),
         icon.size(rems(20. / 14.)).text_color(color(GRAY)),
     )
 }
@@ -234,26 +202,29 @@ fn setting_label(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Di
 /// Controls align to this item's trailing edge and reflow as a unit.
 pub(super) fn settings_row(
     id: impl Into<ElementId>,
+    icon: Icon,
     label: &'static str,
     hint: &'static str,
     control: impl IntoElement,
 ) -> Div {
-    settings_form_row(id, label, hint, control, false)
+    settings_form_row(id, icon, label, hint, control, false)
 }
 
 /// Editing fields use a top label: errors and related actions stay with the
 /// input without forcing long values into the preference label/control grid.
 pub(super) fn settings_field_row(
     id: impl Into<ElementId>,
+    icon: Icon,
     label: &'static str,
     hint: &'static str,
     field: impl IntoElement,
 ) -> Div {
-    settings_form_row(id, label, hint, field, true)
+    settings_form_row(id, icon, label, hint, field, true)
 }
 
 fn settings_form_row(
     id: impl Into<ElementId>,
+    icon: Icon,
     label: &'static str,
     hint: &'static str,
     control: impl IntoElement,
@@ -265,7 +236,7 @@ fn settings_form_row(
             .w_full()
             .min_w_0()
             .gap_2()
-            .child(setting_label(id.clone(), label))
+            .child(setting_label(id.clone(), icon, label))
             .child(div().w_full().min_w_0().child(control))
             .when(!hint.is_empty(), |view| {
                 view.child(theme::supporting_info(
@@ -289,7 +260,7 @@ fn settings_form_row(
                 .max_w_full()
                 .min_h(CONTROL_HEIGHT)
                 .justify_center()
-                .child(setting_label(id.clone(), label)),
+                .child(setting_label(id.clone(), icon, label)),
         )
         .child(
             h_flex()
@@ -323,7 +294,7 @@ pub(super) fn settings_status_row(
         .min_h(CONTROL_HEIGHT)
         .items_center()
         .gap_4()
-        .child(setting_label(id, label).flex_1().min_w_0().max_w_full())
+        .child(field_label(id, label).flex_1().min_w_0().max_w_full())
         .child(
             h_flex()
                 .flex_shrink_0()
@@ -365,19 +336,14 @@ pub(super) fn settings_section(id: impl Into<ElementId>, title: &'static str, ic
     )
 }
 
-pub(super) fn settings_detail_group(id: impl Into<ElementId>, title: &'static str) -> Div {
+pub(super) fn settings_detail_group(id: impl Into<ElementId>, icon: Icon, title: &'static str) -> Div {
     v_flex().w_full().min_w_0().gap_3().child(
         h_flex()
             .min_w_0()
             .items_center()
             .gap_2()
             .child(
-                match title {
-                    "开源许可" => icons::code(),
-                    "所需程序" => icons::computer(),
-                    "检查服务" => icons::science(),
-                    _ => icons::info(),
-                }
+                icon
                 .size(rems(20. / 14.))
                 .flex_shrink_0()
                 .text_color(color(MUTED)),
@@ -471,7 +437,12 @@ fn group(id: &'static str, title: &'static str) -> Div {
     };
     settings_section(id, title, icon)
 }
-pub(super) fn preference(label: &'static str, hint: &'static str, control: Switch) -> Div {
+pub(super) fn preference(
+    icon: Option<Icon>,
+    label: &'static str,
+    hint: &'static str,
+    control: Switch,
+) -> Div {
     setting_surface().child(
         h_flex()
             .w_full()
@@ -487,10 +458,17 @@ pub(super) fn preference(label: &'static str, hint: &'static str, control: Switc
                         v_flex()
                             .min_h(CONTROL_HEIGHT)
                             .justify_center()
-                            .child(setting_label(
-                                SharedString::from(format!("preference-label-{label}")),
-                                label,
-                            )),
+                            .child(match icon {
+                                Some(icon) => setting_label(
+                                    SharedString::from(format!("preference-label-{label}")),
+                                    icon,
+                                    label,
+                                ),
+                                None => v_flex().child(field_label(
+                                    SharedString::from(format!("preference-label-{label}")),
+                                    label,
+                                )),
+                            }),
                     )
                     .when(!hint.is_empty(), |view| {
                         view.child(theme::supporting_info(
@@ -576,10 +554,16 @@ impl Desktop {
             },
         )
     }
-    fn setting_preference(&self, label: &'static str, hint: &'static str, control: Switch) -> Div {
+    fn setting_preference(
+        &self,
+        icon: Icon,
+        label: &'static str,
+        hint: &'static str,
+        control: Switch,
+    ) -> Div {
         self.reveal_setting(
             SharedString::from(format!("preference-reveal-{label}")),
-            preference(label, hint, control),
+            preference(Some(icon), label, hint, control),
         )
     }
     fn setting_field(&self, field: EditField, label: &'static str, _cx: &App) -> Div {
@@ -603,6 +587,13 @@ impl Desktop {
             ("setting-field-reveal", field as usize),
             settings_field_row(
                 ("setting-field-label", field as usize),
+                match field {
+                    EditField::Name => icons::edit(),
+                    EditField::Address => icons::cloud(),
+                    EditField::Key => icons::shield(),
+                    EditField::Model | EditField::LocalModel => icons::storage(),
+                    EditField::Languages => icons::subtitles(),
+                },
                 label,
                 if field == EditField::Address {
                     "填写基础地址或完整接口地址，包含 http:// 或 https://。"
@@ -1015,6 +1006,7 @@ impl Desktop {
         let languages = group("language-settings", "文字来源")
             .child(settings_row(
                 "subtitle-language-label",
+                icons::subtitles(),
                 "字幕语言",
                 "优先使用字幕，没有字幕时识别视频声音。",
                 v_flex()
@@ -1102,6 +1094,7 @@ impl Desktop {
             ));
         let mut recognition = group("asr-default-settings", "语音识别").child(settings_row(
             "asr-method-label",
+            icons::microphone(),
             "识别方式",
             if provider == "api" {
                 "视频声音会发送到所选语音服务。"
@@ -1129,6 +1122,7 @@ impl Desktop {
                         self.settings_ui.asr_details_open,
                         settings_row(
                             "asr-hardware-heading",
+                            icons::microphone(),
                             "本机引擎",
                             "自动选择本机支持的引擎。固定引擎不可用时会提示原因。",
                             self.setting_choices("default-asr-hardware", "本机引擎")
@@ -1181,6 +1175,7 @@ impl Desktop {
             .child(self.service_picker(ServicePurpose::Ai, false, cx))
             .child(
                 self.setting_preference(
+                    icons::auto_fix(),
                     "AI 校对",
                     "修正识别错误和标点，保留原意与原语言。",
                     Switch::new("default-ai-proofread")
@@ -1194,6 +1189,7 @@ impl Desktop {
             )
             .child(
                 self.setting_preference(
+                    icons::summarize(),
                     "生成摘要",
                     "提炼课程要点并放在笔记开头。",
                     Switch::new("default-ai-summary")
@@ -1209,6 +1205,7 @@ impl Desktop {
         if value.ai_proofread {
             ai_options = ai_options.child(
                 self.setting_preference(
+                    icons::image(),
                     "发送截图辅助校对",
                     if value.vision {
                         "校对时会将对应截图与文字一起发送。"
@@ -1322,6 +1319,7 @@ impl Desktop {
                 group("export-default-settings", "导出与离线保存")
                     .child(settings_row(
                         "export-format-label",
+                        icons::download(),
                         "同时导出",
                         "笔记自动保存在应用内；所选文件可通过阅读页的「打开导出文件夹」取用。",
                         h_flex().gap_3().flex_wrap().children(
@@ -1354,6 +1352,7 @@ impl Desktop {
                     ))
                     .child(
                         self.setting_preference(
+                            icons::movie(),
                             "保留视频供离线播放",
                             "保存在线来源的视频，会占用额外空间。",
                             Switch::new("default-keep-video")
@@ -1510,6 +1509,7 @@ impl Desktop {
             );
         let mut view = v_flex().w_full().min_w_0().gap_2().child(settings_row(
             "local-model-heading",
+            icons::storage(),
             "识别模型",
             "",
             model_control,
@@ -1598,6 +1598,13 @@ impl Desktop {
             ),
         ] {
             let mut section = group(heading_id, heading);
+            if purpose == ServicePurpose::Speech {
+                // 空分区先说明用途：何时需要在线语音服务（与「生成笔记·识别方式」呼应）
+                section = section.child(theme::supporting_info(
+                    "speech-services-purpose",
+                    "没有字幕时可改用在线语音服务识别视频声音；音频会发送到所选服务。本机识别可用时不需要添加。",
+                ));
+            }
             for version in latest.values().filter(|version| {
                 version.config.protocol.purpose() == purpose
                     && !self
@@ -2190,6 +2197,11 @@ impl Desktop {
             settings_row(
                 ("default-service-label", purpose as usize),
                 if purpose == ServicePurpose::Speech {
+                    icons::microphone()
+                } else {
+                    icons::science()
+                },
+                if purpose == ServicePurpose::Speech {
                     "语音服务"
                 } else {
                     "AI 服务"
@@ -2550,14 +2562,14 @@ impl Desktop {
         );
         view = view
             .child(
-                settings_detail_group("service-connection-heading", "连接信息")
+                settings_detail_group("service-connection-heading", icons::cloud(), "连接信息")
                     .child(self.setting_field(EditField::Name, "服务名称", cx)),
             )
             .when(protocol.purpose() == ServicePurpose::Speech, |view| {
                 view.child(
                 v_flex()
                     .gap_2()
-                    .child(setting_label("service-protocol-heading", "接口类型"))
+                    .child(setting_label("service-protocol-heading", icons::cloud(), "接口类型"))
                     .child(
                         self.setting_choices("service-protocol", "服务接口类型")
                             .options(
@@ -2610,7 +2622,7 @@ impl Desktop {
         view = view.child(
             v_flex()
                 .gap_2()
-                .child(setting_label("service-auth-heading", "认证方式"))
+                .child(setting_label("service-auth-heading", icons::shield(), "认证方式"))
                 .child(
                     div().w_full().max_w(rems(560. / 14.)).min_w_0().child(
                         self.setting_choices("service-auth-mode", "服务认证方式")
@@ -2697,6 +2709,7 @@ impl Desktop {
                 );
             }
             view = view.child(preference(
+                None,
                 "显示输入的密钥",
                 "开启后输入的密钥明文可见。",
                 Switch::new("toggle-service-key")
@@ -2731,6 +2744,7 @@ impl Desktop {
                     .gap_2()
                     .child(setting_label(
                         ("setting-field-label", EditField::Model as usize),
+                        icons::storage(),
                         "模型 ID",
                     ))
                     .child(crate::model_discovery::model_field_with_error(
@@ -2747,6 +2761,7 @@ impl Desktop {
         if editor.target.is_some() {
             view = view.child(
                 self.setting_preference(
+                    icons::check_circle(),
                     "同时设为默认服务",
                     "后续转换自动使用",
                     Switch::new("service-also-default")
@@ -2761,7 +2776,7 @@ impl Desktop {
                 ),
             );
         }
-        let mut testing = settings_detail_group("service-test-heading", "检查服务")
+        let mut testing = settings_detail_group("service-test-heading", icons::science(), "检查服务")
             .flex_shrink_0()
             .pt_2();
         if protocol == ServiceProtocol::AiChat {
@@ -4179,6 +4194,7 @@ impl Desktop {
         group("appearance-motion", "界面偏好")
             .child(settings_row(
                 "app-font-scale-label",
+                icons::zoom_in(),
                 "界面文字大小",
                 "",
                 self.setting_choices("app-font-scale", "应用文字大小")
@@ -4210,6 +4226,7 @@ impl Desktop {
             ))
             .child(
                 self.setting_preference(
+                    icons::pause(),
                     "减少动态效果",
                     "关闭过渡与循环动画。",
                     Switch::new("app-reduce-motion")
@@ -4230,6 +4247,7 @@ impl Desktop {
             .child(self.environment_page(window, cx))
             .child(settings_row(
                 "restart-onboarding-label",
+                icons::book_open(),
                 "用户引导",
                 "选择默认引擎、配置 AI 服务和准备模型",
                 outline_pill("restart-onboarding")
@@ -4378,7 +4396,7 @@ impl Desktop {
         );
         let mut details = v_flex().w_full().min_w_0().gap_6().pt_3();
         if let Some(e) = &self.environment {
-            let mut programs = settings_detail_group("diagnostic-programs-heading", "所需程序");
+            let mut programs = settings_detail_group("diagnostic-programs-heading", icons::computer(), "所需程序");
             let needs_llama = matches!(
                 self.preferences
                     .generation()

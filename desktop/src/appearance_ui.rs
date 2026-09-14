@@ -458,7 +458,7 @@ impl Desktop {
             .w_full()
             .min_w_0()
             .gap(px(24.))
-            .child(settings_row("appearance-mode-row", "外观模式", "", modes))
+            .child(settings_row("appearance-mode-row", icons::palette(), "外观模式", "", modes))
             .child(
                 v_flex()
                     .w_full()

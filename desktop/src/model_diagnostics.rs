@@ -784,7 +784,7 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Div {
         let request = self.default_model_request();
-        let mut current = settings_detail_group("model-diagnostic-default", "默认识别模型");
+        let mut current = settings_detail_group("model-diagnostic-default", icons::storage(), "默认识别模型");
         if request.provider == AsrProvider::Api {
             current = current.child(crate::settings_ui::setting_surface().child(
                 settings_detail_row(
@@ -811,7 +811,7 @@ impl Desktop {
             && active.key() != request.key()
         {
             view = view.child(
-                settings_detail_group("other-active-model", "正在准备的模型").child(
+                settings_detail_group("other-active-model", icons::storage(), "正在准备的模型").child(
                     self.model_readiness_panel(
                         active.provider,
                         Some(&active.model),
@@ -851,7 +851,7 @@ impl Desktop {
             );
             if self.settings_ui.model_diagnostics.details {
                 view = view.child(
-                    settings_detail_group("model-preparation-log-heading", "准备日志").child(
+                    settings_detail_group("model-preparation-log-heading", icons::task(), "准备日志").child(
                         settings_value(
                             "model-preparation-log",
                             self.logs.iter().cloned().collect::<Vec<_>>().join("\n"),
@@ -868,7 +868,7 @@ impl Desktop {
         let Some(environment) = &self.environment else {
             return v_flex();
         };
-        let mut hardware = settings_detail_group("model-hardware-heading", "设备与运行时");
+        let mut hardware = settings_detail_group("model-hardware-heading", icons::computer(), "设备与运行时");
         for (id, label, value) in [
             ("cpu-device", "CPU 架构", std::env::consts::ARCH),
             (
