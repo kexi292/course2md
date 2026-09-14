@@ -71,23 +71,9 @@ fn preference_icon(icon: Icon) -> Div {
 
 /// Idle 工作台 conversion-options chrome. 高级选项 is the only disclosure;
 /// conversion defaults live there as real controls, not a standalone callout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct IdleWorkbenchOptionsChrome {
-    pub conversion_defaults_callout: bool,
-    pub advanced_options_toggle: bool,
-}
-
-pub(crate) fn idle_workbench_options_chrome() -> IdleWorkbenchOptionsChrome {
-    IdleWorkbenchOptionsChrome {
-        conversion_defaults_callout: false,
-        advanced_options_toggle: true,
-    }
-}
-
-/// Recognition and engine controls belong at the 高级选项 level.
-pub(crate) fn local_engine_choices_use_nested_disclosure() -> bool {
-    false
-}
+// 设计决定（此前由恒值函数 + 源码嗅探测试钉住，无法被编译器发现且阻碍重构）：
+// idle 工作台不显示 conversion-defaults callout；识别/引擎控件直接放在「高级选项」层，
+// 不再嵌套 disclosure；AI 选项行不组合前导图标列。改动这些决定请直接改代码与本注释。
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConversionAiOption {
@@ -102,10 +88,6 @@ pub(crate) fn conversion_ai_option_label(option: ConversionAiOption) -> &'static
         ConversionAiOption::Vision => "发送截图辅助校对",
         ConversionAiOption::Summary => "生成摘要",
     }
-}
-
-pub(crate) fn conversion_ai_option_composes_leading_icon() -> bool {
-    false
 }
 
 pub(crate) fn conversion_ai_option_enabled(
@@ -152,22 +134,8 @@ fn conversion_ai_preference_row(
     hint: &'static str,
     control: Switch,
 ) -> Div {
-    let preference =
-        crate::settings_ui::preference(conversion_ai_option_label(option), hint, control);
-    if conversion_ai_option_composes_leading_icon() {
-        let icon = match option {
-            ConversionAiOption::Proofread => icons::auto_fix(),
-            ConversionAiOption::Vision => icons::image(),
-            ConversionAiOption::Summary => icons::summarize(),
-        };
-        return h_flex()
-            .gap_3()
-            .items_start()
-            .line_height(rems(1.5))
-            .child(preference_icon(icon))
-            .child(preference.flex_1().min_w_0());
-    }
-    preference
+    // AI 选项行不组合前导图标列（见文件顶部设计决定注释）
+    crate::settings_ui::preference(conversion_ai_option_label(option), hint, control)
 }
 
 /// A shared heading for related conversion options.
@@ -2098,11 +2066,8 @@ impl Desktop {
                         }
                     })),
             );
-        if local_engine_choices_use_nested_disclosure() {
-            unreachable!("recognition controls are shown directly in 高级选项");
-        } else {
-            view = view.child(engine_options);
-        }
+        // 识别/引擎控件直接放在「高级选项」层（见文件顶部设计决定注释）
+        view = view.child(engine_options);
         let (provider, model, root) = self.import_model_request();
         let readiness = self.model_readiness_panel(provider, Some(&model), &root, window, cx);
         view.child(motion::enter("local-speech-readiness", readiness))
@@ -2712,14 +2677,9 @@ impl Desktop {
                     .child(content_options)
                     .child(self.import_destination(cx))
                     .child(self.import_exports(window, cx));
-                let chrome = idle_workbench_options_chrome();
+                // idle 工作台不显示 conversion-defaults callout（见文件顶部设计决定注释）
                 let mut options_header = v_flex().w_full().min_w_0().gap_2();
-                if chrome.conversion_defaults_callout {
-                    unreachable!("idle 工作台 does not compose a conversion-defaults callout");
-                }
-                if chrome.advanced_options_toggle {
-                    options_header = options_header.child(self.generation_options_toggle(cx));
-                }
+                options_header = options_header.child(self.generation_options_toggle(cx));
                 view = view.child(options_header).child(disclosure(
                     "generation-options-body",
                     options_open,
@@ -2990,21 +2950,12 @@ mod tests {
     use super::{
         ConversionAiOption, ConversionFollow, ConversionGate, apply_conversion_ai_option,
         apply_local_engine, apply_speech_location, apply_text_source_mode,
-        automatic_subtitle_fallback, completed_input_task,
-        conversion_ai_option_composes_leading_icon, conversion_ai_option_enabled,
-        conversion_ai_option_label, conversion_gate, idle_workbench_options_chrome,
-        local_engine_choices_use_nested_disclosure, submitted_input_task,
+        automatic_subtitle_fallback, completed_input_task, conversion_ai_option_enabled,
+        conversion_ai_option_label, conversion_gate, submitted_input_task,
         subtitle_needs_confirmation, uses_speech,
     };
     use crate::{ConversionOptions, source, workspace};
     use course2md::subtitle::{CachedSubtitle, SubtitleEvidence, SubtitleReadError};
-
-    fn shipped_import_ui() -> &'static str {
-        include_str!("import_ui.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production import_ui")
-    }
 
     #[test]
     fn one_start_continues_metadata_subtitles_and_environment_without_a_confirmation_stage() {
@@ -3722,55 +3673,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_workbench_omits_conversion_defaults_callout() {
-        let chrome = idle_workbench_options_chrome();
-        assert!(
-            !chrome.conversion_defaults_callout,
-            "idle 工作台 must not show the unused conversion-defaults callout"
-        );
-        assert!(
-            chrome.advanced_options_toggle,
-            "高级选项 remains the opt-in disclosure for conversion controls"
-        );
-        let source = shipped_import_ui();
-        assert!(
-            source.contains("idle_workbench_options_chrome"),
-            "new_page must compose idle chrome through the shipped helper"
-        );
-        assert!(
-            !source.contains("conversion-defaults-summary"),
-            "idle workbench must not compose the unused conversion-defaults callout"
-        );
-        assert!(
-            !source.contains("conversion_defaults_summary"),
-            "the unused conversion-defaults summary must not remain in the workbench"
-        );
-    }
-
-    #[test]
-    fn open_advanced_options_shows_recognition_without_nested_disclosure() {
-        assert!(
-            !local_engine_choices_use_nested_disclosure(),
-            "recognition/engine controls belong at the 高级选项 level"
-        );
-        let source = shipped_import_ui();
-        assert!(
-            !source.contains("\"识别选项\""),
-            "高级选项 must not nest a 识别选项 disclosure"
-        );
-        assert!(
-            !source.contains("\"收起识别选项\""),
-            "高级选项 must not nest a 收起识别选项 control"
-        );
-        assert!(
-            source.contains("import-local-engine"),
-            "local engine choices must still be composed when 高级选项 is open"
-        );
-        assert!(
-            source.contains("import-speech-location"),
-            "speech location choices must still be composed when 高级选项 is open"
-        );
-
+    fn open_advanced_options_applies_source_and_engine_choices() {
         let mut options = ConversionOptions::default();
         let initial_mode = options.source_mode;
         let next_mode = if initial_mode == 0 { 1 } else { 0 };
@@ -3792,10 +3695,6 @@ mod tests {
 
     #[test]
     fn conversion_ai_rows_have_no_leading_icon_column_and_toggles_update_options() {
-        assert!(
-            !conversion_ai_option_composes_leading_icon(),
-            "AI option rows must not compose an extra leading icon column"
-        );
         assert_eq!(
             conversion_ai_option_label(ConversionAiOption::Proofread),
             "AI 校对"
@@ -3807,11 +3706,6 @@ mod tests {
         assert_eq!(
             conversion_ai_option_label(ConversionAiOption::Summary),
             "生成摘要"
-        );
-        let source = shipped_import_ui();
-        assert!(
-            source.contains("conversion_ai_preference_row"),
-            "the three AI rows must compose through the shipped preference helper"
         );
 
         let mut options = ConversionOptions::default();
