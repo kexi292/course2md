@@ -1056,13 +1056,14 @@ impl Desktop {
                     let (name, icon) = if recognized.as_deref() == Some("bilibili") {
                         ("Bilibili", icons::bilibili().text_color(rgb(0x00a1d6)))
                     } else {
-                        ("YouTube", icons::youtube().text_color(rgb(0xff0033)))
+                        ("YouTube", icons::youtube().text_color(rgb(0xff0000)))
                     };
+                    // 品牌图标 + 一句识别反馈，不再品牌名/句中重复（review2#7）
                     view = view.child(
                         h_flex()
                             .gap_2()
                             .items_center()
-                            .child(platform_mark(name, icon))
+                            .child(icon.size(px(16.)).flex_shrink_0())
                             .child(
                                 accessible_text(
                                     "source-platform-recognized",

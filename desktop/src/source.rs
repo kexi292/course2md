@@ -43,12 +43,8 @@ impl Source {
             details.push(self.author.clone());
         }
         if seconds > 0 {
-            details.push(format!(
-                "{}:{:02}:{:02}",
-                seconds / 3600,
-                seconds / 60 % 60,
-                seconds % 60
-            ));
+            // 与 fmt_ts 同一记法（07:37，不带 0 小时位）：跨页时长一致（review2#8）
+            details.push(course2md::render::fmt_ts(seconds as f64));
         }
         details.join(" · ")
     }

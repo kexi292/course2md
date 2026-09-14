@@ -2619,7 +2619,7 @@ impl Desktop {
                 )
             {
                 actions = actions.child(
-                    quiet(SharedString::from(format!("adjust-{id}")))
+                    outline_pill(SharedString::from(format!("adjust-{id}")))
                         .icon(icons::tune())
                         .label(if task.artifact.is_some() {
                             "调整并生成新版"
