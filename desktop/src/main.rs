@@ -1282,8 +1282,11 @@ impl Desktop {
                         );
                         if reader_origin.is_none() {
                             this.result_tab = 0;
+                            this.sync_reader_tab_stops();
                         }
                         this.preview = Some(preview);
+                        // 事件路径触发阅读页数据加载（渲染不再负责）
+                        this.ensure_reader_data(cx);
                         this.apply_course_title_aliases();
                         this.restore_reading_position(cx);
                         this.page = Page::Result;

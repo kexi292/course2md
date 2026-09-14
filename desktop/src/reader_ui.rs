@@ -1664,7 +1664,12 @@ impl Desktop {
         }
         cx.notify();
     }
-    fn ensure_reader_data(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_reader_tab_stops(&mut self) {
+        for (index, focus) in self.reader_ui.view_focus.iter_mut().enumerate() {
+            *focus = focus.clone().tab_stop(index == self.result_tab);
+        }
+    }
+    pub(crate) fn ensure_reader_data(&mut self, cx: &mut Context<Self>) {
         let Some(preview) = &self.preview else {
             return;
         };
@@ -2027,6 +2032,7 @@ impl Desktop {
         if self.result_tab != 0 {
             self.save_reading_position(cx);
             self.result_tab = 0;
+            self.sync_reader_tab_stops();
         }
         let Some(preview) = &self.preview else {
             return;
@@ -2079,9 +2085,12 @@ impl Desktop {
                         preview.course.title = this.course_display_title(&preview.course);
                         this.preview = Some(preview);
                         this.result_tab = tab;
+                        this.sync_reader_tab_stops();
                         if refresh {
                             this.reader_ui.loaded = None;
                         }
+                        // 事件路径触发数据加载（渲染不再负责）
+                        this.ensure_reader_data(cx);
                         let has_saved_position = this.reading_key().is_some_and(|key| {
                             this.workspace.as_ref().is_some_and(|workspace| {
                                 workspace.state.positions.contains_key(&key)
@@ -2375,6 +2384,7 @@ impl Desktop {
         if self.result_tab != index {
             self.save_reading_position(cx);
             self.result_tab = index;
+            self.sync_reader_tab_stops();
             if index == 1
                 && !self
                     .reader_ui
@@ -2406,10 +2416,8 @@ impl Desktop {
                 cx,
             );
         };
-        self.ensure_reader_data(cx);
-        for (index, focus) in self.reader_ui.view_focus.iter_mut().enumerate() {
-            *focus = focus.clone().tab_stop(index == self.result_tab);
-        }
+        // 渲染只读已提交快照：数据加载在 preview 变更的事件路径触发（ensure_reader_data），
+        // tab stops 在各 result_tab 赋值点同步
         if self.reader_ui.clear_find {
             self.reader_ui.clear_find = false;
             self.reader_ui
