@@ -35,8 +35,9 @@ pub(crate) fn json_call(call: ureq::Request, authorization: Option<&Secret>) -> 
 }
 
 /// 有界读取的失败分类：网络/IO 错误与响应体超限分开。
+/// Network 的错误体有意不透出（调用方统一映射为自己的网络错误）。
 pub(crate) enum BoundedReadError {
-    Network(std::io::Error),
+    Network(#[allow(dead_code)] std::io::Error),
     TooLarge,
 }
 
