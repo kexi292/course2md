@@ -157,7 +157,7 @@ impl Bar {
     pub fn set_message(&self, msg: impl Into<String>) {
         let msg = msg.into();
         if is_json() {
-            *self.message.lock().unwrap() = msg;
+            *self.message.lock().unwrap_or_else(|p| p.into_inner()) = msg;
             let cur = self.current.load(Ordering::Relaxed);
             self.emit_progress(cur, false);
         } else {
@@ -173,7 +173,7 @@ impl Bar {
     }
 
     fn emit_progress(&self, current: u64, force: bool) {
-        let mut last = self.last_emit.lock().unwrap();
+        let mut last = self.last_emit.lock().unwrap_or_else(|p| p.into_inner());
         if !force
             && current != 0
             && current != self.total

@@ -30,6 +30,10 @@ const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(300);
 const API_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 /// llama-server 单 chunk 转写超时
 const LLAMA_HTTP_TIMEOUT: Duration = Duration::from_secs(180);
+/// ffmpeg silencedetect 上限：整段音频 VAD 只做一次，但不得无限挂死
+const VAD_TIMEOUT: Duration = Duration::from_secs(900);
+/// ffmpeg 单段切音频上限（chunk 最长 max_speech 秒，处理应远快于此）
+const CUT_TIMEOUT: Duration = Duration::from_secs(120);
 /// 云端 STT 并发 worker 数：网络往返是主要瓶颈
 const WORKERS: usize = 4;
 /// HTTP 重试：最多 3 次（1 次首发 + 2 次重试），指数退避 1s → 2s；
@@ -958,20 +962,20 @@ fn transcribe_file(client: &ureq::Agent, base: &str, wav: &Path) -> Result<Strin
 }
 
 pub(crate) fn ffmpeg_vad(wav: &Path, max_speech: f32) -> Result<Vec<Seg>> {
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-i"])
+    // stdin 关闭 + 超时强制 kill：ffmpeg 在 GUI/管道 stdin 上可能挂死（issue 审查）
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-nostdin", "-i"])
         .arg(wav)
-        .args(["-af", SILENCEDETECT_AF, "-f", "null", "-"])
-        .output()
-        .context("ffmpeg silencedetect")?;
+        .args(["-af", SILENCEDETECT_AF, "-f", "null", "-"]);
+    let out = crate::runtime::run_bounded("ffmpeg", &mut cmd, VAD_TIMEOUT)?;
     if !out.status.success() {
         anyhow::bail!(
             "ffmpeg silencedetect 失败（{0}）：{1} / ffmpeg silencedetect failed ({0}): {1}",
             out.status,
-            crate::error::tail_lines(&String::from_utf8_lossy(&out.stderr), 3)
+            crate::error::tail_lines(&out.stderr, 3)
         );
     }
-    let log = String::from_utf8_lossy(&out.stderr);
+    let log = &out.stderr;
     // 时长只探测一次，传入 normalize_segments（此前两处各 ffprobe 一次）；
     // 失败至少告警——静默落 0.0 会让末段语音丢失。
     let dur = match crate::media::probe_duration_blocking(wav) {
@@ -1240,18 +1244,17 @@ fn invert_silence(dur: f64, sil: &[(f64, f64)]) -> Vec<(f64, f64)> {
 
 pub fn cut_wav(src: &Path, start: f64, end: f64, dest: &Path) -> Result<()> {
     let dur = (end - start).max(0.05);
-    let st = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss"])
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss"])
         .arg(format!("{start:.3}"))
         .arg("-t")
         .arg(format!("{dur:.3}"))
         .arg("-i")
         .arg(src)
         .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
-        .arg(dest)
-        .status()
-        .context("ffmpeg cut")?;
-    if !st.success() {
+        .arg(dest);
+    let out = crate::runtime::run_bounded("ffmpeg", &mut cmd, CUT_TIMEOUT)?;
+    if !out.status.success() {
         anyhow::bail!("无法切分音频 / ffmpeg could not split audio");
     }
     Ok(())
