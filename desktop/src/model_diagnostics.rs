@@ -689,7 +689,7 @@ impl Desktop {
                 .progress
                 .iter()
                 .filter(|(stage, progress)| {
-                    (stage.starts_with("model") || stage.contains("download"))
+                    crate::activity::is_model_transfer_stage(stage)
                         && progress.has_samples()
                         && !progress.done
                 })
@@ -697,7 +697,7 @@ impl Desktop {
             {
                 view = view.child(crate::motion::transfer_status(
                     ("model-download-progress", index),
-                    activity::title(stage),
+                    crate::activity::model_transfer_phase(stage, &progress.message),
                     &progress.transfer_metrics(stage, true),
                     progress.fraction(),
                     window,

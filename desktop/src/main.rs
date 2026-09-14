@@ -1077,7 +1077,8 @@ impl Desktop {
             self.start_next_task(cx);
         }
         let ticking = save || immediate || self.job.is_some() || self.event_repaint_pending;
-        let interval = if save || self.event_repaint_pending {
+        // 模型下载与任务同一合帧节奏（此前 1s，设置页进度条明显滞后）
+        let interval = if save || self.event_repaint_pending || self.kind == Kind::Models {
             EVENT_REPAINT_INTERVAL
         } else {
             Duration::from_secs(1)

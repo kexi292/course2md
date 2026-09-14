@@ -275,6 +275,41 @@ pub fn title(stage: &str) -> String {
     }
     .into()
 }
+/// 模型下载/准备类阶段：诊断面板与引导页共用同一过滤器（此前三处复制）。
+pub(crate) fn is_model_transfer_stage(stage: &str) -> bool {
+    stage.starts_with("model") || stage.contains("download")
+}
+
+/// 准备阶段文案：诊断面板与引导页同一来源。
+/// 阶段名来自结构化的 stage；消息关键词只用于细分文件类型。
+/// 注意：关键词嗅探依赖 worker 输出文案——上游改文案时退化为 stage 标题（可接受的降级，
+/// 彻底修法是引擎发结构化阶段事件，记录在 docs/ENGINEERING-AUDIT.md 后续建议）。
+const PREPARATION_PHASE_HINTS: &[(&str, &str)] = &[
+    ("silero", "下载语音检测文件"),
+    ("compil", "编译识别模型"),
+    ("whisper", "下载 Whisper 模型文件"),
+];
+
+pub(crate) fn model_transfer_phase(stage: &str, message: &str) -> String {
+    let lower = message.trim().to_ascii_lowercase();
+    for (needle, phase) in PREPARATION_PHASE_HINTS {
+        if lower.contains(needle) {
+            return (*phase).into();
+        }
+    }
+    if lower
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .any(|word| matches!(word, "loading" | "load"))
+        || message.contains("加载")
+    {
+        return "加载识别模型".into();
+    }
+    if lower.contains("qwen") && lower.contains('/') {
+        return "下载 Qwen3 模型文件".into();
+    }
+    title(stage)
+}
+
 pub(crate) fn bytes(value: u64) -> String {
     if value >= 1024 * 1024 * 1024 {
         format!("{:.2} GB", value as f64 / (1024. * 1024. * 1024.))

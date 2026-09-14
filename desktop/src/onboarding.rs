@@ -457,26 +457,6 @@ fn help(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Stateful<Di
     settings_value(id, value).text_color(color(MUTED))
 }
 
-fn model_preparation_phase(stage: &str, message: &str) -> String {
-    let lower = message.trim().to_ascii_lowercase();
-    if lower.contains("silero") {
-        "下载语音检测文件".into()
-    } else if lower.contains("compil") {
-        "编译识别模型".into()
-    } else if lower
-        .split(|character: char| !character.is_ascii_alphabetic())
-        .any(|word| matches!(word, "loading" | "load"))
-        || message.contains("加载")
-    {
-        "加载识别模型".into()
-    } else if lower.contains("qwen") && lower.contains('/') {
-        "下载 Qwen3 模型文件".into()
-    } else if lower.contains("whisper") && lower.contains('/') {
-        "下载 Whisper 模型文件".into()
-    } else {
-        activity::title(stage)
-    }
-}
 
 impl Desktop {
     pub(crate) fn start_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2287,14 +2267,14 @@ impl Desktop {
             .progress
             .iter()
             .filter(|(stage, progress)| {
-                (stage.starts_with("model") || stage.contains("download"))
+                crate::activity::is_model_transfer_stage(stage)
                     && progress.has_samples()
                     && !progress.done
             })
             .enumerate()
         {
             has_phase = true;
-            let phase = model_preparation_phase(stage, &progress.message);
+            let phase = activity::model_transfer_phase(stage, &progress.message);
             view = view.child(motion::transfer_status(
                 ("setup-model-progress", index),
                 phase,
@@ -2521,12 +2501,12 @@ impl Desktop {
                 self.progress
                     .iter()
                     .find(|(stage, progress)| {
-                        (stage.starts_with("model") || stage.contains("download"))
+                        crate::activity::is_model_transfer_stage(stage)
                             && progress.has_samples()
                             && !progress.done
                     })
                     .map(|(stage, progress)| {
-                        let phase = model_preparation_phase(stage, &progress.message);
+                        let phase = activity::model_transfer_phase(stage, &progress.message);
                         progress
                             .fraction()
                             .map(|fraction| {
@@ -2635,18 +2615,18 @@ mod tests {
     #[test]
     fn model_progress_distinguishes_download_from_loading() {
         assert_eq!(
-            super::model_preparation_phase(
+            super::activity::model_transfer_phase(
                 "model/apple",
                 "Downloading vendor/Qwen3-ASR/model.safetensors"
             ),
             "下载 Qwen3 模型文件"
         );
         assert_eq!(
-            super::model_preparation_phase("model/apple", "Loading vendor/Qwen3-ASR"),
+            super::activity::model_transfer_phase("model/apple", "Loading vendor/Qwen3-ASR"),
             "加载识别模型"
         );
         assert_eq!(
-            super::model_preparation_phase("model/apple", "Compiling model"),
+            super::activity::model_transfer_phase("model/apple", "Compiling model"),
             "编译识别模型"
         );
     }
