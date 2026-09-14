@@ -947,14 +947,14 @@ fn transcribe_file(client: &ureq::Agent, base: &str, wav: &Path) -> Result<Strin
     });
     let v = post_json_retry(client, &format!("{base}/v1/chat/completions"), None, &body)
         .context("本地语音识别请求失败 / Local transcription request failed")?;
-    let text = v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    if text.is_empty() {
-        anyhow::bail!("本地识别返回空文本 / Local transcription returned empty text: {v}");
+    let choice = &v["choices"][0];
+    if choice.is_null() {
+        // 协议错误才失败：响应缺少 choices
+        anyhow::bail!("本地识别响应缺少 choices / Local transcription response missing choices: {v}");
     }
-    Ok(text)
+    // 空文本按无语音处理（与云端 transcribe_api 的 Ok(None) 同语义）：
+    // VAD 切出的近静音段在 llama-server 上常返回空，不该把整次 ASR 判死
+    Ok(choice["message"]["content"].as_str().unwrap_or("").to_string())
 }
 
 pub(crate) fn ffmpeg_vad(wav: &Path, max_speech: f32) -> Result<Vec<Seg>> {
