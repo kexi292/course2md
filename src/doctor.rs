@@ -61,12 +61,8 @@ pub fn run() -> Result<()> {
     }
     #[cfg(apple_native)]
     {
-        let exe = std::env::current_exe().unwrap_or_default();
-        let dir = exe.parent().unwrap_or(Path::new("."));
-        let shaders = ["mlx.metallib", "default.metallib"]
-            .iter()
-            .any(|name| dir.join(name).is_file());
-        if shaders {
+        // 与运行时 ensure_metallib 同一搜索清单（exe 同目录/Resources/上级 Resources/CWD）
+        if crate::apple::find_metallib().is_some() {
             check(
                 &mut out,
                 true,
