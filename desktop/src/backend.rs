@@ -397,7 +397,15 @@ impl Environment {
             ];
             let handles: Vec<_> = commands
                 .into_iter()
-                .map(|(name, bin, arg)| (name, scope.spawn(move || probe(bin, &[arg]))))
+                .map(|(name, bin, arg)| {
+                    // GPU 首次枚举可能触发驱动初始化（实测偶发 17s），给足与引擎一致的余量
+                    let timeout = if name == "llama-devices" {
+                        Duration::from_secs(20)
+                    } else {
+                        Duration::from_secs(5)
+                    };
+                    (name, scope.spawn(move || probe(bin, &[arg], timeout)))
+                })
                 .collect();
             handles
                 .into_iter()
@@ -432,7 +440,7 @@ impl Environment {
                 .is_ok_and(|vendor| vendor.trim() == "0x8086")
         } else if cfg!(target_os = "windows") {
             probe(Path::new("powershell.exe"), &["-NoProfile", "-NonInteractive", "-Command",
-                "Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match 'Intel.*(AI Boost|NPU)' -and $_.Status -eq 'OK' } | Select-Object -ExpandProperty Name"])
+                "Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match 'Intel.*(AI Boost|NPU)' -and $_.Status -eq 'OK' } | Select-Object -ExpandProperty Name"], Duration::from_secs(10))
                 .is_some_and(|name| !name.trim().is_empty())
         } else {
             false
@@ -459,7 +467,7 @@ impl Environment {
 
 /// Bounded, executable checks. Redirect output to a file so a verbose tool cannot
 /// fill a pipe while the detector waits; timed-out children are always reaped.
-fn probe(bin: &Path, args: &[&str]) -> Option<String> {
+fn probe(bin: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     use std::io::{Read, Seek};
     let mut output = tempfile::tempfile().ok()?;
     let mut command = Command::new(bin);
@@ -480,7 +488,7 @@ fn probe(bin: &Path, args: &[&str]) -> Option<String> {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
             Ok(Some(_)) => return None,
-            Ok(None) if started.elapsed() < Duration::from_secs(5) => {
+            Ok(None) if started.elapsed() < timeout => {
                 thread::sleep(Duration::from_millis(25))
             }
             _ => {
