@@ -1236,6 +1236,14 @@ impl Desktop {
                 }
                 match result {
                     Ok(preview) => {
+                        // 与 navigate() 相同的离页义务：离开工作台先存草稿；
+                        // 主动打开另一篇笔记时取消无关的转换跟随，后台完成不得抢占当前位置
+                        if this.page == Page::New {
+                            this.save_current_draft(cx);
+                        }
+                        if follow.is_none() {
+                            this.following_conversion = None;
+                        }
                         // The old note remains scrollable during the read. Its
                         // current anchor, after all ownership guards pass, is the
                         // one that belongs in the repaired version.
