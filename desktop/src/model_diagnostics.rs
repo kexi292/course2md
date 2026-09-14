@@ -66,6 +66,16 @@ pub(crate) struct ModelSetupSnapshot {
 fn provider_name(provider: AsrProvider) -> &'static str {
     crate::provider_label(Some(provider))
 }
+
+/// 模型展示名的唯一权威来源（与设置/引导页的选择标签一致）。
+pub(crate) fn model_display_name(model: &str) -> String {
+    match model {
+        "qwen3-1.7b" => "Qwen3 1.7B".to_owned(),
+        "qwen3-0.6b" => "Qwen3 0.6B".to_owned(),
+        "whisper" => "Whisper".to_owned(),
+        _ => model.to_owned(),
+    }
+}
 impl Desktop {
     pub(crate) fn setup_model_snapshot(
         &self,
@@ -389,37 +399,45 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.model_readiness_panel_with(provider, model, root, true, window, cx)
+    }
+    /// `provider_row`：是否展示「本机引擎」行。工作台的选择器已是方式事实来源，传 false；
+    /// 设置页的模型管理面板传 true（面板独立承担状态摘要）。
+    pub fn model_readiness_panel_with(
+        &self,
+        provider: AsrProvider,
+        model: Option<&str>,
+        root: &Path,
+        provider_row: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let request = Request::new(provider, model, root);
         let key = request.key();
         let entry = self.settings_ui.model_diagnostics.entries.get(&key);
         let device_issue = self.model_device_issue(provider);
         let mut cache_details = None;
-        let mut view = v_flex()
-            .w_full()
-            .min_w_0()
-            .gap_3()
-            .child(settings_status_row(
+        let mut view = v_flex().w_full().min_w_0().gap_3();
+        if provider_row {
+            view = view.child(settings_status_row(
                 SharedString::from(format!("model-provider-label-{key}")),
-                "识别方式",
+                "本机引擎",
                 settings_value(
                     SharedString::from(format!("model-provider-{key}")),
                     provider_name(provider),
                 )
                 .w_auto(),
-            ))
-            .child(settings_status_row(
-                SharedString::from(format!("model-name-label-{key}")),
-                "模型",
-                settings_value(
-                    SharedString::from(format!("model-name-{key}")),
-                    match request.model.as_str() {
-                        "qwen3-1.7b" => "Qwen3-ASR 1.7B".to_owned(),
-                        "qwen3-0.6b" => "Qwen3-ASR 0.6B".to_owned(),
-                        _ => request.model.clone(),
-                    },
-                )
-                .w_auto(),
             ));
+        }
+        view = view.child(settings_status_row(
+            SharedString::from(format!("model-name-label-{key}")),
+            "模型",
+            settings_value(
+                SharedString::from(format!("model-name-{key}")),
+                model_display_name(&request.model),
+            )
+            .w_auto(),
+        ));
         if let Some(issue) = &device_issue {
             view = view
                 .child(settings_detail_row(

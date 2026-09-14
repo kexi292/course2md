@@ -142,16 +142,8 @@ fn conversion_ai_preference_row(
     crate::settings_ui::preference(conversion_ai_option_label(option), hint, control)
 }
 
-/// A shared heading for related conversion options.
-pub(crate) fn box_section(label: &'static str) -> Div {
-    let icon = match label {
-        "所选视频" => icons::movie(),
-        "笔记内容" | "文字来源" => icons::subtitles(),
-        "名称与保存" => Icon::new(IconName::Folder),
-        "导出与视频" => icons::download(),
-        "本次任务" => icons::task(),
-        _ => Icon::new(IconName::Info),
-    };
+/// A shared heading for related conversion options. 图标由调用方显式给出（不做文案子串匹配）。
+pub(crate) fn box_section(icon: Icon, label: &'static str) -> Div {
     v_flex().w_full().min_w_0().gap_3().child(
         h_flex()
             .gap_2()
@@ -1757,14 +1749,14 @@ impl Desktop {
         view
     }
 
-    fn import_content_options(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+    fn import_text_mode_options(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let speech = if self.source_preview.is_some() {
             self.import_uses_speech()
         } else {
             self.task_options.source_mode != 1
         };
         let speech_options = self.import_speech_options(window, cx);
-        let mut view = v_flex()
+        let view = v_flex()
             .w_full()
             .min_w_0()
             .gap_3()
@@ -1797,6 +1789,11 @@ impl Desktop {
                 window,
                 cx,
             ));
+        view
+    }
+
+    fn import_ai_options(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let mut view = v_flex().w_full().min_w_0().gap_3();
         let vision_options = conversion_ai_preference_row(
             ConversionAiOption::Vision,
             "文字及对应截图会发送到所选服务",
@@ -2028,11 +2025,10 @@ impl Desktop {
         );
         let engine_options = v_flex()
             .gap_2()
-            .child(help(format!("当前方式：{}", self.local_engine_name())))
             .child(
                 SingleChoiceGroup::new("import-local-engine", "本机识别方式")
                     .options(
-                        PROVIDERS[..5]
+                        PROVIDERS[..crate::CLOUD_PROVIDER_INDEX]
                             .iter()
                             .enumerate()
                             .filter(|(index, _)| {
@@ -2070,10 +2066,20 @@ impl Desktop {
                         }
                     })),
             );
+        // 「应用推荐方式」的解析结果以 supporting text 附在选择器旁；
+        // 显式选择时选择器本身就是唯一事实来源，不再重复一行「当前方式」
+        let engine_options = if self.task_options.provider == 0 {
+            engine_options.child(help(format!("当前方式：{}", self.local_engine_name())))
+        } else {
+            engine_options
+        };
         // 识别/引擎控件直接放在「高级选项」层（见文件顶部设计决定注释）
         view = view.child(engine_options);
         let (provider, model, root) = self.import_model_request();
-        let readiness = self.model_readiness_panel(provider, Some(&model), &root, window, cx);
+        // 设置单元 bound 到有用内容宽度，不做整版两端拉扯（layout-and-type.md#a-form-grid-is-not-two-distant-edges）
+        let readiness = self
+            .model_readiness_panel_with(provider, Some(&model), &root, false, window, cx)
+            .max_w(rems(40.));
         view.child(motion::enter("local-speech-readiness", readiness))
     }
 
@@ -2155,7 +2161,7 @@ impl Desktop {
             .iter()
             .find(|library| Some(&library.id) == current.as_ref())
             .cloned();
-        let mut view = box_section("名称与保存").child(crate::focus_scroll::RevealFocus::new(
+        let mut view = box_section(Icon::new(IconName::Folder), "名称与保存").child(crate::focus_scroll::RevealFocus::new(
             ("import-title-focus", self.validation_attempt),
             self.input(Field::Title, "笔记名称", cx),
             self.scrolls[Page::New as usize].clone(),
@@ -2268,7 +2274,7 @@ impl Desktop {
             .filter(|(index, _)| self.task_options.formats[*index])
             .map(|(_, label)| *label)
             .collect();
-        let mut view = box_section("导出与视频").child(
+        let mut view = box_section(icons::download(), "导出与视频").child(
             h_flex()
                 .gap_3()
                 .items_center()
@@ -2656,25 +2662,26 @@ impl Desktop {
                     .child(self.box_selected_video(window, cx));
                 if text_required {
                     source = source
-                        .child(box_section("文字来源").child(self.text_source_view(window, cx)));
+                        .child(box_section(icons::subtitles(), "文字来源").child(self.text_source_view(window, cx)));
                 }
                 source = source.child(self.conversion_recovery(cx));
                 view = view.child(source);
             } else if text_required {
-                view = view.child(box_section("文字来源").child(self.text_source_view(window, cx)));
+                view = view.child(box_section(icons::subtitles(), "文字来源").child(self.text_source_view(window, cx)));
             }
             if self.preview_cancel.is_none() && self.source_candidates.is_empty() {
                 let options_open = self.generation_options_open;
-                let mut content_options = box_section("笔记内容");
+                let mut recognition_box = box_section(icons::microphone(), "识别方式");
                 if self.source_preview.is_some() && !text_required {
-                    content_options = content_options.child(self.text_source_view(window, cx));
+                    recognition_box = recognition_box.child(self.text_source_view(window, cx));
                 }
-                content_options = content_options.child(self.import_content_options(window, cx));
+                recognition_box = recognition_box.child(self.import_text_mode_options(window, cx));
                 let options = v_flex()
                     .w_full()
                     .min_w_0()
                     .gap_6()
-                    .child(content_options)
+                    .child(recognition_box)
+                    .child(box_section(icons::subtitles(), "笔记内容").child(self.import_ai_options(window, cx)))
                     .child(self.import_destination(cx))
                     .child(self.import_exports(window, cx));
                 // idle 工作台不显示 conversion-defaults callout（见文件顶部设计决定注释）
