@@ -533,6 +533,14 @@ pub fn scrollbars_always_visible() -> bool {
 
 /// 滚动条模式：常显偏好→Always；其余滚动时显示、闲置淡出。
 pub(crate) fn vertical_scrollbar(handle: &gpui::ScrollHandle) -> gpui_component::scroll::Scrollbar {
+    vertical_scrollbar_for(handle)
+}
+
+/// 任意 ScrollbarHandle（含 gpui::ListState 虚拟列表）都走同一模式决策：
+/// 系统「始终显示滚动条」偏好开启时常驻，否则滚动时显示。
+pub(crate) fn vertical_scrollbar_for<H: gpui_component::scroll::ScrollbarHandle + Clone>(
+    handle: &H,
+) -> gpui_component::scroll::Scrollbar {
     use gpui_component::scroll::{Scrollbar, ScrollbarMode};
     Scrollbar::vertical(handle).mode(if scrollbars_always_visible() {
         ScrollbarMode::Always

@@ -14,14 +14,9 @@ use std::sync::{
 };
 
 fn help(text: impl Into<SharedString>) -> Div {
+    // 与设置页同一辅助信息处理：共享 ⓘ 图标 + 常规字重（review5 Note）
     let text = text.into();
-    div()
-        .min_w_0()
-        .max_w_full()
-        .whitespace_normal()
-        .text_sm()
-        .text_color(color(MUTED))
-        .child(accessible_text(text_id("help", &text), text))
+    theme::supporting_info(text_id("help", &text), text).text_sm()
 }
 fn issue(message: impl Into<SharedString>) -> Div {
     let message = message.into();
@@ -2040,13 +2035,10 @@ impl Desktop {
                 "cloud-speech-service",
                 v_flex()
                     .gap_3()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(icons::cloud().size(px(20.)).text_color(color(GRAY)))
-                            .child(help("音频发送到所选识别服务")),
-                    )
+                    .child(theme::supporting_info(
+                        "import-cloud-note",
+                        "音频发送到所选识别服务",
+                    ))
                     .child(self.task_service_picker(ServicePurpose::Speech, cx))));
         }
         view = view.child(

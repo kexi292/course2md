@@ -3777,6 +3777,7 @@ impl Desktop {
                 .id("note-reader")
                 .role(Role::Document)
                 .aria_label(preview.course.title.clone())
+                .relative()
                 .flex_1()
                 .min_h_0()
                 .min_w_0()
@@ -3792,6 +3793,8 @@ impl Desktop {
                     .h_full()
                     .py_3(),
                 )
+                // 正文滚动容器也兑现「始终显示滚动条」偏好（review4#4）
+                .child(crate::backend::vertical_scrollbar_for(&self.reader_ui.note_list))
                 .into_any_element()
         } else {
             let mut article = v_flex()
@@ -4055,7 +4058,17 @@ impl Desktop {
                     grid.child(measured(index, card.child(card_body).into_any_element()).h_full());
             }
             article = article.child(grid);
-            article.into_any_element()
+            // 正文滚动容器也兑现「始终显示滚动条」偏好（review4#4）
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .h_full()
+                .child(article)
+                .child(crate::backend::vertical_scrollbar(&self.reader_scroll))
+                .into_any_element()
         };
         // Wide reading opens the contents automatically. Manual choices are retained
         // across tab changes, note changes and subsequent window resizing.
