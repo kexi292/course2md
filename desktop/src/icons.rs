@@ -451,7 +451,7 @@ icon_fn!(toc, "icons/format-list-bulleted.svg");
 pub fn youtube() -> gpui_component::Icon {
     gpui_component::Icon::default()
         .path("brands/youtube.svg")
-        .text_color(gpui::rgb(0xff0033))
+        .text_color(gpui::rgb(0xff0000))
 }
 
 pub fn bilibili() -> gpui_component::Icon {

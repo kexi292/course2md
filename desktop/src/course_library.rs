@@ -1935,7 +1935,13 @@ impl Desktop {
         section = section.child(
             h_flex()
                 .w_full()
-                .items_baseline()
+                .items_center()
+                .gap_2()
+                .child(
+                    icons::history()
+                        .size(px(20.))
+                        .text_color(color(ACCENT_STRONG)),
+                )
                 .child(
                     accessible_text("recent-title", "最近笔记")
                         .text_size(TEXT_TITLE)
