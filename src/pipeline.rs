@@ -44,7 +44,10 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
         VideoMeta {
             title: sanitize_stem(local),
             uploader: String::new(),
-            duration: media::probe_duration(local).await.unwrap_or(0.),
+            // 时长探测失败不能静默当 0：后续 merge/Section.end 会全部失真
+            duration: media::probe_duration(local)
+                .await
+                .context("无法探测本地视频时长 / Could not probe the local video duration")?,
             webpage_url: cfg.url.clone(),
             extractor: "local".into(),
             id: execution::file_digest(local)?,

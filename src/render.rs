@@ -215,21 +215,21 @@ pub async fn write_outputs(
                 if let Some(sm) = summary {
                     md = crate::summarize::insert_into_md(&md, sm);
                 }
-                tokio::fs::write(out_dir.join("course.md"), md).await?;
+                // 与全库同一崩溃安全纪律：崩溃不留半截笔记文件
+                crate::checkpoint::atomic_write(&out_dir.join("course.md"), md.as_bytes())?;
             }
             crate::config::OutputFormat::Html => {
                 let mut html = render_html(meta, sections);
                 if let Some(sm) = summary {
                     html = crate::summarize::insert_into_html(&html, sm);
                 }
-                tokio::fs::write(out_dir.join("course.html"), html).await?;
+                crate::checkpoint::atomic_write(&out_dir.join("course.html"), html.as_bytes())?;
             }
             crate::config::OutputFormat::Json => {
-                tokio::fs::write(
-                    out_dir.join("structured.json"),
-                    render_json(meta, sections)?,
-                )
-                .await?;
+                crate::checkpoint::atomic_write(
+                    &out_dir.join("structured.json"),
+                    render_json(meta, sections)?.as_bytes(),
+                )?;
             }
         }
     }

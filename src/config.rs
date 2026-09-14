@@ -488,7 +488,7 @@ pub fn expand_tilde(p: PathBuf) -> PathBuf {
     p
 }
 
-/// resume 三态解析：`--no-resume` > `--resume` > 配置文件 > 默认关闭。
+/// resume 三态解析：`--no-resume` > `--resume` > 配置文件 > 默认开启。
 /// 两级 CLI flag 互斥（clap conflicts_with），不会同时为 true。
 pub fn resolve_resume(cli_resume: bool, cli_no_resume: bool, file_resume: Option<bool>) -> bool {
     if cli_no_resume {

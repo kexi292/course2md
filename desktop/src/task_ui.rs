@@ -1458,17 +1458,23 @@ impl Desktop {
             Err(error) => {
                 let message = format!("{error:#}");
                 if let Some(workspace) = &mut self.workspace {
-                    let _ = workspace
-                        .transaction(|state| {
-                            let record = state.task_mut(&task.id).context("任务不存在")?;
+                    let compensated = workspace.transaction(|state| {
+                        let record = state.task_mut(&task.id).context("任务不存在")?;
+                        record.state = TaskState::NeedsAttention;
+                        record.error = Some(message.clone());
+                        record.unread = true;
+                        Ok(())
+                    });
+                    if let Err(error) = compensated {
+                        // 补偿持久化失败也不能让任务停在 Running 被调度器无视：
+                        // 内存中同样标记 NeedsAttention；重启时 recover() 与磁盘对齐
+                        if let Some(record) = workspace.state.task_mut(&task.id) {
                             record.state = TaskState::NeedsAttention;
                             record.error = Some(message);
                             record.unread = true;
-                            Ok(())
-                        })
-                        .map_err(|error| {
-                            self.workspace_error = Some(format!("任务状态尚未保存：{error:#}"));
-                        });
+                        }
+                        self.workspace_error = Some(format!("任务状态尚未保存：{error:#}"));
+                    }
                 }
             }
         }

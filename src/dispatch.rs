@@ -169,10 +169,14 @@ pub fn is_active() -> bool {
 pub struct Guard(Arc<Ledger>);
 impl Drop for Guard {
     fn drop(&mut self) {
-        if let Ok(mut current) = ACTIVE.get_or_init(|| Mutex::new(None)).lock()
-            && current
-                .as_ref()
-                .is_some_and(|value| Arc::ptr_eq(value, &self.0))
+        // 锁中毒也要清掉当前 guard：否则 install 会一直报「同一进程不能同时执行两个任务」
+        let mut current = ACTIVE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if current
+            .as_ref()
+            .is_some_and(|value| Arc::ptr_eq(value, &self.0))
         {
             *current = None;
         }
