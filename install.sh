@@ -103,5 +103,5 @@ PY
   fi
 fi
 
-echo "请确保 PATH 包含 $BIN_DIR，例如：export PATH=\"\$HOME/bin:\$PATH\""
+echo "请确保 PATH 包含 ${BIN_DIR}，例如：export PATH=\"\$HOME/bin:\$PATH\""
 echo "首次运行会自动下载识别模型（macOS CoreML 约 1-2GB；其他平台 llama.cpp GGUF 约 2.4GB）。"
