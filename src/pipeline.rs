@@ -38,21 +38,33 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
     } else {
         Some(Box::new(fetch::probe_video(&cfg.url).await?))
     };
+    // 本地视频先探时长：成功进 meta；失败不当 0 静默（merge 会失真），
+    // 延迟到诊断作用域内返回，失败同样写 run.json
+    let local_duration = if is_local {
+        Some(
+            media::probe_duration(local)
+                .await
+                .context("无法探测本地视频时长 / Could not probe the local video duration"),
+        )
+    } else {
+        None
+    };
     let meta = if let Some(video) = &probed {
         video.meta.clone()
     } else {
         VideoMeta {
             title: sanitize_stem(local),
             uploader: String::new(),
-            // 时长探测失败不能静默当 0：后续 merge/Section.end 会全部失真
-            duration: media::probe_duration(local)
-                .await
-                .context("无法探测本地视频时长 / Could not probe the local video duration")?,
+            duration: local_duration
+                .as_ref()
+                .and_then(|probe| probe.as_ref().ok().copied())
+                .unwrap_or(0.),
             webpage_url: cfg.url.clone(),
             extractor: "local".into(),
             id: execution::file_digest(local)?,
         }
     };
+    let local_duration_error = local_duration.and_then(|probe| probe.err());
     progress::stage("fetch", "done");
     let platform = config::platform_from(&cfg.url, &meta.extractor);
     let source_id = if is_local {
@@ -105,6 +117,11 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
     std::fs::create_dir_all(&cfg.out_dir)?;
     let _lock = crate::runtime::lock_file(&cfg.out_dir.join(".task.lock"))?;
     execution::bind_work_dir(&cfg.out_dir, &binding)?;
+    if let Some(error) = local_duration_error {
+        // 与 run_prepared 失败同等待遇：失败诊断 run.json 照样落盘
+        write_failure_run_json(&cfg, is_local, &platform, &meta.id, &error, started);
+        return Err(error);
+    }
     let result = run_prepared(
         &cfg,
         &meta,
