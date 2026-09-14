@@ -832,8 +832,12 @@ impl Desktop {
         {
             items.push(LibraryItem::Issues(remaining_issues));
         }
+        // 刷新期间保留已加载的列表：Loading 只是一行状态，不再整页替换；
+        // 只有首次加载（没有任何已加载内容）时才让 Loading 独占页面
         if self.loading {
             items.push(LibraryItem::Loading);
+        }
+        if self.loading && courses.is_empty() {
             return self.library_list_page(items, layout, rem, cx);
         }
         if coverage == crate::storage::LibraryCoverage::Unavailable {
@@ -2060,9 +2064,9 @@ impl Desktop {
                         .icon(icons::task())
                         .label("查看任务")
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            // 统一走 navigate()：保存 New 草稿、阅读位置、跟随清理
                             this.select_task(&id, cx);
-                            this.page = Page::Task;
-                            cx.notify();
+                            this.navigate(Page::Task, cx);
                         })),
                 );
             }
