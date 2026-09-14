@@ -231,6 +231,7 @@ fn start_model_worker(
         NPU_READY_TIMEOUT,
         &mut child,
         Some("\"status\":\"ok\""),
+        Some(&crate::dispatch::check_control),
     ) {
         return Err(e.context(format!(
             "Intel NPU 服务启动失败/超时（首次模型编译可能需要更多时间） / Intel NPU service failed to start or timed out (the first model compilation may take longer); stderr tail:\n{}",

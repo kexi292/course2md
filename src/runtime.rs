@@ -135,15 +135,23 @@ pub fn drain_stderr(stderr: std::process::ChildStderr, target: &'static str) -> 
 /// 轮询 `{base}/health` 直到成功；子进程中途退出立即失败（不等满超时）。
 /// `expect_body` 非空时还要求响应体包含该子串——防止端口被无关服务
 /// 抢占（free_port 存在 TOCTOU 窗口）而误判就绪。
+/// `control` 非空时每轮轮询前调用：返回 Err 表示外部要求中止（暂停/取消），
+/// 立即报错返回而不等满超时；子进程由 ManagedChild 的 Drop 兜底 kill。
 pub fn wait_ready(
     base: &str,
     timeout: Duration,
     child: &mut ManagedChild,
     expect_body: Option<&str>,
+    control: Option<&dyn Fn() -> Result<()>>,
 ) -> Result<()> {
     let t0 = Instant::now();
     let url = format!("{base}/health");
     loop {
+        if let Some(check) = control
+            && let Err(e) = check()
+        {
+            anyhow::bail!("{} 启动被中止 / startup aborted: {e:#}", child.name());
+        }
         if let Some(st) = child.try_wait() {
             anyhow::bail!(
                 "{} 启动失败 / exited during startup ({st}); see error details",
@@ -293,6 +301,35 @@ mod tests {
         );
         drop(second);
         assert!(lock_file(&path).is_ok());
+    }
+
+    /// issue：桌面取消任务后，llama-server 首次加载（最长 300s 超时）不得继续空等——
+    /// control 钩子每轮轮询，返回 Err 立即中止，进程由 Drop 兜底。
+    #[cfg(unix)]
+    #[test]
+    fn wait_ready_aborts_when_control_hook_fails() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let mut child = ManagedChild::spawn("sleep", &mut cmd).unwrap();
+        let t0 = Instant::now();
+        // 永远不就绪的端口 + 60s 超时；control 第二轮即报错，应远早于超时返回
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = wait_ready(
+            "http://127.0.0.1:9",
+            Duration::from_secs(60),
+            &mut child,
+            None,
+            Some(&|| {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1 {
+                    anyhow::bail!("测试取消 / test cancellation")
+                } else {
+                    Ok(())
+                }
+            }),
+        );
+        let err = result.expect_err("control 报错必须中止 wait_ready");
+        assert!(err.to_string().contains("启动被中止"), "{err:#}");
+        assert!(t0.elapsed() < Duration::from_secs(10), "取消不应等到超时");
     }
 
     #[test]

@@ -229,6 +229,7 @@ fn run_blocking(
         SERVER_READY_TIMEOUT,
         &mut child,
         Some("\"status\":\"ok\""),
+        Some(&crate::dispatch::check_control),
     ) {
         return Err(e.context(format!(
             "无法启动识别服务 / Could not start llama-server. Details:\n{}",
