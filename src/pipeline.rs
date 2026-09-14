@@ -938,11 +938,11 @@ async fn polish_with_rollback(
     let llm = cfg.llm.clone();
     let root = cfg.out_dir.clone();
     let (mut sections, mut report) = tokio::task::spawn_blocking(move || {
-        let report = crate::llm::polish_sections_report(&mut sections, &root, &llm);
-        (sections, report)
+        crate::llm::polish_sections_report(&mut sections, &root, &llm)
+            .map(|report| (sections, report))
     })
     .await
-    .context("AI 校对工作进程中断 / Proofreading worker interrupted")?;
+    .context("AI 校对工作进程中断 / Proofreading worker interrupted")??;
     if !artifact::has_readable_body(&sections) {
         sections = original;
         report.succeeded = 0;
