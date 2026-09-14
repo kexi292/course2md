@@ -21,7 +21,7 @@ impl Request {
             provider,
             model: model
                 .filter(|model| !model.trim().is_empty())
-                .unwrap_or("qwen3-1.7b")
+                .unwrap_or(course2md::config::DEFAULT_ASR_MODEL)
                 .into(),
             root: root.into(),
         }
@@ -966,7 +966,7 @@ impl Desktop {
                                 move |this, _, _, cx| {
                                     let mut value = this.generation_edit_base();
                                     value.select_provider(Some(provider));
-                                    value.options.asr_model = Some("qwen3-1.7b".into());
+                                    value.options.asr_model = Some(course2md::config::DEFAULT_ASR_MODEL.into());
                                     if this.commit_generation(value, cx) {
                                         this.refresh_model_diagnostics(cx);
                                     }

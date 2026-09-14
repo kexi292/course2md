@@ -137,7 +137,7 @@ const HF_REPO_PATH: &str = "ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/main";
 
 /// llama GGUF 模型 slug：模型目录名由它派生，身份字符串与它同源
 ///（concat! 不接受常量，身份字符串用字面量 + 测试守住一致性）。
-const LLAMA_MODEL_SLUG: &str = "qwen3-1.7b";
+const LLAMA_MODEL_SLUG: &str = crate::config::DEFAULT_ASR_MODEL;
 const LLAMA_GGUF_IDENTITY: &str = "qwen3-1.7b-gguf";
 const LLAMA_MODEL_FILE: &str = "Qwen3-ASR-1.7B-Q8_0.gguf";
 const LLAMA_MMPROJ_FILE: &str = "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf";

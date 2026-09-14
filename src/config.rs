@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 // —— 内置默认值（唯一来源）：main.rs 的 CLI 合并、settings.rs 的展示统一引用这里 ——
 /// SSIM 画面相似度阈值（越高越敏感、截图越多）
+/// 默认本地识别模型（canonical id）：引擎与桌面共用同一来源。
+/// 各后端的模型清单/别名表仍在 models.rs / model_status.rs 各自维护。
+pub const DEFAULT_ASR_MODEL: &str = "qwen3-1.7b";
 pub const DEFAULT_SIMILARITY: f64 = 0.85;
 /// 画面采样间隔（秒）
 pub const DEFAULT_SAMPLE_INTERVAL: f64 = 1.0;
@@ -555,7 +558,7 @@ pub fn default_provider_hint() -> AsrProvider {
     if cfg!(apple_native) {
         AsrProvider::Coreml
     } else if cfg!(target_os = "linux")
-        && Path::new("/dev/accel/accel0").exists()
+        && Path::new(crate::npu::NPU_DEVICE_PATH).exists()
         && crate::error::require_cmd("llama-server").is_err()
     {
         AsrProvider::Npu

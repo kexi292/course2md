@@ -89,7 +89,7 @@ pub fn run() -> Result<()> {
         None => out.push("- gpu/cpu  缺少 llama-server / llama-server missing. 安装 llama.cpp 后重试 / Install llama.cpp to use these backends.".into()),
     }
     if cfg!(target_os = "linux") {
-        let device = Path::new("/dev/accel/accel0").exists();
+        let device = Path::new(crate::npu::NPU_DEVICE_PATH).exists();
         out.push(if device {
             "✓ npu  检测到 Intel NPU；仍需 OpenVINO 运行环境 / Intel NPU detected; OpenVINO runtime also required"
         } else {

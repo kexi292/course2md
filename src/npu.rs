@@ -10,6 +10,9 @@ use crate::timeline::TranscriptEvent;
 use anyhow::Result;
 
 use std::path::Path;
+
+/// Intel NPU 设备节点（Linux accel 子系统）。doctor / wizard / 默认后端提示共用。
+pub const NPU_DEVICE_PATH: &str = "/dev/accel/accel0";
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 

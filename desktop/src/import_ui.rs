@@ -2164,7 +2164,7 @@ impl Desktop {
                 if provider == AsrProvider::Npu {
                     course2md::npu::resolve_npu_model(None)
                 } else {
-                    "qwen3-1.7b".into()
+                    course2md::config::DEFAULT_ASR_MODEL.into()
                 }
             });
         let root = course2md::config::model_dir_from(config.defaults.model_dir.as_deref());

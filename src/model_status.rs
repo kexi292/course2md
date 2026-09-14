@@ -100,13 +100,13 @@ pub fn inspect_at(
     hf_base: &Path,
 ) -> Result<LocalModelStatus> {
     let model = if model.trim().is_empty() {
-        "qwen3-1.7b"
+        crate::config::DEFAULT_ASR_MODEL
     } else {
         model.trim()
     };
     let mut parts = Vec::new();
     let supported = match provider {
-        AsrProvider::Cpu | AsrProvider::Gpu => model == "qwen3-1.7b",
+        AsrProvider::Cpu | AsrProvider::Gpu => model == crate::config::DEFAULT_ASR_MODEL,
         AsrProvider::Coreml => ["qwen3-1.7b", "qwen3-0.6b", "whisper"].contains(&model),
         AsrProvider::Npu => !model.is_empty(),
         AsrProvider::Api => false,

@@ -210,7 +210,7 @@ impl State {
             session: 0,
             provider: None,
             local_provider: None,
-            model: "qwen3-1.7b".into(),
+            model: course2md::config::DEFAULT_ASR_MODEL.into(),
             ai_proofread: true,
             ai_summary: false,
             speech: ServiceSetup::new(ServicePurpose::Speech, window, cx),
@@ -279,7 +279,7 @@ fn setup_cache_model(provider: AsrProvider, model: &str) -> String {
         return model.to_owned();
     }
     match provider {
-        AsrProvider::Cpu | AsrProvider::Gpu => "qwen3-1.7b".into(),
+        AsrProvider::Cpu | AsrProvider::Gpu => course2md::config::DEFAULT_ASR_MODEL.into(),
         AsrProvider::Coreml => {
             course2md::models::normalize_apple_model(model).unwrap_or_else(|_| model.to_owned())
         }
@@ -315,7 +315,7 @@ fn apply_provider_choice(
     if setup_model_supported(resolved, model) {
         return None;
     }
-    let previous = std::mem::replace(model, "qwen3-1.7b".into());
+    let previous = std::mem::replace(model, course2md::config::DEFAULT_ASR_MODEL.into());
     Some(format!(
         "{} 不支持“{}”，已改用 Qwen3 1.7B。",
         provider_label(Some(resolved)),
@@ -326,7 +326,7 @@ fn apply_provider_choice(
 /// A pre-existing alias or repository remains an explicit, visible choice.
 fn local_model_choices(provider: AsrProvider, current: &str) -> Vec<(String, String, String)> {
     let mut choices = vec![(
-        "qwen3-1.7b".to_owned(),
+        course2md::config::DEFAULT_ASR_MODEL.to_owned(),
         "Qwen3 1.7B".to_owned(),
         "默认 · 下载与内存占用较高".to_owned(),
     )];
@@ -513,7 +513,7 @@ impl Desktop {
             .options
             .asr_model
             .clone()
-            .unwrap_or("qwen3-1.7b".into());
+            .unwrap_or(course2md::config::DEFAULT_ASR_MODEL.into());
         self.onboarding.ai_proofread = generation.ai_proofread;
         self.onboarding.ai_summary = generation.ai_summary;
         let refs = self.preferences.default_refs();

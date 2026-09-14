@@ -1377,8 +1377,8 @@ impl Desktop {
             .options
             .asr_model
             .as_deref()
-            .unwrap_or("qwen3-1.7b");
-        let mut models = vec![("qwen3-1.7b", "Qwen3 1.7B")];
+            .unwrap_or(course2md::config::DEFAULT_ASR_MODEL);
+        let mut models = vec![(course2md::config::DEFAULT_ASR_MODEL, "Qwen3 1.7B")];
         if provider == Some(AsrProvider::Coreml)
             || (provider.is_none() && cfg!(target_os = "macos"))
             || provider == Some(AsrProvider::Npu)
