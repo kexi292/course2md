@@ -716,11 +716,37 @@ impl Desktop {
             self.settings_return_focus = window.focused(cx);
         }
         self.navigate(Page::Settings, cx);
+        // 事件入口的准备动作（不是渲染副作用）：钳制遗留 tab、同步 tab stops、
+        // 首次水合输入框、按 key 去重的模型诊断检查
+        self.prepare_settings_view(window, cx);
         self.settings_ui.tab_focus[self.settings_tab.min(4)].focus(window, cx);
     }
 
+    pub(crate) fn prepare_settings_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.normalize_settings_tab();
+        self.sync_settings_tab_stops();
+        self.hydrate_settings_inputs(window, cx);
+        self.ensure_settings_model_diagnostic(cx);
+    }
+
+    fn normalize_settings_tab(&mut self) {
+        // 5 是旧分页的遗留值，无写入路径；读到时迁移到「服务与账号」
+        if self.settings_tab == 5 {
+            self.settings_tab = 1;
+        }
+        if self.settings_tab > 4 {
+            self.settings_tab = 4;
+        }
+    }
+    fn sync_settings_tab_stops(&mut self) {
+        for (index, focus) in self.settings_ui.tab_focus.iter_mut().enumerate() {
+            *focus = focus.clone().tab_stop(index == self.settings_tab);
+        }
+    }
     fn select_settings_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_tab = index;
+        self.normalize_settings_tab();
+        self.sync_settings_tab_stops();
         self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
         self.settings_ui.tab_focus[index].focus(window, cx);
         cx.notify();
@@ -784,17 +810,8 @@ impl Desktop {
     }
 
     pub fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.hydrate_settings_inputs(window, cx);
-        self.ensure_settings_model_diagnostic(cx);
-        if self.settings_tab == 5 {
-            self.settings_tab = 1;
-        }
-        if self.settings_tab > 4 {
-            self.settings_tab = 4;
-        }
-        for (index, focus) in self.settings_ui.tab_focus.iter_mut().enumerate() {
-            *focus = focus.clone().tab_stop(index == self.settings_tab);
-        }
+        // 渲染不得有副作用：hydrate/诊断检查/tab 钳制都在 open_settings、
+        // select_settings_tab、restore_settings_group 等事件入口完成
         let sidebar = crate::views::settings_uses_sidebar(window);
         let content_width = crate::views::settings_content_width(window);
         let layout_width = content_width
@@ -2297,6 +2314,7 @@ impl Desktop {
             {
                 self.settings_tab = 1;
                 self.navigate(Page::Settings, cx);
+                self.prepare_settings_view(window, cx);
                 self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
                 self.settings_ui.inputs[&EditField::Name]
                     .update(cx, |input, cx| input.focus(window, cx));
@@ -2307,6 +2325,7 @@ impl Desktop {
             if !self.close_service_editor(window, cx) {
                 self.settings_tab = 1;
                 self.navigate(Page::Settings, cx);
+                self.prepare_settings_view(window, cx);
                 self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
                 return false;
             }
@@ -2378,6 +2397,7 @@ impl Desktop {
         if inline {
             self.settings_tab = 1;
             self.navigate(Page::Settings, cx);
+            self.prepare_settings_view(window, cx);
             self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
             self.settings_ui.inputs[&EditField::Name]
                 .update(cx, |input, cx| input.focus(window, cx));
@@ -3954,8 +3974,8 @@ impl Desktop {
                     .icon(icons::refresh())
                     .label("保留原文件并重置此组")
                     .self_start()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.restore_settings_group(group, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.restore_settings_group(group, window, cx);
                     })),
             );
         }
@@ -4504,14 +4524,20 @@ impl Desktop {
     pub fn restore_ordinary_preferences(
         &mut self,
         group: PreferenceGroup,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if group == PreferenceGroup::Services {
             return false;
         }
-        self.restore_settings_group(group, cx)
+        self.restore_settings_group(group, window, cx)
     }
-    fn restore_settings_group(&mut self, group: PreferenceGroup, cx: &mut Context<Self>) -> bool {
+    fn restore_settings_group(
+        &mut self,
+        group: PreferenceGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let previous = self
             .ordinary_preferences_submit_issue()
             .map(|issue| issue.message);
@@ -4523,6 +4549,8 @@ impl Desktop {
                     PreferenceGroup::Services => {}
                 }
                 self.settings_ui.initialized = false;
+                // 事件路径立刻重新水合，不等下一次进入设置（渲染不做这件事）
+                self.hydrate_settings_inputs(window, cx);
                 self.set_settings_feedback(group, "原文件已保留，此组设置已重置".into(), false);
                 if group == PreferenceGroup::Application {
                     self.desktop_settings = self.preferences.application().desktop.clone();

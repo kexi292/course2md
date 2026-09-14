@@ -2826,7 +2826,7 @@ impl Desktop {
                         let saved = if issue.can_retry {
                             this.retry_ordinary_preferences(issue.group, cx)
                         } else {
-                            this.restore_ordinary_preferences(issue.group, cx)
+                            this.restore_ordinary_preferences(issue.group, window, cx)
                         };
                         if saved {
                             let focus = this.import_submit_focus.clone();
