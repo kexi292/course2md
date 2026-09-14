@@ -790,6 +790,19 @@ impl Store {
     pub fn versions(&self) -> impl Iterator<Item = &ServiceVersion> {
         self.services.versions.values()
     }
+    /// 每个 service_id 只保留最新 version（列表页与选择器共用）
+    pub fn latest_versions(&self) -> BTreeMap<String, ServiceVersion> {
+        let mut latest = BTreeMap::<String, ServiceVersion>::new();
+        for version in self.versions() {
+            if latest
+                .get(&version.service_id)
+                .is_none_or(|old| old.number < version.number)
+            {
+                latest.insert(version.service_id.clone(), version.clone());
+            }
+        }
+        latest
+    }
     pub fn version(&self, id: &str) -> Option<&ServiceVersion> {
         self.services.versions.get(id)
     }

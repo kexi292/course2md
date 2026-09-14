@@ -1567,15 +1567,7 @@ impl Desktop {
                     .child(self.account_settings_page(cx)),
             ),
         );
-        let mut latest = BTreeMap::<String, ServiceVersion>::new();
-        for version in self.preferences.versions() {
-            if latest
-                .get(&version.service_id)
-                .is_none_or(|old| old.number < version.number)
-            {
-                latest.insert(version.service_id.clone(), version.clone());
-            }
-        }
+        let latest = self.preferences.latest_versions();
         for (purpose, heading_id, heading, add_label) in [
             (
                 ServicePurpose::Speech,
@@ -1890,18 +1882,15 @@ impl Desktop {
                     .service_retired_in_snapshot(&version.service_id)
             })
             .map(|version| version.id.clone());
-        let mut latest = BTreeMap::<String, ServiceVersion>::new();
-        for version in self.preferences.versions().filter(|v| {
-            v.config.protocol.purpose() == purpose
-                && !self.preferences.service_retired_in_snapshot(&v.service_id)
-        }) {
-            if latest
-                .get(&version.service_id)
-                .is_none_or(|old| old.number < version.number)
-            {
-                latest.insert(version.service_id.clone(), version.clone());
-            }
-        }
+        let latest: BTreeMap<String, ServiceVersion> = self
+            .preferences
+            .latest_versions()
+            .into_iter()
+            .filter(|(_, v)| {
+                v.config.protocol.purpose() == purpose
+                    && !self.preferences.service_retired_in_snapshot(&v.service_id)
+            })
+            .collect();
         let mut view = v_flex().w_full().min_w_0().gap_2();
         let current_version = current
             .as_deref()
