@@ -382,23 +382,30 @@ pub struct Environment {
 impl Environment {
     pub fn detect() -> Self {
         let cli = resolve_cli().ok();
+        // (字段名, 命令, 参数) 与回填写在一起：数组重排不会造成静默错配
         let checks = std::thread::scope(|scope| {
-            let commands = [
+            let commands: Vec<(&'static str, &Path, &'static str)> = vec![
                 (
+                    "engine",
                     cli.as_deref().unwrap_or(Path::new("course2md")),
                     "--version",
                 ),
-                (Path::new("ffmpeg"), "-version"),
-                (Path::new("ffprobe"), "-version"),
-                (Path::new("yt-dlp"), "--version"),
-                (Path::new("llama-server"), "--list-devices"),
+                ("ffmpeg", Path::new("ffmpeg"), "-version"),
+                ("ffprobe", Path::new("ffprobe"), "-version"),
+                ("ytdlp", Path::new("yt-dlp"), "--version"),
+                ("llama-devices", Path::new("llama-server"), "--list-devices"),
             ];
-            commands
-                .map(|(bin, arg)| scope.spawn(move || probe(bin, &[arg])))
-                .map(|task| task.join().unwrap_or(None))
+            let handles: Vec<_> = commands
+                .into_iter()
+                .map(|(name, bin, arg)| (name, scope.spawn(move || probe(bin, &[arg]))))
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|(name, task)| task.join().unwrap_or(None).map(|out| (name, out)))
+                .collect::<std::collections::BTreeMap<_, _>>()
         });
         let llama = llama_binary_on_path(&tool_path());
-        let gpu = checks[4].as_deref().and_then(|output| {
+        let gpu = checks.get("llama-devices").and_then(|output| {
             output.lines().find_map(|line| {
                 let (id, description) = line.trim().split_once(':')?;
                 course2md::asr::is_gpu_device_id(id).then(|| {
@@ -436,10 +443,10 @@ impl Environment {
         });
         let npu = npu_device && npu_runtime;
         Self {
-            engine: cli.is_some() && checks[0].is_some(),
-            ffmpeg: checks[1].is_some(),
-            ffprobe: checks[2].is_some(),
-            ytdlp: checks[3].is_some(),
+            engine: cli.is_some() && checks.contains_key("engine"),
+            ffmpeg: checks.contains_key("ffmpeg"),
+            ffprobe: checks.contains_key("ffprobe"),
+            ytdlp: checks.contains_key("ytdlp"),
             llama,
             apple,
             gpu,

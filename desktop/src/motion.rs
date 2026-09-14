@@ -239,7 +239,7 @@ pub fn disclosure(
     open: bool,
     content: Div,
     _window: &mut Window,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> AnyElement {
     if open {
         // Keep intrinsic measurement, padding and child layout in the normal
