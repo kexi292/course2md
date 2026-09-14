@@ -122,7 +122,10 @@ pub async fn prepare(
         }
         AsrProvider::Api => unreachable!(),
     };
-    let after = status::inspect(provider, model, root).unwrap_or(before);
+    let after = status::inspect(provider, model, root).unwrap_or_else(|error| {
+        tracing::warn!("模型二次检查失败，沿用准备前状态 / Post-prepare inspection failed; keeping the pre-prepare status: {error:#}");
+        before
+    });
     let loaded = result.is_ok() && matches!(provider, AsrProvider::Coreml | AsrProvider::Npu);
     let error = result.as_ref().err().map(|error| format!("{error:#}"));
     if let Err(error) = status::record_result(&after, loaded, error) {

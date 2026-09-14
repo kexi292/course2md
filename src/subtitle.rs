@@ -489,7 +489,8 @@ pub fn pick_subtitle_file(dir: &Path) -> Option<PathBuf> {
         .ok()?
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "srt"))
+        // 与 is_subtitle_file 同一判定（大小写不敏感，含 vtt）
+        .filter(|p| is_subtitle_file(p))
         .collect();
     if files.is_empty() {
         return None;

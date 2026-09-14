@@ -624,15 +624,6 @@ pub(crate) struct ChatFailure {
     pub(crate) err: anyhow::Error,
 }
 
-/// Transport uncertainty and 5xx are never automatically retried.
-#[cfg(test)]
-fn is_retryable(e: &ureq::Error) -> bool {
-    match e {
-        ureq::Error::Status(code, _) => *code == 429,
-        ureq::Error::Transport(_) => false,
-    }
-}
-
 /// 进程级抖动序列：与纳秒异或打散，避免并发请求同步重试（不引入 rand）。
 static JITTER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -1030,27 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_classification_and_backoff() {
-        use ureq::Error;
-        // Transport 无公共构造器：经由真实失败请求构造（127.0.0.1:1 必连接拒绝）
-        let transport = ureq::get("http://127.0.0.1:1/health")
-            .timeout(Duration::from_millis(500))
-            .call()
-            .unwrap_err();
-        assert!(
-            matches!(transport, Error::Transport(_)),
-            "closed port should be transport error"
-        );
-        assert!(!is_retryable(&transport), "网络结果不明不能自动重试");
-        let mk_status = |code: u16| {
-            let resp = ureq::Response::new(code, "x", "").unwrap();
-            Error::Status(code, resp)
-        };
-        assert!(is_retryable(&mk_status(429)), "限流可重试");
-        assert!(!is_retryable(&mk_status(500)));
-        assert!(!is_retryable(&mk_status(503)));
-        assert!(!is_retryable(&mk_status(400)), "参数错误重试无意义");
-        assert!(!is_retryable(&mk_status(401)), "鉴权错误重试无意义");
+    fn retry_backoff_progression() {
         // 指数退避：1s、2s、4s…（含 0~500ms 抖动）
         let b1 = backoff_duration(1).as_secs_f64();
         let b2 = backoff_duration(2).as_secs_f64();
