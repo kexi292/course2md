@@ -113,10 +113,12 @@ impl SingleChoiceGroup {
         self.reveal_in = Some(scroll);
         self
     }
+    /// 整组禁用（预留能力：尚无调用方；用于可用性门控场景，如环境不满足时禁用某组选择）
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
         self
     }
+    /// 按值禁用单个选项（预留能力：尚无调用方；用于如「未检测到 GPU 时禁用 GPU 选项」）
     pub fn disable_option(mut self, value: impl AsRef<str>) -> Self {
         for option in &mut self.options {
             if option.value.as_ref() == value.as_ref() {

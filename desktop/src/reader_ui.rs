@@ -2440,9 +2440,7 @@ impl Desktop {
                     .gap_2()
                     .py_6()
                     .child(crate::motion::spinner("reader-opening-spinner", cx))
-                    .child(theme::accessible_text("opening-note", "正在打开笔记…")),
-                cx,
-            );
+                    .child(theme::accessible_text("opening-note", "正在打开笔记…")));
         };
         // 渲染只读已提交快照：数据加载在 preview 变更的事件路径触发（ensure_reader_data），
         // tab stops 在各 result_tab 赋值点同步
@@ -3191,9 +3189,7 @@ impl Desktop {
                     .child(theme::accessible_text(
                         "reader-version-loading-label",
                         "正在打开笔记…",
-                    )),
-                cx,
-            ));
+                    ))));
         }
         let mut details = vec![("标题", icons::article(), preview.course.title.clone())];
         let local_source = self.reader_source().and_then(|source| match source {
@@ -3408,9 +3404,7 @@ impl Desktop {
                                     this.open_reader_version(newer.clone(), cx)
                                 })))
                             .into_any_element(),
-                        )),
-                    cx,
-                ));
+                        ))));
             }
         }
         if let Some(notice) = processing_notice(&preview.processing_issues) {
@@ -3600,9 +3594,7 @@ impl Desktop {
             ));
             page = page.child(crate::motion::enter(
                 "reader-processing-notice",
-                problem,
-                cx,
-            ));
+                problem));
         }
         if files_need_reload(&preview, &self.reader_ui.issues, &self.reader_ui.frames) {
             let course = preview.course.clone();
@@ -3659,9 +3651,7 @@ impl Desktop {
                                 this.load_reader_version(course.clone(), true, cx)
                             })))
                         .into_any_element(),
-                    )),
-                cx,
-            ));
+                    ))));
         }
         let reading_note = self.result_tab == 0;
         let items = note_items(&preview.blocks, short_reader);
@@ -3851,9 +3841,7 @@ impl Desktop {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.select_reader_view(0, window, cx)
                                 })),
-                        ),
-                    cx,
-                ));
+                        )));
             }
             if !self.reader_ui.frames.is_empty() && gallery_indices.is_empty() {
                 article = article.child(
@@ -4106,9 +4094,7 @@ impl Desktop {
         crate::motion::state_enter(
             SharedString::from(format!("reader-open:{}", preview.course.dir.display())),
             root.child(controls)
-                .child(v_flex().flex_1().min_h_0().w_full().child(body)),
-            cx,
-        )
+                .child(v_flex().flex_1().min_h_0().w_full().child(body)))
     }
     /// Contents are a reading rail; persistent selection belongs to the row
     /// surface so pointer feedback cannot erase the current chapter.

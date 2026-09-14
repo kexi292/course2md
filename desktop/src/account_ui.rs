@@ -721,9 +721,7 @@ impl Desktop {
             .when(layout.side_by_side, |view| view.flex_row())
             .child(crate::motion::enter(
                 SharedString::from(format!("qr-visual-{}-{phase}", self.account.generation)),
-                visual,
-                cx,
-            ))
+                visual))
             .child(explanation)
             .into_any_element()
     }

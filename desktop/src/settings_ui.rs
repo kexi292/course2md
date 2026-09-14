@@ -2901,9 +2901,7 @@ impl Desktop {
                     "service-test-result-{}-{:?}",
                     evidence.tested_at, evidence.outcome
                 )),
-                result,
-                cx,
-            ));
+                result));
         }
         view = view.child(testing);
         if let Some(status) = &editor.status
@@ -3890,9 +3888,7 @@ impl Desktop {
                             .min_w_0()
                             .text_size(TEXT_BODY)
                             .text_color(color(if error { DANGER } else { MUTED })),
-                    ),
-                cx,
-            ));
+                    )));
             let has_pending = match group {
                 PreferenceGroup::Generation => self.settings_ui.pending_generation.is_some(),
                 PreferenceGroup::Application => self.settings_ui.pending_application.is_some(),

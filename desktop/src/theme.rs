@@ -54,8 +54,6 @@ tokens!(
 );
 const COLOR_COUNT: usize = ALL_TOKENS.len();
 
-pub const SIDEBAR: ColorToken = INSET;
-pub const COVER: ColorToken = INSET;
 pub const MUTED: ColorToken = GRAY;
 pub const LINE: ColorToken = HAIRLINE;
 pub const BLUE: ColorToken = ACCENT_STRONG;
@@ -150,9 +148,11 @@ pub fn apply_preference(preference: &ThemePreferences, window: &mut Window, cx: 
         let t = if cx.reduce_motion() {
             1.
         } else {
-            (now.duration_since(paint.started).as_secs_f32() / 0.280).min(1.)
+            (now.duration_since(paint.started).as_secs_f32()
+                / (crate::motion::PALETTE_MS as f32 / 1000.))
+                .min(1.)
         };
-        let eased = 1. - (1. - t).powi(3);
+        let eased = crate::motion::ease_out(t);
         let next = std::array::from_fn(|i| blend(paint.from[i], target[i], eased));
         let changed = next != paint.current;
         paint.current = next;
@@ -409,11 +409,7 @@ pub fn init(cx: &mut App) {
     sync_component_theme(false, cx);
 }
 
-/// Compatibility wrapper for source confirmations.
-pub fn reveal(view: gpui::Div, id: impl Into<gpui::ElementId>, cx: &App) -> gpui::AnyElement {
-    crate::motion::enter(id, view, cx)
-}
-
+/// 展开/收起内容的共享动效入口（经 theme 导出供页面统一使用）
 pub fn disclosure(
     id: impl Into<gpui::ElementId>,
     open: bool,
@@ -647,26 +643,6 @@ pub fn input_action(id: impl Into<gpui::ElementId>) -> gpui_component::button::B
     use gpui::Styled;
     let size = rems(28. / 14.);
     quiet(id).h(size).min_h(size).w(size).min_w(size).px_0()
-}
-
-/// Inset note for supporting information.
-pub fn banner_note(
-    id: impl Into<gpui::ElementId>,
-    value: impl Into<gpui::SharedString>,
-) -> gpui::Stateful<gpui::Div> {
-    use gpui::*;
-    let value = value.into();
-    div()
-        .id(id)
-        .role(gpui::Role::Label)
-        .aria_label(value.clone())
-        .w_full()
-        .p(px(12.))
-        .rounded(RADIUS_CARD)
-        .bg(color(HOVER_WARM))
-        .text_size(TEXT_AUX)
-        .text_color(color(GRAY))
-        .child(value)
 }
 
 /// Status badge kinds; text always pairs with its tinted background.

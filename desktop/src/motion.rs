@@ -10,17 +10,15 @@ use std::time::Duration;
 
 pub const ENTER_MS: u64 = 160;
 pub const VALUE_MS: u64 = 200;
+/// 调色板切换过渡时长（theme::apply_preference 用，纳入同一运动词汇表）
+pub const PALETTE_MS: u64 = 280;
 
 pub fn ease_out(t: f32) -> f32 {
     1. - (1. - t.clamp(0., 1.)).powi(3)
 }
 
 /// IDs belong to a logical state, not a frame or a progress value.
-pub fn enter<E: IntoElement + Styled + 'static>(
-    id: impl Into<ElementId>,
-    view: E,
-    _cx: &App,
-) -> AnyElement {
+pub fn enter<E: IntoElement + Styled + 'static>(id: impl Into<ElementId>, view: E) -> AnyElement {
     // Keep the same ancestor ID chain when the preference changes. GPUI's
     // AnimationElement already paints the final state without scheduling frames
     // under reduce-motion; removing it here remounts every keyed child.
@@ -39,7 +37,6 @@ pub fn enter<E: IntoElement + Styled + 'static>(
 pub fn state_enter<E: IntoElement + Styled + 'static>(
     id: impl Into<ElementId>,
     view: E,
-    _cx: &App,
 ) -> AnyElement {
     let id = id.into();
     #[cfg(feature = "performance")]
@@ -248,7 +245,7 @@ pub fn disclosure(
         // Keep intrinsic measurement, padding and child layout in the normal
         // tree. Measuring in prepaint and clipping to a previous frame's height
         // cuts off controls when the content or available width changes.
-        enter(id, content, cx)
+        enter(id, content)
     } else {
         div().hidden().into_any_element()
     }
@@ -296,7 +293,6 @@ mod tests {
                     mounts: self.mounts.clone(),
                     sample: self.sample.clone(),
                 }),
-                cx,
             )
         }
     }

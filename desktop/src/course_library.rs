@@ -1023,9 +1023,7 @@ impl Desktop {
                 } else {
                     ("library-list", id)
                 },
-                element,
-                cx,
-            )
+                element)
         } else {
             element.into_any_element()
         }
@@ -1182,7 +1180,7 @@ impl Desktop {
                         )
                     });
                 if self.enter_once("library-empty-state".to_owned()) {
-                    crate::motion::enter("library-empty-state", content, cx)
+                    crate::motion::enter("library-empty-state", content)
                 } else {
                     content.into_any_element()
                 }
@@ -1618,9 +1616,7 @@ impl Desktop {
             return if animate {
                 collection.child(crate::motion::enter(
                     ("library-list", collection_id),
-                    rows,
-                    cx,
-                ))
+                    rows))
             } else {
                 collection.child(rows)
             };
@@ -1633,9 +1629,7 @@ impl Desktop {
         if animate {
             collection.child(crate::motion::enter(
                 ("library-grid", collection_id),
-                cards,
-                cx,
-            ))
+                cards))
         } else {
             collection.child(cards)
         }

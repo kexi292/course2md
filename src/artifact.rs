@@ -305,7 +305,7 @@ pub async fn publish(
     let sections = sections.to_vec();
     let summary = summary.cloned();
     let formats = formats.to_vec();
-    tokio::task::spawn_blocking(move || {
+    let publish = move || {
         publish_blocking(
             &target,
             &work_dir,
@@ -315,9 +315,14 @@ pub async fn publish(
             &formats,
             outcomes,
         )
-    })
-    .await
-    .context("发布工作进程中断 / Publish worker interrupted")?
+    };
+    // 无 Tokio reactor 的上下文（桌面单元测试）直接同步执行；有 reactor 时不占 worker 线程
+    if tokio::runtime::Handle::try_current().is_err() {
+        return publish();
+    }
+    tokio::task::spawn_blocking(publish)
+        .await
+        .context("发布工作进程中断 / Publish worker interrupted")?
 }
 
 /// publish 的同步实现（见 publish 的 spawn_blocking 纪律说明）。

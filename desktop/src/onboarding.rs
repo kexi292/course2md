@@ -1200,9 +1200,7 @@ impl Desktop {
                             .pb(px(if compact { 20. } else { 32. }))
                             .child(motion::state_enter(
                                 ("setup-step", number),
-                                scrolling_content,
-                                cx,
-                            )),
+                                scrolling_content)),
                     )
                     .child(
                         Scrollbar::vertical(&self.onboarding.scroll).mode(ScrollbarMode::Scrolling),
@@ -1944,9 +1942,7 @@ impl Desktop {
                 ));
             body = body.child(motion::state_enter(
                 ("setup-service-feedback", service.test_serial as usize),
-                feedback,
-                cx,
-            ));
+                feedback));
         }
         body
     }

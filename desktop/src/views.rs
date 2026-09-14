@@ -279,9 +279,7 @@ impl Desktop {
                                 cx.notify();
                             })),
                     ),
-            ),
-            cx,
-        ))
+            )))
     }
     fn page_title(&self) -> String {
         match self.page {
@@ -478,9 +476,7 @@ impl Render for Desktop {
                                             })),
                                     )
                                 }),
-                        ),
-                    cx,
-                ))
+                        )))
             })
             .when_some(self.message.clone(), |v, message| {
                 let completed = message.starts_with("笔记已生成");
@@ -517,9 +513,7 @@ impl Render for Desktop {
                                         cx.notify();
                                     })),
                             ),
-                    ),
-                    cx,
-                ))
+                    )))
             })
             .child(
                 div()

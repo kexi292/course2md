@@ -1218,9 +1218,7 @@ impl Desktop {
                                 this.invalidate_source();
                                 cx.notify();
                             })),
-                    ),
-                cx,
-            ));
+                    )));
         }
         if let Some(title) = &self.source_collection_title {
             view = view.child(motion::enter(
@@ -1293,9 +1291,7 @@ impl Desktop {
                                         }))
                                 },
                             )),
-                    ),
-                cx,
-            ));
+                    )));
         }
         if let Some(error) = &self.preview_error
             && !self.source_candidates.is_empty()
@@ -1388,9 +1384,7 @@ impl Desktop {
                                     })),
                             ),
                     )
-                    .child(details),
-                cx,
-            ));
+                    .child(details)));
         }
         view
     }
@@ -1644,9 +1638,7 @@ impl Desktop {
                                     .text_color(color(WARNING)),
                             ),
                     )
-                    .child(failure_details),
-                cx,
-            ));
+                    .child(failure_details)));
             if let Some(old) = &source.selected_subtitle {
                 view = view.child(
                     outline_pill("use-previous-subtitle")
@@ -2053,9 +2045,7 @@ impl Desktop {
                             .child(icons::cloud().size(px(20.)).text_color(color(GRAY)))
                             .child(help("音频发送到所选识别服务")),
                     )
-                    .child(self.task_service_picker(ServicePurpose::Speech, cx)),
-                cx,
-            ));
+                    .child(self.task_service_picker(ServicePurpose::Speech, cx))));
         }
         view = view.child(
             h_flex()
@@ -2115,7 +2105,7 @@ impl Desktop {
         }
         let (provider, model, root) = self.import_model_request();
         let readiness = self.model_readiness_panel(provider, Some(&model), &root, window, cx);
-        view.child(motion::enter("local-speech-readiness", readiness, cx))
+        view.child(motion::enter("local-speech-readiness", readiness))
     }
 
     fn import_uses_speech(&self) -> bool {
@@ -2756,9 +2746,7 @@ impl Desktop {
                     .p_4()
                     .rounded(RADIUS_CARD)
                     .bg(color(DANGER_BG))
-                    .child(issue(error.clone())),
-                cx,
-            ));
+                    .child(issue(error.clone()))));
         }
         view.into_any_element()
     }

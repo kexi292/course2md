@@ -2647,7 +2647,7 @@ impl Desktop {
             }
             let detail_id = format!("task-detail-{id}");
             card = card.child(if self.enter_once(detail_id.clone()) {
-                crate::motion::enter(SharedString::from(detail_id), details, cx)
+                crate::motion::enter(SharedString::from(detail_id), details)
             } else {
                 details.into_any_element()
             });
@@ -3045,9 +3045,7 @@ impl Desktop {
                         cx,
                     ),
                 )
-                .text_color(color(SUCCESS)),
-                cx,
-            ))
+                .text_color(color(SUCCESS))))
     }
 
     /// The current task and its progress retain one reading position as stages change.
