@@ -505,16 +505,20 @@ pub fn model_field_with_error(
             )
         })
         .child(
-            accessible_text(SharedString::from(format!("{id}-status")), status)
-                .w_full()
-                .min_w_0()
-                .whitespace_normal()
-                .text_size(TEXT_AUX)
-                .text_color(color(if matches!(state.status(), Status::Failed(_)) {
-                    DANGER
-                } else {
-                    MUTED
-                })),
+            // 非失败的常态说明走共享 ⓘ 辅助信息；失败仍用危险色错误文本（review4#2）
+            if matches!(state.status(), Status::Failed(_)) {
+                accessible_text(SharedString::from(format!("{id}-status")), status)
+                    .w_full()
+                    .min_w_0()
+                    .whitespace_normal()
+                    .text_size(TEXT_AUX)
+                    .text_color(color(DANGER))
+                    .into_any_element()
+            } else {
+                supporting_info(SharedString::from(format!("{id}-status")), status)
+                    .text_size(TEXT_AUX)
+                    .into_any_element()
+            },
         )
 }
 
