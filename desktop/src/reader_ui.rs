@@ -3372,7 +3372,7 @@ impl Desktop {
                                     .child(content),
                             )
                             .child(
-                                Scrollbar::vertical(&information_scroll)
+                                crate::backend::vertical_scrollbar(&information_scroll)
                                     .mode(ScrollbarMode::Scrolling),
                             ),
                     ),

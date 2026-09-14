@@ -1176,7 +1176,7 @@ impl Desktop {
                                 scrolling_content)),
                     )
                     .child(
-                        Scrollbar::vertical(&self.onboarding.scroll).mode(ScrollbarMode::Scrolling),
+                        crate::backend::vertical_scrollbar(&self.onboarding.scroll),
                     ),
             )
             .child(

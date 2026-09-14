@@ -965,7 +965,7 @@ impl Desktop {
             )
             .when(!editing_service, |panel| {
                 panel.child(
-                    Scrollbar::vertical(&self.scrolls[Page::Settings as usize])
+                    crate::backend::vertical_scrollbar(&self.scrolls[Page::Settings as usize])
                         .mode(ScrollbarMode::Scrolling),
                 )
             });
@@ -3107,7 +3107,7 @@ impl Desktop {
                     .min_h_0()
                     .min_w_0()
                     .child(view)
-                    .child(Scrollbar::vertical(&editor.scroll).mode(ScrollbarMode::Scrolling)),
+                    .child(crate::backend::vertical_scrollbar(&editor.scroll)),
             )
             .child(footer)
             .into_any_element()

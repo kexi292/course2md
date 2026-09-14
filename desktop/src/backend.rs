@@ -506,6 +506,35 @@ fn probe(bin: &Path, args: &[&str], timeout: Duration) -> Option<String> {
 
 pub use crate::notes::{Course, Preview, read_preview, scan_library};
 
+/// macOS「始终显示滚动条」系统偏好：探测一次并缓存（states-and-motion 滚动条契约要求尊重该偏好）。
+/// 非 macOS 或读取失败按 Automatic（滚动时显示）。
+pub fn scrollbars_always_visible() -> bool {
+    static ALWAYS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALWAYS.get_or_init(|| {
+        if !cfg!(target_os = "macos") {
+            return false;
+        }
+        std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleShowScrollBars"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .is_some_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "Always")
+    })
+}
+
+/// 滚动条模式：常显偏好→Always；其余滚动时显示、闲置淡出。
+pub(crate) fn vertical_scrollbar(handle: &gpui::ScrollHandle) -> gpui_component::scroll::Scrollbar {
+    use gpui_component::scroll::{Scrollbar, ScrollbarMode};
+    Scrollbar::vertical(handle).mode(if scrollbars_always_visible() {
+        ScrollbarMode::Always
+    } else {
+        ScrollbarMode::Scrolling
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
