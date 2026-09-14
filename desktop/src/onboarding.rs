@@ -240,14 +240,7 @@ impl State {
 }
 
 fn provider_label(provider: Option<AsrProvider>) -> &'static str {
-    match provider {
-        None => "自动选择（推荐）",
-        Some(AsrProvider::Coreml) => "Apple 原生",
-        Some(AsrProvider::Gpu) => "GPU",
-        Some(AsrProvider::Cpu) => "CPU",
-        Some(AsrProvider::Npu) => "Intel NPU",
-        Some(AsrProvider::Api) => "语音服务",
-    }
+    crate::provider_label(provider)
 }
 
 #[derive(Clone, Copy)]

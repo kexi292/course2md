@@ -64,13 +64,7 @@ pub(crate) struct ModelSetupSnapshot {
     pub(crate) cancelled: bool,
 }
 fn provider_name(provider: AsrProvider) -> &'static str {
-    match provider {
-        AsrProvider::Coreml => "Apple 原生",
-        AsrProvider::Gpu => "GPU",
-        AsrProvider::Cpu => "CPU",
-        AsrProvider::Npu => "Intel NPU",
-        AsrProvider::Api => "语音服务",
-    }
+    crate::provider_label(Some(provider))
 }
 impl Desktop {
     pub(crate) fn setup_model_snapshot(

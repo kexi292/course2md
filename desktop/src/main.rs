@@ -86,6 +86,20 @@ const PROVIDERS: [(&str, &str); 6] = [
     ("api", "云端 API"),
 ];
 
+/// 识别引擎的规范展示名：全桌面唯一来源（选择与描述场景共用）。
+/// 与 PROVIDERS 表的 id 一一对应；None 表示「自动」。
+pub(crate) fn provider_label(provider: Option<course2md::config::AsrProvider>) -> &'static str {
+    use course2md::config::AsrProvider;
+    match provider {
+        None => "自动",
+        Some(AsrProvider::Coreml) => "Apple 原生",
+        Some(AsrProvider::Gpu) => "GPU",
+        Some(AsrProvider::Cpu) => "CPU",
+        Some(AsrProvider::Npu) => "Intel NPU",
+        Some(AsrProvider::Api) => "云端 API",
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct ConversionOptions {
     provider: usize,

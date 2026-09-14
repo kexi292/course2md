@@ -2172,14 +2172,7 @@ impl Desktop {
         }
     }
     fn local_engine_name(&self) -> &'static str {
-        use course2md::config::AsrProvider;
-        match self.actual_local_provider() {
-            AsrProvider::Coreml => "Apple 原生",
-            AsrProvider::Gpu => "GPU",
-            AsrProvider::Cpu => "CPU",
-            AsrProvider::Npu => "Intel NPU",
-            AsrProvider::Api => "识别服务",
-        }
+        crate::provider_label(Some(self.actual_local_provider()))
     }
 
     fn import_destination(&self, cx: &mut Context<Self>) -> Div {
