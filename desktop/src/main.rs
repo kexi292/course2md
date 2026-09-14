@@ -1454,6 +1454,10 @@ impl Drop for Desktop {
         if let Some(cancel) = &self.preview_cancel {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // 与 request_close 一致：字幕读取也要停
+        if let Some(cancel) = &self.subtitle_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 

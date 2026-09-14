@@ -353,6 +353,8 @@ pub(crate) struct State {
     export_folder: Option<PathBuf>,
     export_state: ExportState,
     source_loading: bool,
+    /// 进行中的重新定位探测取消标志：换笔记/新探测/完成时置位
+    source_probe_cancel: Option<Arc<AtomicBool>>,
     source: Option<nav::SourceTarget>,
     source_available: bool,
     offline_video: OfflineVideo,
@@ -465,6 +467,7 @@ impl State {
             export_folder: None,
             export_state: ExportState::default(),
             source_loading: false,
+            source_probe_cancel: None,
             source: None,
             source_available: false,
             offline_video: OfflineVideo::NotRequested,
@@ -1361,9 +1364,12 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                                         .size_full()
                                         .rounded(RADIUS_SMALL)
                                         .object_fit(ObjectFit::Contain)
-                                        .with_fallback(|| {
+                                        .with_fallback(move || {
                                             theme::accessible_text(
-                                                "failed-reader-image",
+                                                (
+                                                    "failed-reader-image",
+                                                    frame_index.unwrap_or(0)
+                                                ),
                                                 "这张截图无法读取；对应正文仍可阅读。",
                                             )
                                             .into_any_element()
@@ -1687,6 +1693,11 @@ impl Desktop {
         self.reader_ui.versions.clear();
         self.reader_ui.issues.clear();
         self.reader_ui.source = None;
+        // 换笔记：中止进行中的重新定位探测
+        if let Some(cancel) = self.reader_ui.source_probe_cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.reader_ui.source_loading = false;
         self.reader_ui.source_available = false;
         self.reader_ui.export_folder = None;
         self.reader_ui.offline_video = OfflineVideo::NotRequested;
@@ -1902,7 +1913,15 @@ impl Desktop {
             let Some(path) = path else {
                 return;
             };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let stored = cancel.clone();
+            let probing = cancel.clone();
             let _ = this.update(cx, |this, cx| {
+                // 前一次探测若还在跑，先取消再开始新的
+                if let Some(previous) = this.reader_ui.source_probe_cancel.take() {
+                    previous.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                this.reader_ui.source_probe_cancel = Some(stored);
                 this.reader_ui.source_loading = true;
                 cx.notify();
             });
@@ -1912,7 +1931,7 @@ impl Desktop {
                 .background_executor()
                 .spawn(async move {
                     let source::SourceProbe::Single(source) =
-                        source::probe(input, false, Arc::new(AtomicBool::new(false)))?
+                        source::probe(input, false, probing)?
                     else {
                         anyhow::bail!("请选择可读取的视频文件");
                     };
@@ -1925,6 +1944,15 @@ impl Desktop {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.reader_ui.source_loading = false;
+                // 只清自己的标志：更晚开始的探测持有另一个 Arc
+                if this
+                    .reader_ui
+                    .source_probe_cancel
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &cancel))
+                {
+                    this.reader_ui.source_probe_cancel = None;
+                }
                 let result = checked.and_then(|_| {
                     this.workspace
                         .as_mut()
@@ -3905,9 +3933,9 @@ impl Desktop {
                                     .size_full()
                                     .rounded_t(RADIUS_CARD)
                                     .object_fit(ObjectFit::Contain)
-                                    .with_fallback(|| {
+                                    .with_fallback(move || {
                                         theme::accessible_text(
-                                            "failed-reader-image",
+                                            ("failed-reader-image", index),
                                             "这张截图无法读取；对应正文仍可阅读。",
                                         )
                                         .into_any_element()
@@ -4649,8 +4677,9 @@ impl Desktop {
                                                 .size_full()
                                                 .object_fit(ObjectFit::Contain)
                                                 .with_fallback(|| {
+                                                    // 放大查看器同时只存在一个，固定 id 无碰撞
                                                     theme::accessible_text(
-                                                        "failed-reader-image",
+                                                        "failed-reader-image-enlarged",
                                                         "这张截图无法读取；对应正文仍可阅读。",
                                                     )
                                                     .into_any_element()

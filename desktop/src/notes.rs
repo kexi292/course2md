@@ -103,7 +103,10 @@ fn current_course(dir: &Path) -> Result<Course> {
         anyhow::ensure!(current.schema == 1, "笔记版本暂不受支持");
         let manifest_path = course2md::artifact::safe_asset_path(dir, &current.manifest)?;
         let course = version_course(manifest_path.parent().context("版本位置无效")?)?;
-        let manifest = course.manifest.as_ref().unwrap();
+        let manifest = course
+            .manifest
+            .as_ref()
+            .context("笔记版本缺少有效清单，无法校验一致性")?;
         anyhow::ensure!(
             manifest.course_id == current.course_id && manifest.version_id == current.version_id,
             "笔记版本记录不一致"

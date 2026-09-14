@@ -388,8 +388,12 @@ impl Desktop {
 
     /// Apply the names already read by the library worker. The UI does no I/O.
     pub fn apply_course_title_aliases(&mut self) {
-        self.library_issues
-            .extend(self.library_view_cache.alias_issues.clone());
+        // 幂等合并：不重复追加同一条诊断（打开笔记路径会再次调用本函数）
+        for issue in self.library_view_cache.alias_issues.clone() {
+            if !self.library_issues.contains(&issue) {
+                self.library_issues.push(issue);
+            }
+        }
         for course in &mut self.courses {
             if let Some(location) = self.library_view_cache.locations.get(&course.storage_dir())
                 && let Some(name) = self
