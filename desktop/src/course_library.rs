@@ -470,13 +470,14 @@ impl Desktop {
 
     fn course_actions(&self, course: Course, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity().downgrade();
+        let folder_context = self.folder_context(Some(course.dir.clone()));
         control(("course-actions", index))
             .ghost()
             .icon(IconName::Ellipsis)
             .min_h(rems(2.))
             .tooltip("笔记操作")
             .accessibility_label(format!("《{}》的笔记操作", course.title))
-            .dropdown_menu(move |menu, _, _| {
+            .dropdown_menu(move |menu, window, cx| {
                 let rename = entity.clone();
                 let selected = course.clone();
                 let path = course.storage_dir();
@@ -511,7 +512,15 @@ impl Desktop {
                         },
                     ));
                 }
-                menu
+                // 归属修改收入溢出菜单：不与分组标题/筛选轨重复（design D3）
+                let context = folder_context.clone();
+                Desktop::folder_menu(
+                    entity.clone(),
+                    context.origin,
+                    context.storage,
+                    context.folders,
+                    context.folder,
+                )(menu.separator(), window, cx)
             })
             .into_any_element()
     }
@@ -1286,7 +1295,7 @@ impl Desktop {
                 let collapsed = body.collapsed;
                 let index = body.index;
                 let animate = !collapsed && self.enter_once(format!("folder-disclosure-{index}"));
-                let collection = self.course_collection(&body.entries, layout, false, animate, cx);
+                let collection = self.course_collection(&body.entries, layout, animate, cx);
                 if animate {
                     disclosure(("folder-disclosure", index), true, collection, window, cx)
                 } else if collapsed {
@@ -1297,7 +1306,7 @@ impl Desktop {
             }
             LibraryItem::CardRow(row) => self.library_card_row(row, layout, cx).into_any_element(),
             LibraryItem::ListRow(index, course) => self
-                .library_list_row(index, course.as_ref(), layout, true, cx)
+                .library_list_row(index, course.as_ref(), layout, cx)
                 .into_any_element(),
         };
         // The old single scroll column spaced its children with gap_6, folder
@@ -1454,16 +1463,14 @@ impl Desktop {
                     })),
             )
             .when(can_group, |row| {
+                // 两态选择：标签固定、选中=正在分组；不再有「取消…」当选中态的语义倒置
                 row.child(
-                    quiet("library-group-folders")
-                        .icon(icons::folder())
-                        .label(if group_on {
-                            "取消按文件夹分组"
-                        } else {
-                            "按文件夹分组"
-                        })
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.desktop_settings.library_group_folders = !group_on;
+                    SingleChoiceGroup::new("library-grouping", "笔记分组方式")
+                        .options([("flat", "平铺"), ("group", "分组")])
+                        .selected(if group_on { "group" } else { "flat" })
+                        .on_change(cx.listener(|this, value: &SharedString, _, cx| {
+                            this.desktop_settings.library_group_folders =
+                                value.as_ref() == "group";
                             this.save_library_presentation(cx);
                         })),
                 )
@@ -1595,13 +1602,11 @@ impl Desktop {
 
     /// Note collections: white SURFACE
     /// cards with a CARD_LINE hairline and RADIUS_CARD corners; covers render only
-    /// when real thumbnail data exists (no placeholder block). `show_chip` is off in
-    /// the grouped view, where the group header already names the folder.
+    /// when real thumbnail data exists (no placeholder block).
     fn course_collection(
         &self,
         courses: &[(usize, Course)],
         layout: LibraryLayout,
-        show_chip: bool,
         animate: bool,
         cx: &mut Context<Self>,
     ) -> Div {
@@ -1611,7 +1616,7 @@ impl Desktop {
             let rows = v_flex()
                 .gap_2()
                 .children(courses.iter().map(|(index, course)| {
-                    self.library_list_row(index, course, layout, show_chip, cx)
+                    self.library_list_row(index, course, layout, cx)
                 }));
             return if animate {
                 collection.child(crate::motion::enter(
@@ -1742,13 +1747,6 @@ impl Desktop {
                                         .gap_2()
                                         .items_center()
                                         .flex_wrap()
-                                        .child(self.folder_chip(
-                                            Some(course.dir.clone()),
-                                            index + 1,
-                                            Some(layout.card_chip_max),
-                                            false,
-                                            cx,
-                                        ))
                                         .child(div().flex_1())
                                         .child(self.course_actions(course.clone(), *index, cx)),
                                 ),
@@ -1785,7 +1783,6 @@ impl Desktop {
         index: &usize,
         course: &Course,
         layout: LibraryLayout,
-        show_chip: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let mut read = h_flex().w_full().min_w_0().items_center().gap(px(12.));
@@ -1849,15 +1846,6 @@ impl Desktop {
             .items_center()
             .gap_2()
             .when(layout.stacked, |row| row.w_full().flex_wrap())
-            .when(show_chip, |row| {
-                row.child(self.folder_chip(
-                    Some(course.dir.clone()),
-                    index + 1,
-                    Some(layout.chip_max),
-                    layout.compact,
-                    cx,
-                ))
-            })
             .when(layout.stacked, |row| row.child(div().flex_1()))
             .child(
                 outline_pill(("read-course-action", *index))

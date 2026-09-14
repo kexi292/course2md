@@ -11,7 +11,6 @@ use crate::preferences::{
 };
 use base64::Engine as _;
 use serde_json::{Value, json};
-use std::io::Read;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},

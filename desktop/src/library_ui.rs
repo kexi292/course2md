@@ -16,13 +16,14 @@ pub struct FolderOrigin {
 }
 
 /// Resolved picker state shared by the full picker and the compact chip.
-struct FolderContext {
-    storage: Option<PathBuf>,
-    origin: FolderOrigin,
-    folder: Option<u64>,
-    load_error: Option<String>,
-    label: String,
-    folders: BTreeMap<u64, String>,
+#[derive(Clone)]
+pub(crate) struct FolderContext {
+    pub(crate) storage: Option<PathBuf>,
+    pub(crate) origin: FolderOrigin,
+    pub(crate) folder: Option<u64>,
+    pub(crate) load_error: Option<String>,
+    pub(crate) label: String,
+    pub(crate) folders: BTreeMap<u64, String>,
 }
 
 struct FolderDialog {
@@ -535,7 +536,7 @@ impl Desktop {
         .detach();
     }
 
-    fn folder_context(&self, course: Option<PathBuf>) -> FolderContext {
+    pub(crate) fn folder_context(&self, course: Option<PathBuf>) -> FolderContext {
         let storage = course.as_ref().map(|path| {
             self.courses
                 .iter()
@@ -597,7 +598,7 @@ impl Desktop {
         }
     }
 
-    fn folder_menu(
+    pub(crate) fn folder_menu(
         entity: WeakEntity<Desktop>,
         origin: FolderOrigin,
         storage: Option<PathBuf>,
@@ -699,51 +700,5 @@ impl Desktop {
                         .text_color(color(DANGER)),
                 )
             })
-    }
-
-    /// Compact folder assignment for library rows and card footers:
-    /// one-line truncated label capped by `max_w`, or icon-only
-    /// when the content column is narrow.
-    pub fn folder_chip(
-        &self,
-        course: Option<PathBuf>,
-        index: usize,
-        max_w: Option<Pixels>,
-        icon_only: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let context = self.folder_context(course);
-        let label = context.label.clone();
-        control(("folder-picker", index))
-            .ghost()
-            .h_auto()
-            .min_h(rems(2.))
-            .min_w_0()
-            .flex_shrink(1.)
-            .when_some(max_w, |button, width| button.max_w(width))
-            .when(max_w.is_none(), |button| button.flex_1())
-            .px_2()
-            .text_color(color(MUTED))
-            .disabled(self.loading || context.load_error.is_some())
-            .icon(IconName::Folder)
-            .accessibility_label(format!("保存到文件夹：{label}"))
-            .tooltip(label.clone())
-            .when(!icon_only, |button| {
-                button.child(
-                    div()
-                        .min_w_0()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(label),
-                )
-            })
-            .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
-            .dropdown_menu(Self::folder_menu(
-                cx.entity().downgrade(),
-                context.origin,
-                context.storage,
-                context.folders,
-                context.folder,
-            ))
     }
 }
