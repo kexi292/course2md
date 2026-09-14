@@ -87,7 +87,7 @@ def main():
                 "CFBundleExecutable": "course2md-desktop", "CFBundlePackageType": "APPL",
                 **macos_versions(version),
                 "NSHighResolutionCapable": True, "NSPrincipalClass": "NSApplication",
-                "LSMinimumSystemVersion": "14.0", "CFBundleIconFile": "course2md.icns",
+                "LSMinimumSystemVersion": "15.0", "CFBundleIconFile": "course2md.icns",
             }, stream)
         shutil.copy2(ROOT / "assets/icon.icns", resources / "course2md.icns")
         # MLX first searches beside the executable for mlx.metallib. Keeping
@@ -131,6 +131,11 @@ def main():
         run("codesign", *signing, str(bundle))
         run("codesign", "--verify", "--deep", "--strict", str(bundle))
         notarization = [os.environ.get(key) for key in ("APPLE_API_KEY_PATH", "APPLE_API_KEY_ID", "APPLE_API_ISSUER")]
+        if identity != "-" and not all(notarization):
+            raise SystemExit(
+                "已设置签名身份但公证材料不全（APPLE_API_KEY_PATH/APPLE_API_ISSUER/APPLE_API_ID），"
+                "产出的 DMG 会被 Gatekeeper 拦截；请补全材料或改用 '-' 跳过签名"
+            )
         if identity != "-" and all(notarization):
             upload = base.parent / "notarization.zip"
             run("ditto", "-c", "-k", "--keepParent", str(bundle), str(upload))
