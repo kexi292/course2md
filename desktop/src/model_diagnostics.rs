@@ -511,12 +511,11 @@ impl Desktop {
                 badge(kind).child(label),
             ));
             view = view.child(
-                settings_value(
+                theme::supporting_info(
                     SharedString::from(format!("model-state-{key}")),
                     description,
                 )
-                .text_size(TEXT_AUX)
-                .text_color(color(MUTED)),
+                .text_size(TEXT_AUX),
             );
             let detail_key = key.clone();
             let cache_open = self
@@ -766,12 +765,11 @@ impl Desktop {
             }
             if !loaded {
                 view = view.child(
-                    settings_value(
+                    theme::supporting_info(
                         SharedString::from(format!("model-network-scope-{key}")),
                         "准备时可能下载模型，课程内容不会上传。",
                     )
-                    .text_sm()
-                    .text_color(color(MUTED)),
+                    .text_size(TEXT_AUX),
                 );
             }
         }

@@ -680,13 +680,14 @@ pub fn badge(kind: BadgeKind) -> gpui::Div {
     use gpui::{Styled, div, prelude::*};
     use gpui_component::Sizable;
     let (text, bg, icon) = match kind {
-        BadgeKind::Success => (SUCCESS, SUCCESS_BG, crate::icons::check_circle()),
-        BadgeKind::Warning => (WARNING, WARNING_BG, crate::icons::warning()),
-        BadgeKind::Danger => (DANGER, DANGER_BG, crate::icons::error()),
-        BadgeKind::Progress => (BADGE_PROGRESS, BADGE_PROGRESS_BG, crate::icons::schedule()),
-        BadgeKind::Neutral => (GRAY, INSET, crate::icons::info()),
+        BadgeKind::Success => (SUCCESS, SUCCESS_BG, Some(crate::icons::check_circle())),
+        BadgeKind::Warning => (WARNING, WARNING_BG, Some(crate::icons::warning())),
+        BadgeKind::Danger => (DANGER, DANGER_BG, Some(crate::icons::error())),
+        BadgeKind::Progress => (BADGE_PROGRESS, BADGE_PROGRESS_BG, Some(crate::icons::schedule())),
+        // Neutral 为纯文字片：ⓘ 专属说明文字（review2-settings#3）
+        BadgeKind::Neutral => (GRAY, INSET, None),
     };
-    div()
+    let mut view = div()
         .flex()
         .items_center()
         .flex_shrink_0()
@@ -699,8 +700,11 @@ pub fn badge(kind: BadgeKind) -> gpui::Div {
         .text_color(color(text))
         .text_size(TEXT_AUX)
         .font_weight(gpui::FontWeight::MEDIUM)
-        .whitespace_nowrap()
-        .child(icon.small())
+        .whitespace_nowrap();
+    if let Some(icon) = icon {
+        view = view.child(icon.small());
+    }
+    view
 }
 
 /// Preference switches share the accent and scale their geometry with UI text.

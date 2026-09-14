@@ -4016,27 +4016,34 @@ impl Desktop {
     }
     fn storage_settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut view = v_flex().w_full().min_w_0().flex_shrink_0().gap_6().child(
-            v_flex()
+            h_flex()
                 .w_full()
                 .min_w_0()
-                .gap_2()
-                .child(semantic_label(
-                    "storage-locations-heading",
-                    "保存位置",
-                    icons::folder_open(),
-                ))
-                .child(theme::supporting_info(
-                    "storage-policy",
-                    "更改默认位置只影响后续生成的笔记。",
-                ))
+                .gap_3()
+                .items_start()
+                .flex_wrap()
                 .child(
-                    // inline action：紧邻它所刷新的位置列表，不再悬在分区标题行尾（settings#6）
+                    v_flex()
+                        .min_w_0()
+                        .gap_2()
+                        .child(semantic_label(
+                            "storage-locations-heading",
+                            "保存位置",
+                            icons::folder_open(),
+                        ))
+                        .child(theme::supporting_info(
+                            "storage-policy",
+                            "更改默认位置只影响后续生成的笔记。",
+                        ))
+                        .flex_1(),
+                )
+                .child(
+                    // 与笔记库同一模式：页标题行尾的有标签刷新动作（review2-settings#4）
                     quiet("refresh-storage-locations")
                         .icon(icons::refresh())
-                        .label("重新读取这些位置")
+                        .label("刷新")
                         .loading(self.loading)
                         .disabled(self.loading)
-                        .self_start()
                         .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
                 ),
         );
