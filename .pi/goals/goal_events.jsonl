@@ -9,3 +9,7 @@
 {"type":"task_started","goalId":"mu0r9et7-7g5b8r","taskId":"design-fix","at":"2026-09-14T09:40:06.322Z"}
 {"type":"task_started","goalId":"mu0r9et7-7g5b8r","taskId":"motion","at":"2026-09-14T12:32:00.110Z"}
 {"type":"task_started","goalId":"mu0r9et7-7g5b8r","taskId":"info-display","at":"2026-09-14T13:29:23.566Z"}
+{"type":"task_complete","goalId":"mu0r9et7-7g5b8r","taskId":"design-fix","evidence":"评审问题清单全部处置：两轮独立评审（首轮 4 路、复审 2 路 kimi-coding/k3），docs/DESIGN-REVIEW.md 记录 8 高/16 中/低危及第二轮 13 项处置；共享原语修改检查全部调用方（SingleChoiceGroup/badge/motion/settings_row/preference 调用点全数更新并测试 225 通过）；运行中验证深色轨道可见、浅色 P","at":"2026-09-14T15:34:17.861Z"}
+{"type":"task_complete","goalId":"mu0r9et7-7g5b8r","taskId":"motion","evidence":"动画契约全部落地：时长在 states-and-motion 范围内（enter 160/selection 180-200/palette 280/state_enter 200）；选中指示滑动、状态进入浮起+渐显在运行中可见；减少动态效果开关生效（运行中切换验证，spinner 静态化代码路径+组件 AnimationElement 终态直绘）；滚动条尊重 macOS 常显偏好（default","at":"2026-09-14T15:34:17.862Z"}
+{"type":"task_complete","goalId":"mu0r9et7-7g5b8r","taskId":"info-display","evidence":"真实 2.4GB 模型下载运行验证：进度条实时推进（52MB→855MB）、速度 6.2MB/s、预计剩余 ETA 实时更新、暂停准备生效、待准备+「尚未下载完整，继续准备会复用已有文件」恢复展示完整；下载合帧 250ms 与任务一致；阶段文案 settings/onboarding 单一来源；渲染期无 IO（此前 H3/H4/H7 已修）","at":"2026-09-14T15:34:17.862Z"}
+{"type":"task_started","goalId":"mu0r9et7-7g5b8r","taskId":"final-verify","at":"2026-09-14T15:34:17.862Z"}

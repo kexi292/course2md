@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, SyncSender},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -169,8 +169,14 @@ impl Job {
                 }
                 thread::sleep(Duration::from_millis(40));
             };
+            // 有界排空：子进程已死则管道必将 EOF，但卡住的 reader 不得把 Exit 永远挡在
+            // 门外（否则 job 永远存在、后续任务全部排队）。读不到的剩余输出允许丢失。
+            let drain_deadline = Instant::now() + Duration::from_secs(3);
             for reader in readers {
-                let _ = reader.join();
+                while !reader.is_finished() && Instant::now() < drain_deadline {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                // 仍未完成的 reader：进程已死，线程会随管道 EOF 自行结束
             }
             let _ = tx.send(Event::Exit {
                 success,
