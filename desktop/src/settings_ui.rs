@@ -965,8 +965,7 @@ impl Desktop {
             )
             .when(!editing_service, |panel| {
                 panel.child(
-                    crate::backend::vertical_scrollbar(&self.scrolls[Page::Settings as usize])
-                        .mode(ScrollbarMode::Scrolling),
+                    crate::backend::vertical_scrollbar(&self.scrolls[Page::Settings as usize]),
                 )
             });
         let body = div()
