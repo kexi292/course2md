@@ -1393,7 +1393,12 @@ impl Desktop {
             ]);
         }
         let known = models.iter().any(|(id, _)| *id == selected);
-        let picker = if models.len() > 3 {
+        let picker = if models.len() == 1 {
+            // 只有一个可选模型时不是「选择器」：展示静态值，不伪装可选择（settings#2）
+            let (_, label) = models[0];
+            settings_value("default-local-model-single", label.to_owned())
+                .into_any_element()
+        } else if models.len() > 3 {
             let current = selected.to_owned();
             let label = models
                 .iter()
@@ -1454,9 +1459,19 @@ impl Desktop {
             .gap_2()
             .child(picker)
             .child(
-                text("model-readiness-conclusion", conclusion)
-                    .text_size(TEXT_AUX)
-                    .text_color(color(if settled { MUTED } else { WARNING })),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        (if settled { icons::info() } else { icons::warning() })
+                            .size(rems(16. / 14.))
+                            .text_color(color(if settled { MUTED } else { WARNING })),
+                    )
+                    .child(
+                        text("model-readiness-conclusion", conclusion)
+                            .text_size(TEXT_AUX)
+                            .text_color(color(if settled { MUTED } else { WARNING })),
+                    ),
             )
             .child(
                 h_flex()
@@ -1698,6 +1713,16 @@ impl Desktop {
                     .gap_2()
                     .items_center()
                     .flex_wrap()
+                    .child(
+                        (if purpose == ServicePurpose::Speech {
+                            icons::microphone()
+                        } else {
+                            icons::science()
+                        })
+                        .size(px(20.))
+                        .text_color(color(ACCENT_STRONG))
+                        .flex_shrink_0(),
+                    )
                     .child(
                         text(
                             SharedString::from(format!("saved-service-title-{id}")),
@@ -3974,33 +3999,27 @@ impl Desktop {
     }
     fn storage_settings_page(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut view = v_flex().w_full().min_w_0().flex_shrink_0().gap_6().child(
-            h_flex()
+            v_flex()
                 .w_full()
                 .min_w_0()
-                .gap_3()
-                .flex_wrap()
+                .gap_2()
+                .child(semantic_label(
+                    "storage-locations-heading",
+                    "保存位置",
+                    icons::folder_open(),
+                ))
+                .child(theme::supporting_info(
+                    "storage-policy",
+                    "更改默认位置只影响后续生成的笔记。",
+                ))
                 .child(
-                    v_flex()
-                        .gap_2()
-                        .child(semantic_label(
-                            "storage-locations-heading",
-                            "保存位置",
-                            icons::folder_open(),
-                        ))
-                        .child(
-                            text("storage-policy", "更改默认位置只影响后续生成的笔记。")
-                                .text_size(TEXT_AUX)
-                                .text_color(color(MUTED)),
-                        )
-                        .flex_1()
-                        .min_w(rems(240. / 14.)),
-                )
-                .child(
+                    // inline action：紧邻它所刷新的位置列表，不再悬在分区标题行尾（settings#6）
                     quiet("refresh-storage-locations")
                         .icon(icons::refresh())
-                        .label("刷新")
+                        .label("重新读取这些位置")
                         .loading(self.loading)
                         .disabled(self.loading)
+                        .self_start()
                         .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
                 ),
         );

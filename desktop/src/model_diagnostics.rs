@@ -495,7 +495,7 @@ impl Desktop {
                     "待准备",
                     "尚未下载完整，继续准备会复用已有文件。",
                 ),
-                CacheState::Cached => (BadgeKind::Neutral, "已下载", "尚未验证加载。"),
+                CacheState::Cached => (BadgeKind::Success, "已下载", "尚未验证加载。"),
                 CacheState::Loaded => {
                     (BadgeKind::Success, "已验证可加载", "验证后模型文件未改变。")
                 }

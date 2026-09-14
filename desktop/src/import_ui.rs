@@ -2504,11 +2504,12 @@ impl Desktop {
 
     fn generation_options_toggle(&self, cx: &mut Context<Self>) -> Div {
         h_flex().child(
+            // 两态共用 quiet inline 样式，仅 chevron 方向变化（M16）
             quiet("generation-options")
                 .icon(if self.generation_options_open {
                     icons::chevron_up()
                 } else {
-                    icons::tune()
+                    icons::chevron_down()
                 })
                 .label(if self.generation_options_open {
                     "收起高级选项"
