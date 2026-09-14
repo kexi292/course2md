@@ -792,6 +792,19 @@ impl Desktop {
     pub fn restore_storage_state(&mut self, cx: &mut Context<Self>) {
         self.storage_ui.pending =
             storage::pending_journals(&self.preferences.root().join("storage"));
+        // 半残/损坏的迁移记录不能静默消失：在存储页给出可见错误与文件位置
+        let corrupt = storage::corrupt_journals(&self.preferences.root().join("storage"));
+        if !corrupt.is_empty() {
+            self.storage_ui.error = Some(format!(
+                "{} 个迁移记录无法读取（原文件已保留，可手动检查或删除）：{}",
+                corrupt.len(),
+                corrupt
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+        }
         // If the registry transaction committed before the app closed, the
         // journal is merely behind; never offer to replay or undo that copy.
         self.storage_ui.pending.retain(|(path, journal)| {

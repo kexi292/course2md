@@ -336,6 +336,25 @@ pub fn pending_journals(directory: &Path) -> Vec<(PathBuf, Journal)> {
     journals
 }
 
+/// 无法读取/解析的迁移记录：崩溃留下的半残 journal 也应可见，而不是静默跳过。
+/// 与分类恢复的「保留原文件」策略一致——用户需要知道它存在才能手动处理。
+pub fn corrupt_journals(directory: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
+        .filter(|path| {
+            std::fs::read(path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Journal>(&bytes).ok())
+                .is_none()
+        })
+        .collect()
+}
+
 pub fn prepare_move(
     library_id: String,
     source: &Path,

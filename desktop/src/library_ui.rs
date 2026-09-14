@@ -144,15 +144,19 @@ impl Desktop {
         let cancel = Arc::new(AtomicBool::new(false));
         self.preview_cancel = Some(cancel.clone());
         let online = self.online;
-        let handle = cx.windows().first().copied();
+        // 用发起探测的窗口而不是“第一个窗口”：回调只可能落回正确的窗口
+        let handle = Some(window.window_handle());
         let task = cx
             .background_executor()
             .spawn(async move { source::probe(input, online, cancel) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
+            // worker 计数无论窗口存亡都必须归还（request_close 等待它归零）
+            let _ = this.update(cx, |this, _| {
+                this.preview_workers = this.preview_workers.saturating_sub(1);
+            });
             if let Some(handle) = handle {
                 let _ = cx.update_window(handle, |_, window, cx| this.update(cx, |this, cx| {
-                    this.preview_workers = this.preview_workers.saturating_sub(1);
                     if this.preview_generation != generation || this.value(Field::Source, cx) != request_input { return; }
                     if let Some((id, revision)) = &token {
                         if !this.workspace.as_ref().is_some_and(|workspace| workspace.state.matches_input(id, *revision)) { return; }
