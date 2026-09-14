@@ -1744,34 +1744,33 @@ impl Desktop {
                                     h_flex()
                                         .w_full()
                                         .min_w_0()
+                                        .mt_auto()
                                         .gap_2()
                                         .items_center()
                                         .flex_wrap()
                                         .child(div().flex_1())
-                                        .child(self.course_actions(course.clone(), *index, cx)),
+                                        .child(self.course_actions(course.clone(), *index, cx))
+                                        .child(
+                                            outline_pill(("read-card-action", *index))
+                                                .icon(IconName::BookOpen)
+                                                .label(if self.course_has_reading_position(course) {
+                                                    "继续阅读"
+                                                } else {
+                                                    "阅读笔记"
+                                                })
+                                                .loading(self.opening_course.as_ref() == Some(&course.dir))
+                                                .disabled(self.opening_course.as_ref() == Some(&course.dir))
+                                                .on_click({
+                                                    let course = course.clone();
+                                                    cx.listener(move |this, _, _, cx| {
+                                                        this.open_course(course.clone(), cx)
+                                                    })
+                                                }),
+                                        ),
                                 ),
                         )
                         .children(self.course_read_error(course, *index, cx))
-                        .children(self.course_export_feedback(course, cx))
-                        .child(
-                            outline_pill(("read-card-action", *index))
-                                .mt_auto()
-                                .w_full()
-                                .icon(IconName::BookOpen)
-                                .label(if self.course_has_reading_position(course) {
-                                    "继续阅读"
-                                } else {
-                                    "阅读笔记"
-                                })
-                                .loading(self.opening_course.as_ref() == Some(&course.dir))
-                                .disabled(self.opening_course.as_ref() == Some(&course.dir))
-                                .on_click({
-                                    let course = course.clone();
-                                    cx.listener(move |this, _, _, cx| {
-                                        this.open_course(course.clone(), cx)
-                                    })
-                                }),
-                        ),
+                        .children(self.course_export_feedback(course, cx)),
                 )
             }))
             .children((row.len()..layout.columns).map(|_| div().flex_1()))
@@ -1854,7 +1853,7 @@ impl Desktop {
                         button.label(if self.course_has_reading_position(course) {
                             "继续阅读"
                         } else {
-                            "阅读"
+                            "阅读笔记"
                         })
                     })
                     .loading(self.opening_course.as_ref() == Some(&course.dir))
