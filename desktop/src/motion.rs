@@ -286,7 +286,7 @@ mod tests {
     }
 
     impl Render for PreferenceHarness {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             enter(
                 "motion-preference-parent",
                 div().child(StatefulChild {

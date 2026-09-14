@@ -265,6 +265,8 @@ struct Desktop {
     kind: Kind,
     cancelling: bool,
     closing: bool,
+    /// A queued task's credentials are being resolved off the UI thread before it can start.
+    start_pending: bool,
     task_status: String,
     task_error: Option<String>,
     progress: BTreeMap<String, activity::Activity>,
@@ -618,6 +620,7 @@ impl Desktop {
             kind: Kind::Convert,
             cancelling: false,
             closing: false,
+            start_pending: false,
             task_error: None,
             task_status: String::new(),
             progress: BTreeMap::new(),

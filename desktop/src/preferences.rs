@@ -9,7 +9,7 @@ use course2md::config::{AsrProvider, TranscriptSource};
 use course2md::settings::{AsrApiMode, ConfigFile, Defaults, DesktopSettings};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1293,17 +1293,56 @@ impl Store {
         base: &ConfigFile,
         references: &ServiceRefs,
     ) -> Result<ResolvedConfig> {
+        let mut secrets = HashMap::new();
+        for reference in self.credential_references_for(base, references)? {
+            secrets.insert(
+                reference.clone(),
+                self.vault.resolve(&reference)?.expose().to_owned(),
+            );
+        }
+        self.resolve_for_execution_with_secrets(base, references, &secrets)
+    }
+
+    /// Credential references a request build needs. Resolving them can block on the system
+    /// keychain (its authorization dialog queue may even be held by another application), so
+    /// UI callers must resolve these off the main thread and pass the results to
+    /// `resolve_for_execution_with_secrets`.
+    pub fn credential_references_for(
+        &self,
+        base: &ConfigFile,
+        references: &ServiceRefs,
+    ) -> Result<Vec<CredentialRef>> {
+        let required = references.required_for(base);
+        let mut needed = Vec::new();
+        for id in [required.asr, required.llm].into_iter().flatten() {
+            let version = self.check_dispatch(&id)?;
+            if let Some(reference) = &version.config.credential {
+                needed.push(reference.clone());
+            }
+        }
+        Ok(needed)
+    }
+
+    pub fn resolve_for_execution_with_secrets(
+        &self,
+        base: &ConfigFile,
+        references: &ServiceRefs,
+        secrets: &HashMap<String, String>,
+    ) -> Result<ResolvedConfig> {
         let mut config = ResolvedConfig(self.config_for_refs(base, references)?);
         let required = references.required_for(base);
         for (id, is_asr) in [(required.asr, true), (required.llm, false)] {
             if let Some(id) = id {
                 let version = self.check_dispatch(&id)?;
                 if let Some(reference) = &version.config.credential {
-                    let secret = self.vault.resolve(reference)?;
+                    let secret = secrets
+                        .get(reference)
+                        .cloned()
+                        .context("服务凭据尚未就绪，请重新打开服务设置保存一次")?;
                     if is_asr {
-                        config.0.asr_api.api_key = secret.expose().to_owned();
+                        config.0.asr_api.api_key = secret;
                     } else {
-                        config.0.llm.api_key = secret.expose().to_owned();
+                        config.0.llm.api_key = secret;
                     }
                 }
             }

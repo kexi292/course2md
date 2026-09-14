@@ -8,6 +8,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, ensure};
 use gpui_component::button::*;
+use std::collections::HashMap;
 use std::rc::Rc;
 
 /// One row of the virtualized task queue. Task rows carry their index into
@@ -1279,7 +1280,11 @@ impl Desktop {
         cx.notify();
     }
 
-    fn request_for(&self, task: &TaskRecord) -> Result<course2md::execution::Request> {
+    fn request_for(
+        &self,
+        task: &TaskRecord,
+        secrets: &HashMap<String, String>,
+    ) -> Result<course2md::execution::Request> {
         let location = self
             .workspace
             .as_ref()
@@ -1296,7 +1301,7 @@ impl Desktop {
         };
         let config = self
             .preferences
-            .resolve_for_execution(&task.plan.config, &refs)?
+            .resolve_for_execution_with_secrets(&task.plan.config, &refs, secrets)?
             .into_config();
         let course_id = format!(
             "course-{}",
@@ -1412,7 +1417,7 @@ impl Desktop {
     }
 
     pub fn start_next_task(&mut self, cx: &mut Context<Self>) {
-        if self.job.is_some() || self.closing || self.storage_ui.busy {
+        if self.job.is_some() || self.closing || self.storage_ui.busy || self.start_pending {
             return;
         }
         let Some(task) = self
@@ -1423,7 +1428,80 @@ impl Desktop {
         else {
             return;
         };
-        let request = self.request_for(&task).and_then(|request| {
+        let refs = ServiceRefs {
+            asr: task.plan.asr_service.clone(),
+            llm: task.plan.ai_service.clone(),
+        };
+        let needed = match self
+            .preferences
+            .credential_references_for(&task.plan.config, &refs)
+        {
+            Ok(needed) => needed,
+            Err(error) => {
+                self.fail_task_before_start(&task.id, format!("{error:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        if needed.is_empty() {
+            self.finish_task_start(&task.id, HashMap::new(), cx);
+            return;
+        }
+        // Keychain resolution may surface a system authorization dialog whose queue can even
+        // be held by another application; resolving on the UI thread would freeze the whole
+        // interface, so the secrets are gathered on a background executor first.
+        self.start_pending = true;
+        let vault = self.preferences.vault();
+        let task_id = task.id.clone();
+        cx.spawn(async move |this, cx| {
+            let secrets = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut secrets = HashMap::new();
+                    for reference in needed {
+                        let secret = vault.resolve(&reference).map(|s| s.expose().to_owned())?;
+                        secrets.insert(reference, secret);
+                    }
+                    Ok::<_, anyhow::Error>(secrets)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.start_pending = false;
+                match secrets {
+                    Ok(secrets) => this.finish_task_start(&task_id, secrets, cx),
+                    Err(error) => {
+                        this.fail_task_before_start(&task_id, format!("{error:#}"));
+                        cx.notify();
+                    }
+                }
+                this.start_next_task(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn finish_task_start(
+        &mut self,
+        task_id: &str,
+        secrets: HashMap<String, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.job.is_some() || self.closing {
+            return;
+        }
+        let Some(task) = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.state.task(task_id))
+            .cloned()
+        else {
+            return;
+        };
+        // The queue may have changed while credentials were being resolved off-thread.
+        if task.state != TaskState::Queued || task.intent != Intent::Run {
+            return;
+        }
+        let request = self.request_for(&task, &secrets).and_then(|request| {
             request.validate()?;
             self.write_task_control(&task, Vec::new())?;
             Ok(request)
@@ -1456,29 +1534,32 @@ impl Desktop {
                 self.task_status = format!("正在生成《{}》", task.plan.title);
             }
             Err(error) => {
-                let message = format!("{error:#}");
-                if let Some(workspace) = &mut self.workspace {
-                    let compensated = workspace.transaction(|state| {
-                        let record = state.task_mut(&task.id).context("任务不存在")?;
-                        record.state = TaskState::NeedsAttention;
-                        record.error = Some(message.clone());
-                        record.unread = true;
-                        Ok(())
-                    });
-                    if let Err(error) = compensated {
-                        // 补偿持久化失败也不能让任务停在 Running 被调度器无视：
-                        // 内存中同样标记 NeedsAttention；重启时 recover() 与磁盘对齐
-                        if let Some(record) = workspace.state.task_mut(&task.id) {
-                            record.state = TaskState::NeedsAttention;
-                            record.error = Some(message);
-                            record.unread = true;
-                        }
-                        self.workspace_error = Some(format!("任务状态尚未保存：{error:#}"));
-                    }
-                }
+                self.fail_task_before_start(&task.id, format!("{error:#}"));
             }
         }
         cx.notify();
+    }
+
+    fn fail_task_before_start(&mut self, task_id: &str, message: String) {
+        if let Some(workspace) = &mut self.workspace {
+            let compensated = workspace.transaction(|state| {
+                let record = state.task_mut(task_id).context("任务不存在")?;
+                record.state = TaskState::NeedsAttention;
+                record.error = Some(message.clone());
+                record.unread = true;
+                Ok(())
+            });
+            if let Err(error) = compensated {
+                // 补偿持久化失败也不能让任务停在 Running 被调度器无视：
+                // 内存中同样标记 NeedsAttention；重启时 recover() 与磁盘对齐
+                if let Some(record) = workspace.state.task_mut(task_id) {
+                    record.state = TaskState::NeedsAttention;
+                    record.error = Some(message);
+                    record.unread = true;
+                }
+                self.workspace_error = Some(format!("任务状态尚未保存：{error:#}"));
+            }
+        }
     }
 
     pub fn set_task_intent(&mut self, id: String, intent: Intent, cx: &mut Context<Self>) {
