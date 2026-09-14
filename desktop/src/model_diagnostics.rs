@@ -50,6 +50,8 @@ pub(super) struct State {
     cancelled: bool,
     details: bool,
     cache_details: std::collections::BTreeSet<String>,
+    /// 渲染期只登记 key，真正的 entries 写入与后台检查在 cx.defer 中执行
+    pending_checks: std::collections::BTreeSet<String>,
 }
 
 /// A read-only view for setup. Checks and downloads keep the same ownership as Settings.
@@ -130,7 +132,27 @@ impl Desktop {
         root: &Path,
         cx: &mut Context<Self>,
     ) {
-        self.check_model_request(Request::new(provider, model, root), false, cx);
+        // 调用方多在渲染路径：这里只登记意图并 defer，真正的 entries 写入与
+        // 后台文件系统检查不在渲染期发生（SKILL.md：渲染期不做文件/网络工作）
+        let request = Request::new(provider, model, root);
+        if request.provider == AsrProvider::Api {
+            return;
+        }
+        let key = request.key();
+        let state = &mut self.settings_ui.model_diagnostics;
+        if state.entries.contains_key(&key) || !state.pending_checks.insert(key) {
+            return;
+        }
+        let desktop = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = desktop.update(cx, |this, cx| {
+                this.settings_ui
+                    .model_diagnostics
+                    .pending_checks
+                    .remove(&request.key());
+                this.check_model_request(request, false, cx);
+            });
+        });
     }
     fn check_model_request(&mut self, request: Request, force: bool, cx: &mut Context<Self>) {
         if request.provider == AsrProvider::Api {
@@ -253,7 +275,7 @@ impl Desktop {
             .preparing
             .clone()
             .unwrap_or_else(|| self.default_model_request());
-        self.settings_ui.model_diagnostics.result = Some((
+        let result = (
             if success {
                 format!(
                     "{} · {} 的准备已完成，正在重新检查缓存。",
@@ -275,7 +297,14 @@ impl Desktop {
                 )
             },
             !success && !cancelled,
-        ));
+        );
+        self.settings_ui.model_diagnostics.result = Some(result.clone());
+        // 同步到引导页的准备记录（取代渲染期的 retain_setup_model_result）
+        self.onboarding.apply_model_preparation_result(
+            &request.key(),
+            result,
+            cancelled && !success,
+        );
         self.refresh_model_diagnostics(cx);
         cx.notify();
     }

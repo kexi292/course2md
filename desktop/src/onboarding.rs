@@ -65,6 +65,35 @@ struct ModelRequest {
     root: PathBuf,
 }
 
+impl ModelRequest {
+    // 与 model_diagnostics::Request::key 同一格式，跨模块匹配用
+    fn key(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.provider.as_str(),
+            self.model,
+            self.root.display()
+        )
+    }
+}
+
+impl State {
+    /// model_preparation_finished 事件调用：请求匹配时同步准备结果
+    pub(crate) fn apply_model_preparation_result(
+        &mut self,
+        request_key: &str,
+        result: (String, bool),
+        cancelled: bool,
+    ) {
+        if let Some(preparation) = &mut self.model_preparation
+            && preparation.request.key() == request_key
+        {
+            preparation.result = Some(result);
+            preparation.cancelled = cancelled;
+        }
+    }
+}
+
 struct ModelPreparation {
     request: ModelRequest,
     result: Option<(String, bool)>,
@@ -923,20 +952,6 @@ impl Desktop {
             })
     }
 
-    fn retain_setup_model_result(&mut self) {
-        let Some(preparation) = &self.onboarding.model_preparation else {
-            return;
-        };
-        let request = &preparation.request;
-        let snapshot =
-            self.setup_model_snapshot(request.provider, Some(&request.model), &request.root);
-        if let Some(result) = snapshot.notice {
-            let preparation = self.onboarding.model_preparation.as_mut().unwrap();
-            preparation.result = Some(result);
-            preparation.cancelled = snapshot.cancelled;
-        }
-    }
-
     fn open_setup_model_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.onboarding.active && self.page == Page::New && !self.save_current_draft(cx) {
             return;
@@ -995,7 +1010,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.retain_setup_model_result();
+        // 渲染不收敛状态：model_preparation 的结果在 model_preparation_finished 事件里同步
         let step = self.onboarding.step;
         let (number, title, description, icon) = match step {
             Step::Engine => (
@@ -2504,7 +2519,6 @@ impl Desktop {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        self.retain_setup_model_result();
         if self.onboarding.active {
             return None;
         }
