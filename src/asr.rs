@@ -743,6 +743,14 @@ pub fn gpu_devices(bin: &Path) -> Result<Vec<String>> {
     parse_gpu_devices(&output)
 }
 
+/// `--list-devices` 也会报告 BLAS/Accelerate 这类 CPU 后端行；只有这些前缀才是 GPU。
+/// 桌面端（desktop/src/backend.rs）共用同一判定，避免两处白名单漂移。
+pub fn is_gpu_device_id(id: &str) -> bool {
+    ["MTL", "CUDA", "Vulkan", "SYCL", "ROCm"]
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
+}
+
 fn parse_gpu_devices(output: &str) -> Result<Vec<String>> {
     let (_, rows) = output.split_once("Available devices:").context(
         "无法解析 llama-server GPU 列表，请更新 llama.cpp 后运行 llama-server --list-devices 检查 / Cannot parse the llama-server GPU list; update llama.cpp and check with llama-server --list-devices",
@@ -752,7 +760,7 @@ fn parse_gpu_devices(output: &str) -> Result<Vec<String>> {
         .map(str::trim)
         .filter(|line| {
             line.split_once(':').is_some_and(|(name, description)| {
-                !name.is_empty() && !description.trim().is_empty()
+                is_gpu_device_id(name) && !description.trim().is_empty()
             })
         })
         .map(str::to_owned)
@@ -1260,6 +1268,11 @@ mod tests {
         let devices = super::parse_gpu_devices("Available devices:\n  Vulkan0: Intel Arc B390 (23719 MiB)\n  CUDA0: NVIDIA GPU (8192 MiB)\n").unwrap();
         assert_eq!(devices.len(), 2);
         assert!(devices[0].contains("Intel Arc B390"));
+        // BLAS/Accelerate 是 CPU 后端行，不得当作 GPU 报告（macOS 上 `--list-devices` 会列出它）。
+        let devices = super::parse_gpu_devices("Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n  MTL0: Apple M3 Max (110100 MiB, 110100 MiB free)\n").unwrap();
+        assert_eq!(devices.len(), 1);
+        assert!(devices[0].contains("Apple M3 Max"));
+        assert!(super::parse_gpu_devices("Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n").unwrap().is_empty());
         assert!(super::parse_gpu_devices("unknown option --list-devices").is_err());
     }
 

@@ -401,12 +401,7 @@ impl Environment {
         let gpu = checks[4].as_deref().and_then(|output| {
             output.lines().find_map(|line| {
                 let (id, description) = line.trim().split_once(':')?;
-                (id.starts_with("MTL")
-                    || id.starts_with("CUDA")
-                    || id.starts_with("Vulkan")
-                    || id.starts_with("SYCL")
-                    || id.starts_with("ROCm"))
-                .then(|| {
+                course2md::asr::is_gpu_device_id(id).then(|| {
                     description
                         .split(" (")
                         .next()
