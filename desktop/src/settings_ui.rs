@@ -15,7 +15,7 @@ use gpui_component::{
     checkbox::Checkbox,
     input::{InputContentType, Textarea, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
-    scroll::{Scrollbar, ScrollbarMode},
+    scroll::Scrollbar,
     switch::Switch,
 };
 use std::sync::{

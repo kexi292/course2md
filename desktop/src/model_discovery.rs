@@ -5,7 +5,6 @@ use crate::credentials::{CredentialRef, CredentialVault, Secret};
 use crate::preferences::{Authentication, ServiceDraft, ServiceProtocol, normalize_endpoint};
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::io::Read;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},

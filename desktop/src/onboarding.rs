@@ -13,7 +13,6 @@ use course2md::{
     config::{AsrProvider, model_dir_from},
     models::status::CacheState,
 };
-use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::switch::Switch;
 use std::sync::{
     Arc,
