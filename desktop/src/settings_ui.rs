@@ -4168,7 +4168,7 @@ impl Desktop {
                 "界面文字大小",
                 "",
                 self.setting_choices("app-font-scale", "应用文字大小")
-                    .options([1.0_f32, 1.25, 1.5, 2.0].into_iter().map(|scale| {
+                    .options(crate::preferences::FONT_SCALES.into_iter().map(|scale| {
                         (
                             (scale * 100.).round().to_string(),
                             format!("{}%", (scale * 100.) as u32),

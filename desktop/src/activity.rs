@@ -275,7 +275,7 @@ pub fn title(stage: &str) -> String {
     }
     .into()
 }
-fn bytes(value: u64) -> String {
+pub(crate) fn bytes(value: u64) -> String {
     if value >= 1024 * 1024 * 1024 {
         format!("{:.2} GB", value as f64 / (1024. * 1024. * 1024.))
     } else if value >= 1024 * 1024 {

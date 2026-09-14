@@ -219,6 +219,9 @@ impl GenerationPreferences {
     }
 }
 
+/// 界面文字大小档位：应用、下拉选项、持久化校验共用同一白名单
+pub const FONT_SCALES: [f32; 4] = [1.0, 1.25, 1.5, 2.0];
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApplicationPreferences {
@@ -598,7 +601,7 @@ impl Validate for ApplicationPreferences {
         if !self.appearance.valid() {
             bail!("请为浅色和深色外观分别选择对应的主题");
         }
-        if ![1.0, 1.25, 1.5, 2.0].contains(&self.font_scale) {
+        if !crate::preferences::FONT_SCALES.contains(&self.font_scale) {
             bail!("请选择 100%、125%、150% 或 200% 的文字大小");
         }
         Ok(())

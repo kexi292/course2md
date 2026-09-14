@@ -63,15 +63,6 @@ pub(crate) struct ModelSetupSnapshot {
     pub(crate) notice: Option<(String, bool)>,
     pub(crate) cancelled: bool,
 }
-fn bytes(value: u64) -> String {
-    if value >= 1024 * 1024 * 1024 {
-        format!("{:.2} GB", value as f64 / (1024_f64.powi(3)))
-    } else if value >= 1024 * 1024 {
-        format!("{:.1} MB", value as f64 / (1024_f64.powi(2)))
-    } else {
-        format!("{value} 字节")
-    }
-}
 fn provider_name(provider: AsrProvider) -> &'static str {
     match provider {
         AsrProvider::Coreml => "Apple 原生",
@@ -621,7 +612,7 @@ impl Desktop {
                                 row.child(
                                     settings_value(
                                         SharedString::from(format!("model-cached-size-{key}")),
-                                        format!("缓存占用 {}", bytes(status.bytes)),
+                                        format!("缓存占用 {}", crate::activity::bytes(status.bytes)),
                                     )
                                     .text_size(TEXT_AUX)
                                     .text_color(color(MUTED)),

@@ -206,8 +206,11 @@ impl CredentialVault for KeyringCredentialVault {
     fn remove(&self, reference: &str) -> Result<()> {
         validate_reference(reference)?;
         let entry = keyring::Entry::new(&self.service, reference)?;
-        entry.delete_credential()?;
-        Ok(())
+        // 与 Keychain 实现一致：条目不存在视为已删除
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 }
 
