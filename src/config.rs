@@ -478,13 +478,15 @@ pub fn model_dir_from(opt: Option<&Path>) -> PathBuf {
 /// 展开 `~` / `~/...`（仅 Unix 主目录约定；无 HOME 时原样返回）。
 /// 防止配置里的 "~/cache" 真的在当前目录创建名为 `~` 的子目录。
 pub fn expand_tilde(p: PathBuf) -> PathBuf {
+    // 与 config_dir/cache_dir 同一 home 解析：Windows 上 HOME 可能缺席，退回 USERPROFILE
+    let home = || std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     let Some(s) = p.to_str() else { return p };
     if s == "~" {
-        if let Some(h) = std::env::var_os("HOME") {
+        if let Some(h) = home() {
             return PathBuf::from(h);
         }
     } else if let Some(rest) = s.strip_prefix("~/")
-        && let Some(h) = std::env::var_os("HOME")
+        && let Some(h) = home()
     {
         return PathBuf::from(h).join(rest);
     }
@@ -657,8 +659,9 @@ fn youtube_id(s: &str) -> Option<String> {
 /// 文件系统限制的路径。
 const MAX_COMPONENT_CHARS: usize = 80;
 
-/// 保留中文等标题字符，去掉路径非法符。
-pub fn sanitize_component(s: &str) -> String {
+/// 统一的文件名净化原语：路径非法符与空白折叠为 `-`，裁剪首尾，超长截断。
+/// `fallback` 为净化后为空时的名字（调用方语义：untitled / summary）。
+pub fn sanitize_filename_with_fallback(s: &str, fallback: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
     for c in s.chars() {
@@ -677,10 +680,15 @@ pub fn sanitize_component(s: &str) -> String {
     let out = out.trim_matches(['-', '.', ' ']).to_string();
     let out: String = out.chars().take(MAX_COMPONENT_CHARS).collect();
     if out.is_empty() {
-        "untitled".into()
+        fallback.to_string()
     } else {
         out
     }
+}
+
+/// 保留中文等标题字符，去掉路径非法符（= sanitize_filename_with_fallback(_, "untitled")）。
+pub fn sanitize_component(s: &str) -> String {
+    sanitize_filename_with_fallback(s, "untitled")
 }
 
 #[cfg(test)]
