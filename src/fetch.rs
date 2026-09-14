@@ -18,6 +18,35 @@ fn ytdlp_base(cmd: &mut Command) -> &mut Command {
     cmd.args(["--ignore-config", "--socket-timeout", YTDLP_SOCKET_TIMEOUT])
 }
 
+/// 轮询任务控制文件，意图不再是 run 时返回 Err。配合 `tokio::select!` 打断
+/// 长时间运行的子进程分支（子进程句谋 kill_on_drop 随分支 dropped 生效）。
+/// 无活动任务账本时 check_control 恒 Ok，此 future 永不完成，不影响 CLI 独立调用。
+async fn watch_control() -> anyhow::Error {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if let Err(e) = crate::dispatch::check_control() {
+            return e;
+        }
+    }
+}
+
+/// 确定性错误（重试无意义）：4xx 拒绝、不支持的 URL、私有/不可用视频等。
+/// 只匹配 yt-dlp 的错误文本；未列出的错误按网络类处理，仍由外层循环重试。
+fn is_deterministic_download_error(error_text: &str) -> bool {
+    let lower = error_text.to_ascii_lowercase();
+    [
+        "http error 401",
+        "http error 403",
+        "http error 404",
+        "http error 410",
+        "unsupported url",
+        "private video",
+        "video unavailable",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 /// yt-dlp 命令收尾：`--` 分隔符保证 URL 不被当作选项解析。
 fn ytdlp_url<'a>(cmd: &'a mut Command, url: &str) -> &'a mut Command {
     cmd.arg("--").arg(url)
@@ -619,12 +648,20 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
         tokio::fs::create_dir_all(p).await?;
     }
     let tmp: PathBuf = dest.with_extension("mp4.part");
-    // 网络类错误由外层循环重试（共 DOWNLOAD_ATTEMPTS 次）
+    // 瞬时网络错误由外层循环重试（共 DOWNLOAD_ATTEMPTS 次）；412 走专用退避；
+    // 确定性错误（4xx/私有视频等）立即返回；每轮都可被任务控制文件中止。
     let mut last_err = None;
+    let mut next_delay = None;
+    let mut bilibili_412_retries = 0;
     for attempt in 0..DOWNLOAD_ATTEMPTS {
+        crate::dispatch::check_control()?;
         if attempt > 0 {
             tracing::warn!(attempt, "视频下载失败，正在重试 / Retrying video download");
-            tokio::time::sleep(DOWNLOAD_RETRY_DELAY).await;
+            let delay = next_delay.unwrap_or(DOWNLOAD_RETRY_DELAY);
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                e = watch_control() => return Err(e),
+            }
         }
         let mut cmd = Command::new("yt-dlp");
         let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
@@ -645,10 +682,14 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
         if verbose {
             cmd.arg("-v");
         }
-        match run_status(ytdlp_url(&mut cmd, url))
-            .await
-            .map_err(|e| crate::auth::with_bilibili_login_tip(url, e))
-        {
+        let outcome = tokio::select! {
+            status = run_status(ytdlp_url(&mut cmd, url)) => {
+                status.map_err(|e| crate::auth::with_bilibili_login_tip(url, e))
+            }
+            // 取消/暂停：drop run_status 分支即 kill_on_drop 终止当前 yt-dlp
+            e = watch_control() => return Err(e),
+        };
+        match outcome {
             Ok(()) => {
                 // 新版 yt-dlp 在 merge 时会按 --merge-output-format 再补后缀：
                 // -o media.mp4.part 实际产出 media.mp4.part.mp4。两种命名都兼容。
@@ -672,7 +713,24 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
                 tokio::fs::rename(&produced, dest).await?;
                 return Ok(());
             }
-            Err(e) => last_err = Some(e),
+            Err(e) => {
+                let text = format!("{e:#}");
+                if is_bilibili_412(&text) {
+                    match bilibili_retry_delay(&text, bilibili_412_retries) {
+                        Some(delay) => {
+                            bilibili_412_retries += 1;
+                            next_delay = Some(delay);
+                        }
+                        // 412 重试耗尽，不再进下一轮
+                        None => return Err(e),
+                    }
+                } else if is_deterministic_download_error(&text) {
+                    return Err(e);
+                } else {
+                    next_delay = None;
+                }
+                last_err = Some(e);
+            }
         }
     }
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("视频下载失败 / Video download failed")))
@@ -753,6 +811,25 @@ async fn run_status(cmd: &mut Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deterministic_download_errors_skip_the_retry_loop() {
+        for text in [
+            "ERROR: HTTP Error 404: Not Found",
+            "HTTP Error 403: Forbidden",
+            "ERROR: Unsupported URL: https://example.com/x",
+            "ERROR: Private video. Use --cookies for authentication",
+        ] {
+            assert!(is_deterministic_download_error(text), "{text}");
+        }
+        for text in [
+            "ERROR: [bilibili] HTTP Error 412: Precondition Failed",
+            "network unreachable",
+            "timed out",
+        ] {
+            assert!(!is_deterministic_download_error(text), "{text}");
+        }
+    }
 
     #[test]
     fn collection_is_never_implicitly_the_first_part() {
