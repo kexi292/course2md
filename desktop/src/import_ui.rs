@@ -577,7 +577,7 @@ impl Desktop {
         } else {
             message.lines().next().unwrap_or(message)
         };
-        let details = (summary != message).then_some(message).unwrap_or("");
+        let details = if summary != message { message } else { "" };
         let id = text_id(kind, message);
         let expanded = self.expanded_subtitle_issue.as_ref() == Some(&id);
         v_flex()
@@ -681,14 +681,13 @@ impl Desktop {
                 {
                     return;
                 }
-                if let Some((id, revision)) = &token {
-                    if !this
+                if let Some((id, revision)) = &token
+                    && !this
                         .workspace
                         .as_ref()
                         .is_some_and(|workspace| workspace.state.matches_input(id, *revision))
-                    {
-                        return;
-                    }
+                {
+                    return;
                 }
                 this.subtitle_loading = false;
                 this.subtitle_cancel = None;
@@ -1749,7 +1748,7 @@ impl Desktop {
                             && self
                                 .subtitle_error
                                 .as_deref()
-                                .or_else(|| match &source.subtitles {
+                                .or(match &source.subtitles {
                                     SubtitleEvidence::Failed { message } => Some(message.as_str()),
                                     _ => None,
                                 })
@@ -2358,7 +2357,7 @@ impl Desktop {
                     .items_start()
                     .child(
                         h_flex()
-                            .debug_selector(move || format!("import-export-icon-{index}").into())
+                            .debug_selector(move || format!("import-export-icon-{index}"))
                             .h(first_line_height)
                             .flex_shrink_0()
                             .child(icon.size(px(20.)).text_color(color(GRAY))),
@@ -2366,7 +2365,7 @@ impl Desktop {
                     .child(
                         Checkbox::new(("import-export", index))
                             .debug_selector(move || {
-                                format!("import-export-checkbox-{index}").into()
+                                format!("import-export-checkbox-{index}")
                             })
                             .accessibility_label(label)
                             .checked(self.task_options.formats[index])
@@ -2395,14 +2394,14 @@ impl Desktop {
                             .child(
                                 h_flex()
                                     .debug_selector(move || {
-                                        format!("import-export-title-{index}").into()
+                                        format!("import-export-title-{index}")
                                     })
                                     .min_w_0()
                                     .min_h(first_line_height)
                                     .child(accessible_text(("import-export-label", index), label)),
                             )
                             .child(help(description).debug_selector(move || {
-                                format!("import-export-description-{index}").into()
+                                format!("import-export-description-{index}")
                             })),
                     ),
             );

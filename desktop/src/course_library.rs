@@ -730,7 +730,6 @@ impl Desktop {
         let content = crate::views::shell_content_width(Page::Library, window);
         // gap_4 is one rem, and card padding/menu spacing scales with that rem.
         let columns = ((content + rem) / (20. * rem + rem)).floor().max(1.) as usize;
-        let card_w = (content - rem * columns.saturating_sub(1) as f32) / columns as f32;
         let layout = LibraryLayout {
             columns,
             compact: content < 336. * scale,
@@ -1337,7 +1336,7 @@ impl Desktop {
             .workspace
             .as_ref()
             .is_some_and(|w| w.state.libraries.len() > 1);
-        let mut sections: Vec<(PathBuf, String, Vec<(u64, String)>)> = self
+        let mut sections: Vec<LibrarySection> = self
             .workspace
             .as_ref()
             .map(|w| w.state.libraries.clone())
@@ -1804,17 +1803,15 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Div {
         let mut read = h_flex().w_full().min_w_0().items_center().gap(px(12.));
-        if !layout.stacked {
-            if let Some(thumbnail) = &course.thumbnail {
-                read = read.child(
-                    img(thumbnail.clone())
-                        .w(rems(6.857))
-                        .h(rems(3.857))
-                        .object_fit(ObjectFit::Cover)
-                        .rounded(RADIUS_SMALL)
-                        .flex_shrink_0(),
-                );
-            }
+        if !layout.stacked && let Some(thumbnail) = &course.thumbnail {
+            read = read.child(
+                img(thumbnail.clone())
+                    .w(rems(6.857))
+                    .h(rems(3.857))
+                    .object_fit(ObjectFit::Cover)
+                    .rounded(RADIUS_SMALL)
+                    .flex_shrink_0(),
+            );
         }
         read = read.child(
             v_flex()
@@ -1929,7 +1926,7 @@ impl Desktop {
                             | crate::workspace::TaskState::Paused
                     ) || (task.state == crate::workspace::TaskState::Partial
                         && task.artifact.as_ref().is_some_and(|path| {
-                            !crate::task_ui::task_component_failures(*task, path).is_empty()
+                            !crate::task_ui::task_component_failures(task, path).is_empty()
                         })))
             })
             .cloned()
