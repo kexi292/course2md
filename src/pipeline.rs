@@ -343,7 +343,7 @@ async fn reprocess(
         let media_path = if Path::new(&request.source).is_file() {
             PathBuf::from(&request.source)
         } else {
-            if !verified_file(&cfg.media_path(), &cfg.out_dir.join("media.sha256"))? {
+            if !prepare_cached_media(cfg)? {
                 anyhow::ensure!(
                     !Path::new(&request.source).is_absolute()
                         && !request.source_id.starts_with("local:"),
@@ -353,6 +353,8 @@ async fn reprocess(
                     !cfg.no_download,
                     "找不到截图所需的视频 / Video required for screenshots is unavailable"
                 );
+                // 与主路径同一纪律：无法校验的现存文件已由 prepare_cached_media 归档，
+                // 此处只会真正下载新内容，不会把未校验文件标记为已校验
                 crate::error::require_cmd("yt-dlp")?;
                 progress::stage("download", "start");
                 fetch::download(&cfg.url, &cfg.media_path(), cfg.max_height, false).await?;
