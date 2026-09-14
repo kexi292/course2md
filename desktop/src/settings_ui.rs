@@ -1832,10 +1832,24 @@ impl Desktop {
             .min_h_0()
             .gap_3()
             .child(
-                text("service-editor-inline-title", title)
-                    .text_size(TEXT_TITLE)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .flex_shrink_0(),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .flex_shrink_0()
+                    .child(
+                        (if purpose == ServicePurpose::Speech {
+                            icons::microphone()
+                        } else {
+                            icons::science()
+                        })
+                        .size(px(20.))
+                        .text_color(color(ACCENT_STRONG)),
+                    )
+                    .child(
+                        text("service-editor-inline-title", title)
+                            .text_size(TEXT_TITLE)
+                            .font_weight(FontWeight::SEMIBOLD),
+                    ),
             )
             .child(self.service_editor_content(true, window, cx))
     }
@@ -2486,7 +2500,9 @@ impl Desktop {
                 "设置 AI 服务"
             })
             .gap_4()
-            .px_1();
+            .px_1()
+            // 滚动容器为末行字段的边框/焦点外绘留出空间（system.md：clipped container 需预留 outward paint）
+            .pb_3();
         view = view.child(
             text(
                 "service-editor-scope",
@@ -2655,30 +2671,21 @@ impl Desktop {
                     .text_color(color(MUTED)),
                 );
             }
-            view = view.child(
-                control("toggle-service-key")
-                    .icon(if editor.show_key {
-                        icons::eye_off()
-                    } else {
-                        icons::eye()
-                    })
-                    .ghost()
-                    .label(if editor.show_key {
-                        "隐藏输入的密钥"
-                    } else {
-                        "显示输入的密钥"
-                    })
-                    .self_start()
-                    .on_click(cx.listener(|this, _, window, cx| {
+            view = view.child(preference(
+                "显示输入的密钥",
+                "开启后输入的密钥明文可见。",
+                Switch::new("toggle-service-key")
+                    .checked(editor.show_key)
+                    .on_click(cx.listener(|this, value, window, cx| {
                         if let Some(editor) = &mut this.settings_ui.editor {
-                            editor.show_key = !editor.show_key;
+                            editor.show_key = *value;
                             let masked = !editor.show_key;
                             this.settings_ui.inputs[&EditField::Key]
                                 .update(cx, |input, cx| input.set_masked(masked, window, cx));
                         }
                         cx.notify();
                     })),
-            );
+            ));
         }
         if let Some(source) = &editor.draft.credential_source {
             view = view.child(
@@ -3020,7 +3027,7 @@ impl Desktop {
                 )
             })
             .child(
-                text(
+                theme::supporting_info(
                     "service-test-notice",
                     if test_outcome_unknown && editor.repair_task.is_some() {
                         format!("上次测试结果未确认。重试测试会发送新测试请求；点击「{repair_submit_label}」会重新发送失败部分，服务可能计费。")
@@ -3032,8 +3039,7 @@ impl Desktop {
                         service_test::TEST_NOTICE.to_owned()
                     },
                 )
-                .text_size(TEXT_AUX)
-                .text_color(color(MUTED)),
+                .text_size(TEXT_AUX),
             )
             .child(actions);
         v_flex()

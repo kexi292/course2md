@@ -1357,7 +1357,7 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                                 .rounded(RADIUS_SMALL)
                                 .aspect_ratio(aspect_ratio)
                                 .accessibility_label(format!("放大{label}"))
-                                .tooltip("点击放大截图")
+                                // 不再用 tooltip 文案提示放大：它会盖住摘要/正文；点击图本身即放大
                                 .disabled(frame_index.is_none())
                                 .child(
                                     img(path.clone())
