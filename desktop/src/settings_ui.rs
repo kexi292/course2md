@@ -3141,8 +3141,15 @@ impl Desktop {
         let ticket = editor.models.begin(&request);
         let editor_id = draft.id;
         let vault = self.preferences.vault();
+        // discover() performs synchronous keychain reads and bounded HTTP; it must not run
+        // on a GPUI executor task (see spawn_blocking_io).
+        let result_rx = crate::spawn_blocking_io(move || {
+            smol::block_on(crate::model_discovery::discover(request, vault))
+        });
         cx.spawn(async move |this, cx| {
-            let result = crate::model_discovery::discover(request, vault).await;
+            let Ok(result) = result_rx.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 let current = this.live_service_model_draft(cx).and_then(|draft| {
                     crate::model_discovery::RequestKey::from_draft(
@@ -3361,11 +3368,14 @@ impl Desktop {
         editor.evidence = None;
         editor.status = Some(format!("正在测试{}…", kind.label()));
         let vault = self.preferences.vault();
-        let task = cx
-            .background_executor()
-            .spawn(service_test::test_service(config, kind, vault, cancel));
+        // 服务测试含同步 Keychain 读取与受限 HTTP；见 crate::spawn_blocking_io 的说明
+        let task = crate::spawn_blocking_io(move || {
+            smol::block_on(service_test::test_service(config, kind, vault, cancel))
+        });
         cx.spawn(async move |this, cx| {
-            let evidence = task.await;
+            let Ok(evidence) = task.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 let persisted = this.preferences.record_test(evidence.clone()).is_ok();
                 let key_unchanged = this.setting_value(EditField::Key, cx).is_empty();

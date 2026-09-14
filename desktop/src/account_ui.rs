@@ -176,14 +176,17 @@ impl Desktop {
         let generation = self.account.status_generation;
         self.account.checking = true;
         self.account.status_error = None;
-        let task = cx.background_executor().spawn(async {
+        // 账号状态是同步网络请求；见 crate::spawn_blocking_io 的说明
+        let task = crate::spawn_blocking_io(|| {
             let saved = course2md::auth::cookie_path().is_file();
             let status =
                 course2md::auth::bilibili_account_status().map_err(|error| error.to_string());
             (saved, status)
         });
         cx.spawn(async move |this, cx| {
-            let (saved, result) = task.await;
+            let Ok((saved, result)) = task.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 if this.account.apply_status(generation, saved, result) {
                     cx.notify();
@@ -490,11 +493,11 @@ impl Desktop {
         self.account.invalidate();
         self.account.dialog = Some(QrDialogState::Generating);
         let generation = self.account.generation;
-        let task = cx
-            .background_executor()
-            .spawn(async { QrSession::generate() });
+        let task = crate::spawn_blocking_io(QrSession::generate);
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let Ok(result) = task.recv().await else {
+                return;
+            };
             let mut session = match result {
                 Ok(session) => session,
                 Err(_) => {
@@ -519,11 +522,11 @@ impl Desktop {
             loop {
                 smol::Timer::after(Duration::from_secs(2)).await;
                 if !this.update(cx, |this, _| this.account.current(generation)).unwrap_or(false) { break; }
-                let task = cx.background_executor().spawn(async move {
+                let task = crate::spawn_blocking_io(move || {
                     let result = session.poll();
                     (session, result)
                 });
-                let (next, result) = task.await;
+                let Ok((next, result)) = task.recv().await else { break; };
                 session = next;
                 let remaining = session.remaining().as_secs();
                 let keep_polling = this.update(cx, |this, cx| {

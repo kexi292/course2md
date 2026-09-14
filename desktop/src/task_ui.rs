@@ -1453,18 +1453,19 @@ impl Desktop {
         self.start_pending = true;
         let vault = self.preferences.vault();
         let task_id = task.id.clone();
+        let secrets_rx = crate::spawn_blocking_io(move || -> Result<HashMap<String, String>> {
+            let mut secrets = HashMap::new();
+            for reference in needed {
+                let secret = vault.resolve(&reference).map(|s| s.expose().to_owned())?;
+                secrets.insert(reference, secret);
+            }
+            Ok(secrets)
+        });
         cx.spawn(async move |this, cx| {
-            let secrets = cx
-                .background_executor()
-                .spawn(async move {
-                    let mut secrets = HashMap::new();
-                    for reference in needed {
-                        let secret = vault.resolve(&reference).map(|s| s.expose().to_owned())?;
-                        secrets.insert(reference, secret);
-                    }
-                    Ok::<_, anyhow::Error>(secrets)
-                })
-                .await;
+            let secrets = secrets_rx
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("凭据读取线程意外结束")));
             let _ = this.update(cx, |this, cx| {
                 this.start_pending = false;
                 match secrets {

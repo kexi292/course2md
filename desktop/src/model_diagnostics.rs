@@ -172,27 +172,29 @@ impl Desktop {
                 cache_directories: Default::default(),
             },
         );
+        // inspect() 会对数 GB 的模型文件做同步 SHA-256，必须离开 executor；
+        // 见 crate::spawn_blocking_io 的说明
+        let work = crate::spawn_blocking_io(move || {
+            let result = course2md::models::status::inspect(
+                request.provider,
+                &request.model,
+                &request.root,
+            )
+            .map_err(|error| format!("{error:#}"));
+            let directories = result
+                .as_ref()
+                .ok()
+                .into_iter()
+                .flat_map(|status| &status.parts)
+                .filter(|part| part.path.is_dir())
+                .map(|part| part.path.clone())
+                .collect();
+            (result, directories)
+        });
         cx.spawn(async move |this, cx| {
-            let (result, cache_directories) = cx
-                .background_executor()
-                .spawn(async move {
-                    let result = course2md::models::status::inspect(
-                        request.provider,
-                        &request.model,
-                        &request.root,
-                    )
-                    .map_err(|error| format!("{error:#}"));
-                    let directories = result
-                        .as_ref()
-                        .ok()
-                        .into_iter()
-                        .flat_map(|status| &status.parts)
-                        .filter(|part| part.path.is_dir())
-                        .map(|part| part.path.clone())
-                        .collect();
-                    (result, directories)
-                })
-                .await;
+            let Ok((result, cache_directories)) = work.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 if let Some(entry) = this.settings_ui.model_diagnostics.entries.get_mut(&key)
                     && entry.generation == generation

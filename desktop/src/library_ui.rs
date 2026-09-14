@@ -147,11 +147,13 @@ impl Desktop {
         let online = self.online;
         // 用发起探测的窗口而不是“第一个窗口”：回调只可能落回正确的窗口
         let handle = Some(window.window_handle());
-        let task = cx
-            .background_executor()
-            .spawn(async move { source::probe(input, online, cancel) });
+        // probe 是同步网络/子进程工作；见 crate::spawn_blocking_io 的说明
+        let task = crate::spawn_blocking_io(move || source::probe(input, online, cancel));
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("识别工作线程意外结束")));
             // worker 计数无论窗口存亡都必须归还（request_close 等待它归零）
             let _ = this.update(cx, |this, _| {
                 this.preview_workers = this.preview_workers.saturating_sub(1);

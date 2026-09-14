@@ -1752,25 +1752,26 @@ impl Desktop {
         self.reader_ui.data_loading = true;
         self.reader_ui.offline_opening = false;
         cx.spawn(async move |this, cx| {
-            let (data, source, source_available, offline_video) = cx
-                .background_executor()
-                .spawn(async move {
-                    let source = source.map(|source| match source {
-                        nav::SourceTarget::Local(path) => {
-                            nav::SourceTarget::Local(nav::relocated_source(&path, &locations))
-                        }
-                        other => other,
-                    });
-                    let available = source.as_ref().is_some_and(|source| match source {
-                        nav::SourceTarget::Web(_) => true,
-                        nav::SourceTarget::Local(path) => path.is_file(),
-                    });
-                    let offline_video = offline_request
-                        .map(|request| request.inspect())
-                        .unwrap_or_default();
-                    (load_reader_data(&preview), source, available, offline_video)
-                })
-                .await;
+            // 解析全文与离线检查是同步文件/子进程工作；见 crate::spawn_blocking_io 的说明
+            let (data, source, source_available, offline_video) = crate::spawn_blocking_io(move || {
+                let source = source.map(|source| match source {
+                    nav::SourceTarget::Local(path) => {
+                        nav::SourceTarget::Local(nav::relocated_source(&path, &locations))
+                    }
+                    other => other,
+                });
+                let available = source.as_ref().is_some_and(|source| match source {
+                    nav::SourceTarget::Web(_) => true,
+                    nav::SourceTarget::Local(path) => path.is_file(),
+                });
+                let offline_video = offline_request
+                    .map(|request| request.inspect())
+                    .unwrap_or_default();
+                (load_reader_data(&preview), source, available, offline_video)
+            })
+            .recv()
+            .await
+            .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
                 if this.reader_ui.generation != generation
                     || this
@@ -1838,10 +1839,10 @@ impl Desktop {
         let generation = self.reader_ui.generation;
         self.reader_ui.offline_opening = true;
         cx.spawn(async move |this, cx| {
-            let status = cx
-                .background_executor()
-                .spawn(async move { request.inspect() })
-                .await;
+            let status = crate::spawn_blocking_io(move || request.inspect())
+                .recv()
+                .await
+                .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
                 if this.reader_ui.generation != generation
                     || this
@@ -1943,11 +1944,9 @@ impl Desktop {
             });
             let input = path.to_string_lossy().into_owned();
             let identity = key.clone();
-            let checked = cx
-                .background_executor()
-                .spawn(async move {
-                    let source::SourceProbe::Single(source) =
-                        source::probe(input, false, probing)?
+            let checked = crate::spawn_blocking_io(move || {
+                let source::SourceProbe::Single(source) =
+                    source::probe(input, false, probing)?
                     else {
                         anyhow::bail!("请选择可读取的视频文件");
                     };
@@ -1956,8 +1955,11 @@ impl Desktop {
                         "这个文件与生成笔记时的视频内容不同，请选择同一个原视频"
                     );
                     Ok::<_, anyhow::Error>(())
-                })
-                .await;
+            });
+            let checked = checked
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("检查原视频的工作线程意外结束")));
             let _ = this.update(cx, |this, cx| {
                 this.reader_ui.source_loading = false;
                 // 只清自己的标志：更晚开始的探测持有另一个 Arc

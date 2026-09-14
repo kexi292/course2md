@@ -718,22 +718,27 @@ impl Desktop {
         service.evidence.clear();
         self.onboarding.notice = None;
         let vault = self.preferences.vault();
-        let task = cx.background_executor().spawn(async move {
-            let mut results = Vec::new();
-            for kind in required {
-                let evidence =
-                    service_test::test_service(config.clone(), kind, vault.clone(), cancel.clone())
-                        .await;
-                let passed = evidence.outcome == TestOutcome::Passed;
-                results.push((kind, evidence));
-                if !passed || cancel.load(Ordering::Acquire) {
-                    break;
+        // 服务测试含同步 Keychain 读取与受限 HTTP；见 crate::spawn_blocking_io 的说明
+        let task = crate::spawn_blocking_io(move || {
+            smol::block_on(async move {
+                let mut results = Vec::new();
+                for kind in required {
+                    let evidence =
+                        service_test::test_service(config.clone(), kind, vault.clone(), cancel.clone())
+                            .await;
+                    let passed = evidence.outcome == TestOutcome::Passed;
+                    results.push((kind, evidence));
+                    if !passed || cancel.load(Ordering::Acquire) {
+                        break;
+                    }
                 }
-            }
-            results
+                results
+            })
         });
         cx.spawn(async move |this, cx| {
-            let results = task.await;
+            let Ok(results) = task.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 let mut persisted = true;
                 for (_, evidence) in &results {
@@ -1504,11 +1509,15 @@ impl Desktop {
         let session = self.onboarding.session;
         let ticket = self.onboarding.service_mut(purpose).models.begin(&request);
         let vault = self.preferences.vault();
-        let task = cx
-            .background_executor()
-            .spawn(crate::model_discovery::discover(request, vault));
+        // discover() 内部是同步 Keychain/HTTP；见 crate::spawn_blocking_io 的说明
+        let task = crate::spawn_blocking_io(move || {
+            smol::block_on(crate::model_discovery::discover(request, vault))
+        });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let result = task
+                .recv()
+                .await
+                .unwrap_or(Err(crate::model_discovery::Error::Network));
             let _ = this.update(cx, |this, cx| {
                 if !this.onboarding.active || this.onboarding.session != session {
                     return;

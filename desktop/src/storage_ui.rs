@@ -565,9 +565,13 @@ impl Desktop {
                 this.open_storage_dialog(window, cx);
                 cx.notify();
             });
-            let result = cx.background_executor().spawn(async move {
+            let work = crate::spawn_blocking_io(move || {
                 inspect_relocation(&state, &library_id, &destination)
-            }).await;
+            });
+            let result = work
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("核对课程库的工作线程意外结束")));
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.storage_ui.generation != generation {
                     return;
@@ -661,7 +665,8 @@ impl Desktop {
         self.open_storage_dialog(window, cx);
         let root = location.root.clone();
         let worker_cancel = cancel.clone();
-        let worker = cx.background_executor().spawn(async move {
+        // 扫描会同步读取磁盘上的全部笔记；见 crate::spawn_blocking_io 的说明
+        let worker = crate::spawn_blocking_io(move || {
             let stamp = storage::directory_stamp(&root)?;
             let mut names = Vec::new();
             let mut unreadable = 0;
@@ -688,7 +693,10 @@ impl Desktop {
             Ok::<_, anyhow::Error>((stamp, names, unreadable))
         });
         cx.spawn_in(window, async move |this, cx| {
-            let result = worker.await;
+            let result = worker
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("重新关联的工作线程意外结束")));
             let Ok((stamp, names, unreadable)) = result else {
                 let message = result.unwrap_err().to_string();
                 let _ = this.update_in(cx, |this, _, cx| {
@@ -1055,7 +1063,8 @@ impl Desktop {
             let progress = Arc::new(Mutex::new(Progress::default()));
             let worker_progress = progress.clone();
             let worker_cancel = cancel.clone();
-            let mut worker = cx.background_executor().spawn(async move {
+            // 迁移是大量同步文件读写；见 crate::spawn_blocking_io 的说明
+            let worker = crate::spawn_blocking_io(move || {
                 let report = |value| {
                     if let Ok(mut progress) = worker_progress.lock() {
                         *progress = value;
@@ -1074,8 +1083,12 @@ impl Desktop {
                 }
             });
             let result = loop {
-                if let Some(result) = smol::future::poll_once(&mut worker).await {
-                    break result;
+                match worker.try_recv() {
+                    Ok(result) => break result,
+                    Err(smol::channel::TryRecvError::Closed) => {
+                        break Err(anyhow::anyhow!("迁移工作线程意外结束"));
+                    }
+                    Err(smol::channel::TryRecvError::Empty) => {}
                 }
                 let snapshot = progress.lock().ok().map(|value| value.clone());
                 if let Some(snapshot) = snapshot {

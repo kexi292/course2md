@@ -662,11 +662,16 @@ impl Desktop {
             return;
         }
         self.preview_workers += 1;
-        let task = cx
-            .background_executor()
-            .spawn(async move { source::read_subtitle(&source, &track, cancel) });
+        let task = crate::spawn_blocking_io(move || source::read_subtitle(&source, &track, cancel));
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| {
+                    Err(course2md::subtitle::SubtitleReadError::Failed {
+                        message: "读取字幕的工作线程意外结束".into(),
+                    })
+                });
             let _ = this.update(cx, |this, cx| {
                 this.preview_workers = this.preview_workers.saturating_sub(1);
                 if this.subtitle_generation != generation
@@ -816,11 +821,12 @@ impl Desktop {
             .and_then(|workspace| workspace.state.draft())
             .map(|draft| (draft.id.clone(), draft.revision));
         self.preview_workers += 1;
-        let task = cx
-            .background_executor()
-            .spawn(async move { source::refresh_subtitles(&source, cancel) });
+        let task = crate::spawn_blocking_io(move || source::refresh_subtitles(&source, cancel));
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("刷新字幕的工作线程意外结束")));
             let _ = this.update(cx, |this, cx| {
                 this.preview_workers = this.preview_workers.saturating_sub(1);
                 if this.subtitle_generation != generation

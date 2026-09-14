@@ -89,6 +89,22 @@ const PROVIDERS: [(&str, &str); 6] = [
 
 /// 识别引擎的规范展示名：全桌面唯一来源（选择与描述场景共用）。
 /// 与 PROVIDERS 表的 id 一一对应；None 表示「自动」。
+/// Runs blocking IO on a dedicated OS thread and delivers the result through a channel.
+///
+/// GPUI's background executor dispatches to GCD global queues, and macOS may run those
+/// blocks on the main thread via queue override; `cx.spawn` always polls on the main
+/// thread. Blocking syscalls — keychain reads that can wait on an authorization dialog,
+/// synchronous HTTP — therefore must never run inside executor tasks.
+pub(crate) fn spawn_blocking_io<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> smol::channel::Receiver<T> {
+    let (tx, rx) = smol::channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(work());
+    });
+    rx
+}
+
 pub(crate) fn provider_label(provider: Option<course2md::config::AsrProvider>) -> &'static str {
     use course2md::config::AsrProvider;
     match provider {
@@ -672,11 +688,13 @@ impl Desktop {
     }
     fn refresh_environment(&mut self, cx: &mut Context<Self>) {
         self.environment = None;
-        let task = cx
-            .background_executor()
-            .spawn(async { backend::Environment::detect() });
+        // 环境探测会同步启动子进程（Metal 枚举可超过十秒），必须离开 executor；
+        // 见 spawn_blocking_io 的说明
+        let task = spawn_blocking_io(backend::Environment::detect);
         cx.spawn(async move |this, cx| {
-            let environment = task.await;
+            let Ok(environment) = task.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 this.environment = Some(environment);
                 this.refresh_model_diagnostics(cx);
@@ -1249,11 +1267,12 @@ impl Desktop {
         } else {
             origin
         };
-        let task = cx
-            .background_executor()
-            .spawn(async move { backend::read_preview(course) });
+        let task = spawn_blocking_io(move || backend::read_preview(course));
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("读取笔记的工作线程意外结束")));
             let _ = this.update(cx, |this, cx| {
                 if this.read_generation != generation || this.page != origin {
                     return;
