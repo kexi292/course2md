@@ -406,7 +406,8 @@ fn service_protocol_label(protocol: ServiceProtocol) -> &'static str {
 fn settings_tab_icon(index: usize) -> Icon {
     match index {
         4 => icons::palette(),
-        0 => icons::tune(),
+        // 生成笔记 = 笔记/文档对象（tune 留给偏好/高级覆盖项，见 crosspage#8 图标指称）
+        0 => icons::subtitles(),
         1 => icons::cloud(),
         2 => icons::storage(),
         _ => icons::info(),
@@ -1044,7 +1045,7 @@ impl Desktop {
                     )
                     .child(
                         quiet("toggle-language-details")
-                            .icon(icons::tune())
+                            .icon(icons::subtitles())
                             .label("自定义语言优先级")
                             .self_end()
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -1123,7 +1124,7 @@ impl Desktop {
                         self.settings_ui.asr_details_open,
                         settings_row(
                             "asr-hardware-heading",
-                            icons::microphone(),
+                            icons::computer(),
                             "本机引擎",
                             "自动选择本机支持的引擎。固定引擎不可用时会提示原因。",
                             self.setting_choices("default-asr-hardware", "本机引擎")

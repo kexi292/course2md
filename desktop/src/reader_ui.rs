@@ -1068,9 +1068,12 @@ struct NoteFlow {
 impl NoteFlow {
     fn chapter_title(&self, seconds: Option<f64>) -> Option<String> {
         let seconds = seconds?;
+        // 章节边界语义：标题属于「最后一个不晚于它的目录章节」——
+        // 截图时间戳几乎从不与大纲时间重合，abs<1.5 的匹配永远落空（M7）
         self.outline
             .iter()
-            .find(|(time, _)| (time - seconds).abs() < 1.5)
+            .filter(|(time, _)| *time <= seconds + 1.5)
+            .max_by(|(a, _), (b, _)| a.total_cmp(b))
             .map(|(_, title)| title.clone())
     }
 
@@ -1349,7 +1352,8 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                             control(("note-image", index))
                                 .ghost()
                                 .p_0()
-                                .w(px((available_height * 0.32).min(224.) * aspect_ratio))
+                                // 行内截图限高：默认窗口内摘要与正文能衔接（M7）
+                                .w(px((available_height * 0.24).min(160.) * aspect_ratio))
                                 .max_w_full()
                                 .h_auto()
                                 .min_h(px(0.))
@@ -2946,11 +2950,10 @@ impl Desktop {
         if !headings.is_empty() && reading_note {
             let toc_on = self.reader_ui.toc_open.unwrap_or(toc_fits_beside);
             search_row = search_row.child(
+                // 切换目录轨的 quiet inline 动作，不再用手写选中面冒充持久选中（M8/共享控件契约）
                 quiet("note-contents")
                     .icon(icons::toc())
                     .label("目录")
-                    .bg(color(if toc_on { ACCENT_SOFT } else { SURFACE }))
-                    .when(toc_on, |button| button.text_color(color(ACCENT_STRONG)))
                     .accessibility_label(if toc_on {
                         "收起目录"
                     } else {
@@ -4009,6 +4012,7 @@ impl Desktop {
                     .collect::<Vec<_>>();
                 // The three-line preview is a defined content slot. Full captions
                 // and transcripts remain readable in the image viewer and article.
+                // 无搜索高亮时用原生省略渲染（StyledText 不产出「…」，静默裁切像断句错误，M9）
                 card_body = card_body.child(
                     div()
                         .id(("frame-excerpt", index))
@@ -4019,13 +4023,18 @@ impl Desktop {
                         .max_h(excerpt_line_height * 3.)
                         .flex_shrink_0()
                         .whitespace_normal()
-                        .text_ellipsis()
-                        .line_clamp(3)
                         .text_size(TEXT_BODY)
                         .font_weight(FontWeight::NORMAL)
                         .line_height(excerpt_line_height)
                         .text_color(color(GRAY))
-                        .child(StyledText::new(excerpt).with_highlights(excerpt_marks)),
+                        .when(excerpt_marks.is_empty(), |view| {
+                            view.text_ellipsis()
+                                .line_clamp(3)
+                                .child(excerpt.clone())
+                        })
+                        .when(!excerpt_marks.is_empty(), |view| {
+                            view.child(StyledText::new(excerpt).with_highlights(excerpt_marks))
+                        }),
                 );
                 grid =
                     grid.child(measured(index, card.child(card_body).into_any_element()).h_full());
@@ -4175,7 +4184,8 @@ impl Desktop {
                                     .w_full()
                                     .min_w_0()
                                     .gap_2()
-                                    .items_baseline()
+                                    // 时间戳固定首行右栏；标题只在左列换行（M8）
+                                    .items_start()
                                     .child(
                                         div()
                                             .flex_1()
