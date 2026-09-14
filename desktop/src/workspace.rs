@@ -32,6 +32,14 @@ pub fn now() -> u64 {
         .as_secs()
 }
 
+/// 课程目录名：`course-{source_id 摘要前 32 字符}`——32 是与引擎 artifact 布局对齐的固定截断。
+pub fn course_dir_name(source_id: &str) -> String {
+    format!(
+        "course-{}",
+        &course2md::execution::digest(source_id.as_bytes())[..32]
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct LibraryLocation {
     pub id: String,
@@ -349,10 +357,7 @@ fn task_export_directory(task: &TaskRecord, location: &LibraryLocation) -> Optio
         return None;
     }
     if task.exports_only() {
-        let course = format!(
-            "course-{}",
-            &course2md::execution::digest(task.plan.source_id.as_bytes())[..32]
-        );
+        let course = crate::workspace::course_dir_name(&task.plan.source_id);
         let course2md::execution::Operation::Reprocess {
             base_version_dir, ..
         } = &task.plan.operation
@@ -1136,10 +1141,7 @@ fn reconcile_artifact(task: &mut TaskRecord, location: &LibraryLocation) -> Resu
     if task.artifact.is_some() && !task.exports_only() {
         return Ok(());
     }
-    let course = format!(
-        "course-{}",
-        &course2md::execution::digest(task.plan.source_id.as_bytes())[..32]
-    );
+    let course = course_dir_name(&task.plan.source_id);
     let version = location.root.join(&course).join("versions").join(&task.id);
     if version.join("manifest.json").is_file() {
         let manifest = course2md::artifact::read_manifest(&version.join("manifest.json"))?;
@@ -2389,10 +2391,7 @@ mod tests {
     ) -> PathBuf {
         use course2md::{artifact, timeline};
         let task = state.task(task_id).unwrap();
-        let course_id = format!(
-            "course-{}",
-            &course2md::execution::digest(task.plan.source_id.as_bytes())[..32]
-        );
+        let course_id = crate::workspace::course_dir_name(&task.plan.source_id);
         let target = artifact::Target {
             task_id: task.id.clone(),
             version_id: task.id.clone(),
