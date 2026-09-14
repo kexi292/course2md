@@ -1046,20 +1046,51 @@ impl Desktop {
                     )
                     .when_some(validation, |view, message| view.child(issue(message))),
             );
-            view = view.child(
-                h_flex()
-                    .gap_4()
-                    .flex_wrap()
-                    .items_center()
-                    .child(platform_mark(
-                        "YouTube",
-                        icons::youtube().text_color(rgb(0xff0033)),
-                    ))
-                    .child(platform_mark(
-                        "Bilibili",
-                        icons::bilibili().text_color(rgb(0x00a1d6)),
-                    )),
-            );
+            // 平台识别反馈：输入可识别链接时给出「已识别」的 supporting 证据；
+            // 空输入或暂不可识别时保持两个品牌位（M4 反馈闭环）
+            let input = self.value(Field::Source, cx);
+            let recognized = (!input.trim().is_empty()).then(|| {
+                course2md::config::platform_from(&input, "")
+            });
+            match recognized.as_deref() {
+                Some("bilibili") | Some("youtube") => {
+                    let (name, icon) = if recognized.as_deref() == Some("bilibili") {
+                        ("Bilibili", icons::bilibili().text_color(rgb(0x00a1d6)))
+                    } else {
+                        ("YouTube", icons::youtube().text_color(rgb(0xff0033)))
+                    };
+                    view = view.child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(platform_mark(name, icon))
+                            .child(
+                                accessible_text(
+                                    "source-platform-recognized",
+                                    format!("已识别 {name} 链接"),
+                                )
+                                .text_size(TEXT_AUX)
+                                .text_color(color(MUTED)),
+                            ),
+                    );
+                }
+                _ => {
+                    view = view.child(
+                        h_flex()
+                            .gap_4()
+                            .flex_wrap()
+                            .items_center()
+                            .child(platform_mark(
+                                "YouTube",
+                                icons::youtube().text_color(rgb(0xff0033)),
+                            ))
+                            .child(platform_mark(
+                                "Bilibili",
+                                icons::bilibili().text_color(rgb(0x00a1d6)),
+                            )),
+                    );
+                }
+            }
         } else {
             let input = self.value(Field::Source, cx);
             if input.is_empty() {
@@ -2462,7 +2493,11 @@ impl Desktop {
                 .track_focus(&self.import_submit_focus)
                 .icon(icons::arrow_forward())
                 .label("开始转换")
-                .disabled(self.pending_conversion.is_some())
+                // 空输入即不可执行：disabled 外观 + 已有字段级错误提示双保险
+                .disabled(
+                    self.pending_conversion.is_some()
+                        || self.value(Field::Source, cx).is_empty(),
+                )
                 .on_click(cx.listener(|this, _, window, cx| this.start_conversion(window, cx))),
         )
     }
