@@ -221,17 +221,37 @@ impl CredentialVault for KeyringCredentialVault {
 pub struct FileCredentialVault {
     path: PathBuf,
     values: Mutex<BTreeMap<CredentialRef, Zeroizing<String>>>,
+    /// 文件损坏/不可读时的错误：存在期间拒绝任何写入，避免用空表覆盖原文件丢密钥
+    load_error: Mutex<Option<String>>,
 }
 
 #[cfg(not(target_os = "macos"))]
 impl FileCredentialVault {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let values = Self::load(&path).unwrap_or_default();
+        let (values, load_error) = match Self::load(&path) {
+            Ok(values) => (values, None),
+            Err(error) => {
+                // 写入锁定说明见 refuse_if_unreadable；不引入日志框架，错误在写入尝试时展示
+                (BTreeMap::new(), Some(format!("{error:#}")))
+            }
+        };
         Self {
             path,
             values: Mutex::new(values),
+            load_error: Mutex::new(load_error),
         }
+    }
+
+    fn refuse_if_unreadable(&self) -> Result<()> {
+        if let Some(error) = self.load_error.lock().map_err(|_| anyhow!("暂时无法访问凭据"))?.as_ref() {
+            bail!(
+                "凭据文件无法读取（{}），为避免覆盖丢失已暂停写入；请修复或备份后删除该文件重试：{}",
+                error,
+                self.path.display()
+            );
+        }
+        Ok(())
     }
 
     fn load(path: &Path) -> Result<BTreeMap<CredentialRef, Zeroizing<String>>> {
@@ -265,6 +285,7 @@ impl CredentialVault for FileCredentialVault {
         if secret.is_empty() {
             bail!("请输入 API Key");
         }
+        self.refuse_if_unreadable()?;
         let reference = new_reference();
         let mut values = self
             .values
@@ -290,6 +311,7 @@ impl CredentialVault for FileCredentialVault {
 
     fn remove(&self, reference: &str) -> Result<()> {
         validate_reference(reference)?;
+        self.refuse_if_unreadable()?;
         let mut values = self
             .values
             .lock()
@@ -392,5 +414,18 @@ mod tests {
         std::fs::write(&corrupt, b"not json").unwrap();
         let vault = FileCredentialVault::new(&corrupt);
         assert!(vault.resolve("credential-00000000-0000-0000-0000-000000000000").is_err());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn corrupt_file_is_never_overwritten_by_an_empty_map() {
+        let directory = tempfile::tempdir().unwrap();
+        let corrupt = directory.path().join("corrupt.json");
+        std::fs::write(&corrupt, b"not json").unwrap();
+        let vault = FileCredentialVault::new(&corrupt);
+        // 损坏文件存在期间：写入与删除都必须拒绝，不得静默覆盖丢密钥
+        assert!(vault.insert(Secret::new("test-only-key")).is_err());
+        assert!(vault.remove("credential-00000000-0000-0000-0000-000000000000").is_err());
+        assert_eq!(std::fs::read(&corrupt).unwrap(), b"not json");
     }
 }
