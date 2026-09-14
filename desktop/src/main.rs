@@ -100,6 +100,30 @@ pub(crate) fn provider_label(provider: Option<course2md::config::AsrProvider>) -
     }
 }
 
+/// PROVIDERS 下标 → AsrProvider：索引与枚举映射的唯一实现（与 PROVIDERS 顺序同源）。
+pub(crate) fn asr_provider_from_index(index: usize) -> Option<course2md::config::AsrProvider> {
+    use course2md::config::AsrProvider;
+    match PROVIDERS.get(index)?.0 {
+        "coreml" => Some(AsrProvider::Coreml),
+        "gpu" => Some(AsrProvider::Gpu),
+        "cpu" => Some(AsrProvider::Cpu),
+        "npu" => Some(AsrProvider::Npu),
+        "api" => Some(AsrProvider::Api),
+        _ => None,
+    }
+}
+
+/// 云端 API 在 PROVIDERS 表中的下标：PROVIDERS[..CLOUD_PROVIDER_INDEX] 即本机引擎集合。
+/// 此前以裸数字 5 散落在 import_ui/task_ui/workspace，是「5 即云端」的无文档契约。
+pub(crate) const CLOUD_PROVIDER_INDEX: usize = 5;
+
+impl ConversionOptions {
+    /// 当前是否使用云端识别服务（provider == CLOUD_PROVIDER_INDEX）。
+    pub(crate) fn uses_cloud_provider(&self) -> bool {
+        self.provider == CLOUD_PROVIDER_INDEX
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct ConversionOptions {
     provider: usize,

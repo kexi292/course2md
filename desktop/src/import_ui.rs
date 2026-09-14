@@ -122,7 +122,11 @@ pub(crate) fn apply_speech_location(
     cloud: bool,
     local_provider: usize,
 ) {
-    options.provider = if cloud { 5 } else { local_provider };
+    options.provider = if cloud {
+        crate::CLOUD_PROVIDER_INDEX
+    } else {
+        local_provider
+    };
 }
 
 pub(crate) fn apply_local_engine(options: &mut ConversionOptions, provider: usize) {
@@ -1972,7 +1976,7 @@ impl Desktop {
     }
 
     fn import_speech_options(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let cloud = self.task_options.provider == 5;
+        let cloud = self.task_options.uses_cloud_provider();
         let mut view = v_flex()
             .gap_3()
             .p_4()
@@ -1988,7 +1992,7 @@ impl Desktop {
                             .as_ref()
                             .and_then(|workspace| workspace.state.draft())
                             .and_then(|draft| draft.local_provider)
-                            .filter(|provider| *provider < 5)
+                            .filter(|provider| *provider < crate::CLOUD_PROVIDER_INDEX)
                             .unwrap_or(0);
                         apply_speech_location(
                             &mut this.task_options,
@@ -2089,7 +2093,7 @@ impl Desktop {
         [
             (
                 ServicePurpose::Speech,
-                self.task_options.provider == 5 && self.import_uses_speech() && !separate_subtitle,
+                self.task_options.uses_cloud_provider() && self.import_uses_speech() && !separate_subtitle,
             ),
             (
                 ServicePurpose::Ai,
@@ -2128,13 +2132,9 @@ impl Desktop {
 
     fn actual_local_provider(&self) -> course2md::config::AsrProvider {
         use course2md::config::AsrProvider;
-        match self.task_options.provider {
-            1 => AsrProvider::Coreml,
-            2 => AsrProvider::Gpu,
-            3 => AsrProvider::Cpu,
-            4 => AsrProvider::Npu,
-            _ => self.recommended_local_provider(),
-        }
+        crate::asr_provider_from_index(self.task_options.provider)
+            .filter(|provider| *provider != AsrProvider::Api)
+            .unwrap_or_else(|| self.recommended_local_provider())
     }
     fn local_engine_name(&self) -> &'static str {
         crate::provider_label(Some(self.actual_local_provider()))
@@ -2563,7 +2563,7 @@ impl Desktop {
                     }))
         });
         if linked_task.is_none()
-            && self.task_options.provider != 5
+            && !self.task_options.uses_cloud_provider()
             && (self.import_uses_speech()
                 || (self.generation_options_open && self.task_options.source_mode != 1))
         {
@@ -3684,7 +3684,7 @@ mod tests {
 
         let local_provider = 3;
         apply_speech_location(&mut options, true, local_provider);
-        assert_eq!(options.provider, 5);
+        assert_eq!(options.provider, crate::CLOUD_PROVIDER_INDEX);
         apply_speech_location(&mut options, false, local_provider);
         assert_eq!(options.provider, local_provider);
         apply_local_engine(&mut options, 0);

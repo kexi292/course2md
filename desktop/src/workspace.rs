@@ -110,7 +110,7 @@ impl Draft {
             custom_title: false,
             library_id,
             folder: None,
-            local_provider: (defaults.provider != 5).then_some(defaults.provider),
+            local_provider: (!defaults.uses_cloud_provider()).then_some(defaults.provider),
             options: defaults,
             overrides: BTreeSet::new(),
             subtitle: None,

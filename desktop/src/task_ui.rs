@@ -760,9 +760,9 @@ fn update_input_form(
             draft.overrides.insert(field);
         }
     }
-    if options.provider != 5 {
+    if !options.uses_cloud_provider() {
         draft.local_provider = Some(options.provider);
-    } else if draft.options.provider != 5 {
+    } else if !draft.options.uses_cloud_provider() {
         draft.local_provider = Some(draft.options.provider);
     }
     draft.options = options;
@@ -2986,7 +2986,7 @@ impl Desktop {
         let source =
             if task.plan.options.source_mode != 2 && task.plan.source.selected_subtitle.is_some() {
                 "使用视频字幕"
-            } else if task.plan.options.provider == 5 {
+            } else if task.plan.options.uses_cloud_provider() {
                 "通过所选服务识别视频声音"
             } else {
                 "在这台电脑上识别视频声音"
@@ -3901,7 +3901,7 @@ mod tests {
             None,
             0.,
         );
-        assert_eq!(draft.options.provider, 5);
+        assert_eq!(draft.options.provider, crate::CLOUD_PROVIDER_INDEX);
         assert_eq!(draft.local_provider, Some(3));
         let next = crate::workspace::Draft::new(true, "library".into(), Default::default());
         assert_eq!(next.local_provider, Some(0));
