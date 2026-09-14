@@ -164,7 +164,7 @@ fn palette_choice(palette: PaletteId, selected: bool, amount: f32) -> gpui_base:
             if selected { "，已选择" } else { "" }
         ))
         .when(cfg!(test), |card| {
-            card.debug_selector(move || format!("palette-card-{}", palette as usize).into())
+            card.debug_selector(move || format!("palette-card-{}", palette as usize))
         })
         .child(
             v_flex()
@@ -191,7 +191,7 @@ fn palette_choice(palette: PaletteId, selected: bool, amount: f32) -> gpui_base:
                                 .text_color(color(INK))
                                 .when(cfg!(test), |label| {
                                     label.debug_selector(move || {
-                                        format!("palette-label-{}", palette as usize).into()
+                                        format!("palette-label-{}", palette as usize)
                                     })
                                 })
                                 .child(palette.name()),

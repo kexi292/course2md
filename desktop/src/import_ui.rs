@@ -62,14 +62,6 @@ fn platform_mark(name: &'static str, icon: Icon) -> Div {
         )
 }
 
-/// Align an option's icon with the first text line, even when its hint wraps.
-fn preference_icon(icon: Icon) -> Div {
-    h_flex()
-        .h(rems(1.5))
-        .flex_shrink_0()
-        .child(icon.size_5().text_color(color(GRAY)))
-}
-
 /// Idle 工作台 conversion-options chrome. 高级选项 is the only disclosure;
 /// conversion defaults live there as real controls, not a standalone callout.
 // 设计决定（此前由恒值函数 + 源码嗅探测试钉住，无法被编译器发现且阻碍重构）：

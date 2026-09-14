@@ -16,7 +16,7 @@ pub(crate) struct LibraryFilterOption {
 }
 
 pub(crate) fn library_filter_options(
-    sections: &[(PathBuf, String, Vec<(u64, String)>)],
+    sections: &[LibrarySection],
     current_root: &std::path::Path,
     multi: bool,
 ) -> Vec<LibraryFilterOption> {
@@ -73,12 +73,13 @@ pub(crate) fn library_layout_choice(cards: bool) -> &'static str {
     if cards { "cards" } else { "list" }
 }
 
+/// 文件夹分区：(保存位置根, 库名, [(文件夹 id, 名称)])。
+pub(crate) type LibrarySection = (std::path::PathBuf, String, Vec<(u64, String)>);
+
 /// Geometry shared by list and card layouts; rem-based spacing scales with text.
 #[derive(Clone, Copy)]
 struct LibraryLayout {
     columns: usize,
-    chip_max: Pixels,
-    card_chip_max: Pixels,
     compact: bool,
     stacked: bool,
 }
@@ -732,8 +733,6 @@ impl Desktop {
         let card_w = (content - rem * columns.saturating_sub(1) as f32) / columns as f32;
         let layout = LibraryLayout {
             columns,
-            chip_max: px(f32::min(224. * scale, 0.26 * content)),
-            card_chip_max: px((card_w - 5. * rem - 2.).max(48. * scale)),
             compact: content < 336. * scale,
             stacked: content < 56. * rem + 24.,
         };
