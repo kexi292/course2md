@@ -452,8 +452,9 @@ fn evidence_covers(
     })
 }
 
-fn help(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Stateful<Div> {
-    settings_value(id, value).text_color(color(MUTED))
+fn help(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Div {
+    // 与设置页同一辅助信息处理：共享 ⓘ 图标 + 常规字重（review4#2）
+    theme::supporting_info(id, value)
 }
 
 
@@ -2470,9 +2471,19 @@ impl Desktop {
             .flex_shrink_0()
             .gap_2()
             .when(
-                step == Step::Ai
-                    || (step == Step::Engine && self.onboarding.provider == Some(AsrProvider::Api)),
+                (step == Step::Ai
+                    && matches!(
+                        self.setup_service_action_label(ServicePurpose::Ai, cx),
+                        "检查配置" | "重新检查" | "重试保存"
+                    ))
+                    || (step == Step::Engine && self.onboarding.provider == Some(AsrProvider::Api)
+                        && matches!(
+                            self.setup_service_action_label(ServicePurpose::Speech, cx),
+                            "检查配置" | "重新检查" | "重试保存"
+                        )),
                 |v| {
+                    // 后果说明与发起它的检查动作同现同隐（review4#6）：
+                    // 服务已通过检查、动作是「保留并继续」时不展示
                     v.child(
                         help("setup-test-notice", "检查仅发送内置示例，服务商可能计费")
                             .text_size(TEXT_AUX),

@@ -1288,6 +1288,7 @@ impl Store {
         Ok(config)
     }
 
+    #[cfg(test)]
     pub fn resolve_for_execution(
         &self,
         base: &ConfigFile,

@@ -441,7 +441,11 @@ impl RenderOnce for SingleChoiceGroup {
             .p(px(inset))
             .rounded_full()
             // 轨道用内嵌面色（与输入框同一 recessed 语义）：4.5% 混合在深色下与卡片底无法区分，
-            // 导致「选中段跳出轨道」的错觉（system.md：角色映射失败应在共享层修正）
+            // 导致「选中段跳出轨道」的错觉（system.md：角色映射失败应在共享层修正）。
+            // 页面底色与 INSET 几乎相同，单靠填充在页面背景上轨道会消失（reader 页签、
+            // 笔记库筛选、工作台高级选项），补一道发丝边让轨道在任何底上都有定义。
+            .border_1()
+            .border_color(super::color(super::HAIRLINE))
             .bg(if vertical {
                 gpui::transparent_black()
             } else {
@@ -449,7 +453,8 @@ impl RenderOnce for SingleChoiceGroup {
             })
             .when(self.full_width, |group| group.w_full())
             .when(!self.full_width, |group| {
-                group.w(px(slot_width * count as f32 + inset * 2.))
+                // 边框占入声明宽度：lane 可用宽度不被发丝边吃掉
+                group.w(px(slot_width * count as f32 + inset * 2. + 2.))
             })
             .when(cfg!(test), |group| {
                 group.debug_selector(|| "full-choice-track".into())
@@ -654,7 +659,8 @@ mod tests {
         let before = selectors.map(|selector| choice_bounds(cx, selector));
         let initial = choice_bounds(cx, "full-choice-indicator");
         assert!((before[0].size.width - before[2].size.width).abs() < px(0.5));
-        assert_eq!(choice_bounds(cx, "full-choice-track").size.height, px(40.));
+        // 轨道含 1px 发丝边：lane 36 + 内距 2×2 + 边 2×1 = 42
+        assert_eq!(choice_bounds(cx, "full-choice-track").size.height, px(42.));
         cx.simulate_click(before[2].center(), Modifiers::default());
         draw_choice(cx);
         assert_eq!(choice_bounds(cx, "full-choice-indicator"), initial);
@@ -691,10 +697,10 @@ mod tests {
         let lane = choice_bounds(cx, "full-choice-lane");
         let indicator = choice_bounds(cx, "full-choice-indicator");
         assert_eq!(track.size.width, width);
-        assert_eq!(lane.left() - track.left(), px(2.));
-        assert_eq!(track.right() - lane.right(), px(2.));
-        assert_eq!(lane.top() - track.top(), px(2.));
-        assert_eq!(track.bottom() - lane.bottom(), px(2.));
+        assert_eq!(lane.left() - track.left(), px(3.));
+        assert_eq!(track.right() - lane.right(), px(3.));
+        assert_eq!(lane.top() - track.top(), px(3.));
+        assert_eq!(track.bottom() - lane.bottom(), px(3.));
         assert!(indicator.left() >= lane.left() - px(0.5));
         assert!(indicator.right() <= lane.right() + px(0.5));
         assert_eq!(indicator.top(), lane.top());

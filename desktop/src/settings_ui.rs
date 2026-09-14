@@ -1480,7 +1480,12 @@ impl Desktop {
                     .flex_wrap()
                     .child(
                         quiet("toggle-model-details")
-                            .icon(icons::download())
+                            // 图标随动作语义切换：展开是下载管理，收起是折叠（review4 可选）
+                            .icon(if self.settings_ui.model_details_open {
+                                icons::chevron_up()
+                            } else {
+                                icons::download()
+                            })
                             .label(if self.settings_ui.model_details_open {
                                 "收起模型管理"
                             } else {

@@ -490,7 +490,21 @@ impl Desktop {
             ));
         }
         if let Some(status) = status {
-            let (kind, label, description) = match status.state {
+            // 准备进行中必须展示真实阶段：缓存检查还停留在「待下载」会与进度条矛盾（review4#5）
+            let being_prepared = self
+                .settings_ui
+                .model_diagnostics
+                .preparing
+                .as_ref()
+                .is_some_and(|request| request.key() == key);
+            let (kind, label, description) = if being_prepared {
+                (
+                    BadgeKind::Progress,
+                    "准备中",
+                    "正在下载或校验模型文件，已下载完成的部分会保留。",
+                )
+            } else {
+                match status.state {
                 CacheState::Missing => (BadgeKind::Neutral, "待下载", "首次识别时自动准备。"),
                 CacheState::Partial => (
                     BadgeKind::Warning,
@@ -506,6 +520,7 @@ impl Desktop {
                     "不支持",
                     "这种识别方式不支持当前模型。原选择保留，请明确选择支持的模型。",
                 ),
+                }
             };
             view = view.child(settings_status_row(
                 SharedString::from(format!("model-state-label-{key}")),
@@ -682,7 +697,8 @@ impl Desktop {
                     .child(
                         settings_value(
                             "active-model-prepare",
-                            format!("正在准备 {}", request.model),
+                            // 对外展示用显示名，不外露缓存目录里的技术 ID（review4 可选）
+                            format!("正在准备 {}", model_display_name(&request.model)),
                         )
                         .role(Role::Status),
                     ),

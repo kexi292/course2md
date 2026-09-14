@@ -1382,7 +1382,7 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                             true,
                         ),
                     )
-                    // 「从此处观看」贴着它作用的截图，不再挤进章节标题行（review2#1）
+                    // 「从此处观看」贴着它作用的截图（图下左对齐），不再挤进章节标题行（review2#1）
                     .when_some(
                         frame
                             .and_then(|frame| frame.seconds)
@@ -1393,12 +1393,14 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                             }),
                         |view, url| {
                             view.child(
-                                quiet(("seek-image", index))
-                                    .icon(icons::play_arrow())
-                                    .label("从此处观看")
-                                    .min_h(rems(1.6))
-                                    .accessibility_label("在原视频打开这个位置")
-                                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                                h_flex().w_full().justify_start().child(
+                                    quiet(("seek-image", index))
+                                        .icon(icons::play_arrow())
+                                        .label("从此处观看")
+                                        .min_h(rems(1.6))
+                                        .accessibility_label("在原视频打开这个位置")
+                                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                                ),
                             )
                         },
                     )
@@ -3373,10 +3375,8 @@ impl Desktop {
                                     .track_scroll(&information_scroll)
                                     .child(content),
                             )
-                            .child(
-                                crate::backend::vertical_scrollbar(&information_scroll)
-                                    .mode(ScrollbarMode::Scrolling),
-                            ),
+                            // 与设置页一致：macOS「始终显示滚动条」偏好开启时常驻（review4#4）
+                            .child(crate::backend::vertical_scrollbar(&information_scroll)),
                     ),
                 window,
                 cx,

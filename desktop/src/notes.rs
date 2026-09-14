@@ -30,13 +30,21 @@ impl Course {
             warning: None,
         }
     }
-    pub fn description(&self) -> String {
-        let content = if self.slides > 0 {
+    /// 内容元数据（不含待补全后缀）；列表用独立状态徽章表达补全状态（review4#7）
+    pub fn content_description(&self) -> String {
+        if self.slides > 0 {
             format!("含 {} 张截图", self.slides)
         } else {
             "文字笔记".to_owned()
-        };
-        if self.manifest.as_ref().is_some_and(has_incomplete_content) {
+        }
+    }
+    pub fn incomplete(&self) -> bool {
+        self.manifest.as_ref().is_some_and(has_incomplete_content)
+    }
+    #[cfg(test)]
+    pub fn description(&self) -> String {
+        let content = self.content_description();
+        if self.incomplete() {
             format!("{content} · 部分内容待补全")
         } else {
             content

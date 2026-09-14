@@ -2050,11 +2050,8 @@ impl Desktop {
                     .child(self.task_service_picker(ServicePurpose::Speech, cx))));
         }
         view = view.child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(icons::computer().size(px(20.)).text_color(color(GRAY)))
-                .child(help("音频在这台电脑上处理")),
+            // 共享 ⓘ 辅助信息，不再用对象图标冒充信息图标（review4#2）
+            theme::supporting_info("import-local-note", "音频在这台电脑上处理"),
         );
         let engine_options = v_flex()
             .gap_2()

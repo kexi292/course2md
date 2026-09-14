@@ -1756,8 +1756,11 @@ impl Desktop {
                                         .text_size(TEXT_AUX)
                                         .font_weight(FontWeight::NORMAL)
                                         .text_color(color(GRAY))
-                                        .child(course.description()),
+                                        .child(course.content_description()),
                                 )
+                                .when(course.incomplete(), |view| {
+                                    view.child(badge(BadgeKind::Warning).child("部分内容待补全"))
+                                })
                                 .child(
                                     h_flex()
                                         .w_full()
@@ -1836,9 +1839,12 @@ impl Desktop {
                         .child(format!(
                             "{} · {}",
                             self.course_meta(course),
-                            course.description()
+                            course.content_description()
                         )),
-                ),
+                )
+                .when(course.incomplete(), |view| {
+                    view.child(badge(BadgeKind::Warning).child("部分内容待补全"))
+                }),
         );
         let read = control(("read-course", *index))
             .ghost()
@@ -2152,10 +2158,13 @@ impl Desktop {
                         .text_color(color(GRAY))
                         .child(format!(
                             "{} · {}",
-                            course.description(),
+                            course.content_description(),
                             self.course_meta(&course)
                         )),
-                ),
+                )
+                .when(course.incomplete(), |view| {
+                    view.child(badge(BadgeKind::Warning).child("部分内容待补全"))
+                }),
         );
         let open = course.clone();
         h_flex()

@@ -609,7 +609,8 @@ impl RenderOnce for TaskRawLogs {
                 .icon(if open {
                     icons::chevron_up()
                 } else {
-                    icons::info()
+                    // 与同级「查看已完成的处理」一致：可展开项用 chevron 表达（review4 可选）
+                    icons::chevron_down()
                 })
                 .label(if open {
                     "收起技术详情"
@@ -3227,9 +3228,9 @@ impl Desktop {
                         })),
                 );
         }
-        card = card
-            .child(actions)
-            .child(div().text_size(TEXT_AUX).text_color(color(GRAY)).child(
+        card = card.child(actions).child(
+            theme::supporting_info(
+                SharedString::from(format!("task-hint-{id}")),
                 if task.state == TaskState::Pausing {
                     if task.intent == Intent::Cancel {
                         "取消后已生成的内容仍会保留。"
@@ -3239,7 +3240,9 @@ impl Desktop {
                 } else {
                     "关闭窗口后任务会继续；退出应用会暂停任务。"
                 },
-            ));
+            )
+            .text_size(TEXT_AUX),
+        );
         let more = self
             .workspace
             .as_ref()
