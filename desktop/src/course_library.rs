@@ -1377,9 +1377,16 @@ impl Desktop {
             .iter()
             .map(|option| (option.value.clone(), option.label.clone()))
             .collect();
-        SingleChoiceGroup::new("folder-filter", "文件夹筛选")
+        let mut group = SingleChoiceGroup::new("folder-filter", "文件夹筛选")
             .options(choices)
-            .selected(selected)
+            .selected(selected);
+        // 真实文件夹用对象图标，与「全部/未分类」的集合过滤分开（review2#5）
+        for option in &options {
+            if option.folder.is_some_and(|id| id != 0) {
+                group = group.icon(option.value.clone(), icons::folder());
+            }
+        }
+        group
             .on_change(cx.listener({
                 let options = options.clone();
                 move |this, value: &SharedString, _, cx| {
@@ -1463,9 +1470,10 @@ impl Desktop {
                     })),
             )
             .when(can_group, |row| {
-                // 两态选择：标签固定、选中=正在分组；不再有「取消…」当选中态的语义倒置
+                // 与「列表/卡片」拉开：两组选择不读成一段多选（review2#5）
                 row.child(
-                    SingleChoiceGroup::new("library-grouping", "笔记分组方式")
+                    div().ml_4().child(
+                        SingleChoiceGroup::new("library-grouping", "笔记分组方式")
                         .options([("flat", "平铺"), ("group", "分组")])
                         .selected(if group_on { "group" } else { "flat" })
                         .on_change(cx.listener(|this, value: &SharedString, _, cx| {
@@ -1473,6 +1481,7 @@ impl Desktop {
                                 value.as_ref() == "group";
                             this.save_library_presentation(cx);
                         })),
+                    ),
                 )
             });
         h_flex()
@@ -1520,6 +1529,17 @@ impl Desktop {
             });
         let stamp = crate::reader_navigation::timestamp_local(ms);
         let mut parts = Vec::new();
+        // 「全部笔记」下的对象归属：文件夹在元信息里可见（review2#5）；
+        // 分组视图已由组头表达，不重复
+        if !self.desktop_settings.library_group_folders
+            && let Some(folder_id) = self.course_folder(course).filter(|id| *id != 0)
+            && let Some(name) = self
+                .course_location(course)
+                .and_then(|location| self.library_indexes.get(&location.root))
+                .and_then(|library| library.folders.get(&folder_id))
+        {
+            parts.push(name.clone());
+        }
         if let Some(source) = course.manifest.as_ref().and_then(|manifest| {
             self.workspace
                 .as_ref()?

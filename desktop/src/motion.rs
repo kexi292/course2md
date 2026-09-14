@@ -43,7 +43,8 @@ pub fn state_enter<E: IntoElement + Styled + 'static>(
     let trace_id = id.clone();
     view.with_animation(
         id,
-        Animation::new(Duration::from_millis(240))
+        // 与 Show/dismiss overlay 同一 starting range（150-220ms，states-and-motion.md）
+        Animation::new(Duration::from_millis(200))
             .with_easing(ease_out)
             .with_max_fps(60.),
         move |view, t| {

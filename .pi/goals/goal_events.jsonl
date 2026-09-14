@@ -7,3 +7,4 @@
 {"type":"task_started","goalId":"mu0r9et7-7g5b8r","taskId":"design-review","at":"2026-09-14T09:16:07.008Z"}
 {"type":"task_complete","goalId":"mu0r9et7-7g5b8r","taskId":"design-review","evidence":"4 路独立 subagent 评审完成（工作台/任务、库/阅读、设置全域、跨页一致性），评审者先读 course2md-design 技能权威再评 24 张运行中原生 app 截图，未获得待盖章清单；合并裁决 docs/DESIGN-REVIEW.md：8 高/16 中/合并低危全部带证据与原则引用；证据缺口已记录转入最终验证","at":"2026-09-14T09:40:06.321Z"}
 {"type":"task_started","goalId":"mu0r9et7-7g5b8r","taskId":"design-fix","at":"2026-09-14T09:40:06.322Z"}
+{"type":"task_started","goalId":"mu0r9et7-7g5b8r","taskId":"motion","at":"2026-09-14T12:32:00.110Z"}

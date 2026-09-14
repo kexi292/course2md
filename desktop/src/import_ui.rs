@@ -1531,7 +1531,12 @@ impl Desktop {
         } else if speech {
             "识别视频声音".into()
         } else if let Some(subtitle) = &source.selected_subtitle {
-            subtitle.label.clone()
+            if self.task_options.source_mode == 0 {
+                // 自动选择的解析结果就是它的说明，不是可更换的平行设置（review2#4）
+                format!("将优先使用「{}」。", subtitle.label)
+            } else {
+                subtitle.label.clone()
+            }
         } else {
             match &source.subtitles {
                 SubtitleEvidence::Unchecked => "尚未检查可读取的字幕".into(),
@@ -1561,7 +1566,7 @@ impl Desktop {
                 .child(
                     accessible_text("import-text-source-state", description)
                         .font_weight(FontWeight::MEDIUM)
-                        .flex_1()
+                        // 值与其「更换」动作收成一个对象行，不用 flex_1 把两者钉到两端（review2#3）
                         .min_w_0()
                         .whitespace_normal(),
                 )

@@ -1205,12 +1205,19 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                 anchor,
                 seconds,
             } => {
-                let url = flow
-                    .source
-                    .as_ref()
-                    .and_then(|source| seconds.and_then(|seconds| nav::seek_url(source, seconds)));
                 let marks = flow.highlight_runs(index);
-                let outlined = flow.chapter_title(*seconds).filter(|_| text != "摘要");
+                let chapter = flow.chapter_title(*seconds).filter(|_| text != "摘要");
+                // 章节标题只在本章第一个标题出现：同一章的后续时间戳标题保持为 chip（review2#1）
+                let chapter_changed = chapter.is_some()
+                    && chapter
+                        != preview.blocks[..index].iter().rev().find_map(|block| {
+                            if let PreviewBlock::Heading { seconds, .. } = block {
+                                flow.chapter_title(*seconds)
+                            } else {
+                                None
+                            }
+                        });
+                let outlined = chapter.filter(|_| chapter_changed);
                 // 无大纲且标题文本就是时间戳时，chip 独自承担章节标题。
                 let bare_timestamp = outlined.is_none()
                     && seconds.is_some_and(|s| course2md::render::fmt_ts(s) == *text);
@@ -1270,22 +1277,7 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                                     chip.id(("reader-heading-chip", index))
                                 })
                             })
-                            .children(heading)
-                            .when_some(url, |row, url| {
-                                row.child(
-                                    flow.reveal(
-                                        ("reveal-seek", index).into(),
-                                        (quiet(("seek", index))
-                                            .icon(icons::play_arrow())
-                                            .label("从此处观看")
-                                            .min_h(rems(1.6))
-                                            .accessibility_label(format!("在原视频打开 {text}"))
-                                            .on_click(move |_, _, cx| cx.open_url(&url)))
-                                        .into_any_element(),
-                                        false,
-                                    ),
-                                )
-                            }),
+                            .children(heading),
                     )
                     .children(
                         flow.missing_by_anchor
@@ -1389,6 +1381,26 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                                 .into_any_element(),
                             true,
                         ),
+                    )
+                    // 「从此处观看」贴着它作用的截图，不再挤进章节标题行（review2#1）
+                    .when_some(
+                        frame
+                            .and_then(|frame| frame.seconds)
+                            .and_then(|seconds| {
+                                flow.source
+                                    .as_ref()
+                                    .and_then(|source| nav::seek_url(source, seconds))
+                            }),
+                        |view, url| {
+                            view.child(
+                                quiet(("seek-image", index))
+                                    .icon(icons::play_arrow())
+                                    .label("从此处观看")
+                                    .min_h(rems(1.6))
+                                    .accessibility_label("在原视频打开这个位置")
+                                    .on_click(move |_, _, cx| cx.open_url(&url)),
+                            )
+                        },
                     )
                     .when_some(
                         frame.and_then(|frame| frame.caption.as_ref()),
@@ -2950,10 +2962,11 @@ impl Desktop {
         if !headings.is_empty() && reading_note {
             let toc_on = self.reader_ui.toc_open.unwrap_or(toc_fits_beside);
             search_row = search_row.child(
-                // 切换目录轨的 quiet inline 动作，不再用手写选中面冒充持久选中（M8/共享控件契约）
+                // 目录轨打开时以 accent 文字色表达状态（持久含义经由文字色，不是选中面）
                 quiet("note-contents")
                     .icon(icons::toc())
                     .label("目录")
+                    .when(toc_on, |button| button.text_color(color(ACCENT_STRONG)))
                     .accessibility_label(if toc_on {
                         "收起目录"
                     } else {
@@ -4190,9 +4203,8 @@ impl Desktop {
                                         div()
                                             .flex_1()
                                             .min_w_0()
-                                            .whitespace_normal()
+                                            .whitespace_nowrap()
                                             .text_ellipsis()
-                                            .line_clamp(2)
                                             .line_height(relative(1.4))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(color(if on { ACCENT_STRONG } else { INK }))
