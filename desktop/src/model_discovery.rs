@@ -282,30 +282,24 @@ struct HttpTransport {
 impl Transport for HttpTransport {
     fn get(&self, endpoint: &str, authorization: Option<&Secret>) -> Result<Response, Error> {
         let budget = remaining(self.deadline)?;
-        let agent = ureq::AgentBuilder::new()
-            .redirects(0)
-            .timeout_connect(budget.min(Duration::from_secs(10)))
-            .timeout_read(budget.min(Duration::from_secs(15)))
-            .timeout(budget)
-            .build();
-        let mut call = agent.get(endpoint).set("Accept", "application/json");
-        if let Some(secret) = authorization {
-            call = call.set("Authorization", &format!("Bearer {}", secret.expose()));
-        }
+        let agent = crate::bounded_http::json_agent(
+            budget.min(Duration::from_secs(10)),
+            budget.min(Duration::from_secs(15)),
+            None,
+            budget,
+        );
+        let call = crate::bounded_http::json_call(agent.get(endpoint), authorization);
         let response = match call.timeout(remaining(self.deadline)?).call() {
             Ok(response) | Err(ureq::Error::Status(_, response)) => response,
             Err(ureq::Error::Transport(_)) => return Err(Error::Network),
         };
         let status = response.status();
-        let mut body = Vec::new();
-        response
-            .into_reader()
-            .take(MAX_RESPONSE + 1)
-            .read_to_end(&mut body)
-            .map_err(|_| Error::Network)?;
-        if body.len() as u64 > MAX_RESPONSE {
-            return Err(Error::TooLarge);
-        }
+        let body = crate::bounded_http::read_bounded(response, MAX_RESPONSE).map_err(|error| {
+            match error {
+                crate::bounded_http::BoundedReadError::TooLarge => Error::TooLarge,
+                crate::bounded_http::BoundedReadError::Network(_) => Error::Network,
+            }
+        })?;
         Ok(Response { status, body })
     }
 }

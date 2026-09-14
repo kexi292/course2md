@@ -5,6 +5,7 @@ mod account_ui;
 mod activity;
 mod appearance_ui;
 mod backend;
+mod bounded_http;
 mod course_library;
 mod credentials;
 mod focus_scroll;
