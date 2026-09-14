@@ -287,7 +287,41 @@ pub fn has_readable_body(sections: &[Section]) -> bool {
 
 /// Build and fsync all files on the target volume, then publish one directory rename.
 /// The pointer is a separate atomic commit. A restart can finish it without rerunning AI.
+///
+/// 重阻塞 IO（逐图复制、SHA-256、fsync）不占 tokio worker 线程：
+/// 克隆输入后整个发布在 spawn_blocking 中执行。
 pub async fn publish(
+    target: &Target,
+    work_dir: &Path,
+    meta: &VideoMeta,
+    sections: &[Section],
+    summary: Option<&Summary>,
+    formats: &[crate::config::OutputFormat],
+    outcomes: Outcomes,
+) -> Result<Manifest> {
+    let target = target.clone();
+    let work_dir = work_dir.to_path_buf();
+    let meta = meta.clone();
+    let sections = sections.to_vec();
+    let summary = summary.cloned();
+    let formats = formats.to_vec();
+    tokio::task::spawn_blocking(move || {
+        publish_blocking(
+            &target,
+            &work_dir,
+            &meta,
+            &sections,
+            summary.as_ref(),
+            &formats,
+            outcomes,
+        )
+    })
+    .await
+    .context("发布工作进程中断 / Publish worker interrupted")?
+}
+
+/// publish 的同步实现（见 publish 的 spawn_blocking 纪律说明）。
+pub fn publish_blocking(
     target: &Target,
     work_dir: &Path,
     meta: &VideoMeta,
