@@ -211,6 +211,18 @@ pub fn check_control() -> Result<()> {
     Ok(())
 }
 
+/// 轮询任务控制文件，意图不再是 run 时返回 Err。配合 `tokio::select!` 打断
+/// 长时间运行的分支（子进程句谋 kill_on_drop 随分支 dropped 生效）。
+/// 无活动任务账本时 check_control 恒 Ok，此 future 永不完成，不影响 CLI 独立调用。
+pub async fn watch_control() -> anyhow::Error {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if let Err(e) = check_control() {
+            return e;
+        }
+    }
+}
+
 /// Exposes unresolved attempts for task state reconciliation even if the process crashed.
 pub fn receipts(work_dir: &Path) -> Result<Vec<Receipt>> {
     read_receipts(&work_dir.join("requests"))

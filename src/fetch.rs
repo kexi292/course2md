@@ -18,16 +18,10 @@ fn ytdlp_base(cmd: &mut Command) -> &mut Command {
     cmd.args(["--ignore-config", "--socket-timeout", YTDLP_SOCKET_TIMEOUT])
 }
 
-/// 轮询任务控制文件，意图不再是 run 时返回 Err。配合 `tokio::select!` 打断
-/// 长时间运行的子进程分支（子进程句谋 kill_on_drop 随分支 dropped 生效）。
-/// 无活动任务账本时 check_control 恒 Ok，此 future 永不完成，不影响 CLI 独立调用。
+/// 轮询任务控制文件，意图不再是 run 时返回 Err（已提升为 dispatch::watch_control）。
+/// 配合 `tokio::select!` 打断长时间运行的子进程分支。
 async fn watch_control() -> anyhow::Error {
-    loop {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        if let Err(e) = crate::dispatch::check_control() {
-            return e;
-        }
-    }
+    crate::dispatch::watch_control().await
 }
 
 /// 确定性错误（重试无意义）：4xx 拒绝、不支持的 URL、私有/不可用视频等。
