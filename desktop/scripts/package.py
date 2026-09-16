@@ -49,8 +49,7 @@ def main():
         elif system == "Windows":
             from verify_windows_icon import verify_windows_icon
     except ImportError as error:
-        raise SystemExit("Install packaging tools: python -m pip install -r "
-                         "desktop/scripts/requirements-packaging.txt") from error
+        raise SystemExit("Install packaging tools with: uv sync (from the repository root)") from error
     profile = "debug" if args.debug else "release"
     flags = [] if args.debug else ["--release", "--locked"]
     revisions = {

@@ -13,7 +13,7 @@ cargo test --features integration --test scene_synthetic
 cargo build --release
 ```
 
-桌面端另行执行（构建前先运行 `python3 desktop/scripts/sources.py` 准备 GPUI 依赖）：
+桌面端另行执行（构建前先运行 `uv run python desktop/scripts/sources.py` 准备 GPUI 依赖）：
 
 ```sh
 cargo test --manifest-path desktop/Cargo.toml

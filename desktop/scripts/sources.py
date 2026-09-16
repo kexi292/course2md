@@ -16,6 +16,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOS = {"zed": "zed-industries/zed", "component": "longbridge/gpui-component"}
+DEFAULT_DEVELOPER_DIR = ROOT.parent.parent / "course2md-dependencies"
 
 
 def git(path, *args, capture=False, lf=False):
@@ -32,7 +33,7 @@ def source_patches(name):
 def patch_paths(patches):
     paths = set()
     for patch in patches:
-        for line in patch.read_text().splitlines():
+        for line in patch.read_text(encoding="utf-8").splitlines():
             if line.startswith("+++ b/"):
                 path = line[6:]
                 if Path(path).is_absolute() or ".." in Path(path).parts:
@@ -130,7 +131,7 @@ def main():
     mode.add_argument("--no-pull", action="store_true", help="Reuse already updated local main sources")
     mode.add_argument("--freeze", action="store_true", help="Record currently prepared and tested source revisions")
     mode.add_argument("--locked", action="store_true", help="Use release source revisions without updating main")
-    parser.add_argument("--developer-dir", type=Path, default=Path.home() / "Developer")
+    parser.add_argument("--developer-dir", type=Path, default=DEFAULT_DEVELOPER_DIR)
     args = parser.parse_args()
     lock_path = ROOT / "sources.lock.json"
     if args.freeze:

@@ -1548,14 +1548,24 @@ fn main() {
                     }
                 });
                 window.on_window_should_close(cx, move |_, cx| {
-                    let saved = weak
-                        .update(cx, |this, cx| {
-                            this.save_reading_position(cx);
-                            this.flush_settings_for_exit(cx) && this.save_current_draft(cx)
-                        })
-                        .unwrap_or(true);
-                    if saved {
-                        cx.hide();
+                    #[cfg(target_os = "windows")]
+                    if weak
+                        .update(cx, |this, cx| this.request_close(cx))
+                        .unwrap_or(true)
+                    {
+                        cx.quit();
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let saved = weak
+                            .update(cx, |this, cx| {
+                                this.save_reading_position(cx);
+                                this.flush_settings_for_exit(cx) && this.save_current_draft(cx)
+                            })
+                            .unwrap_or(true);
+                        if saved {
+                            cx.hide();
+                        }
                     }
                     false
                 });

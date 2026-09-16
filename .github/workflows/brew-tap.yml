@@ -28,8 +28,16 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: '0.6.17'
+          python-version: '3.12'
+          enable-cache: true
+      - name: Sync Python tools
+        run: uv sync --locked
+
       - name: Test release resolution
-        run: python3 -m unittest discover -s packaging -p 'test_*.py'
+        run: uv run python -m unittest discover -s packaging -p 'test_*.py'
 
       - name: Resolve published release
         id: release
@@ -39,7 +47,7 @@ jobs:
           RELEASE_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
           ALLOW_PRERELEASE: 'true'
-        run: python3 packaging/release-version.py
+        run: uv run python packaging/release-version.py
 
       - name: Set up Homebrew for runtime validation
         if: steps.release.outputs.publish == 'true'
@@ -65,7 +73,7 @@ jobs:
           tap="$(brew --repository)/Library/Taps/mizorewww/homebrew-tap"
           mkdir -p "$(dirname "$tap")"
           git clone -q git@github.com:mizorewww/homebrew-tap.git "$tap"
-          python3 packaging/homebrew/update.py "$tap" --version "$VERSION"
+          uv run python packaging/homebrew/update.py "$tap" --version "$VERSION"
           HOMEBREW_NO_AUTO_UPDATE=1 brew readall --aliases mizorewww/tap
           cd "$tap"
           if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then

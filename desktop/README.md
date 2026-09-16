@@ -10,17 +10,18 @@
 
 ## 开发
 
-需要 Rust stable、Python 3.11+、Git。macOS 需 Xcode Command Line Tools；Windows 需 Visual Studio C++ Build Tools 和 LLVM；Linux 系统依赖见 `.github/workflows/desktop.yml`。处理视频需要 ffmpeg/ffprobe，远程链接还需要 yt-dlp。GPU/CPU 识别需 llama-server；Apple 原生、Intel NPU 和 API 的要求与 CLI 相同。
+需要 Rust stable、uv、Git；uv 会按仓库的 `.python-version` 准备 Python 3.12。macOS 需 Xcode Command Line Tools；Windows 需 Visual Studio C++ Build Tools 和 LLVM；Linux 系统依赖见 `.github/workflows/desktop.yml`。处理视频需要 ffmpeg/ffprobe，远程链接还需要 yt-dlp。GPU/CPU 识别需 llama-server；Apple 原生、Intel NPU 和 API 的要求与 CLI 相同。
 
 ```sh
-python3 desktop/scripts/sources.py
+uv sync
+uv run python desktop/scripts/sources.py
 cargo build
 cargo build --manifest-path desktop/Cargo.toml
 # 开发时指定刚构建的引擎；Windows PowerShell 使用 $env:COURSE2MD_BIN
 COURSE2MD_BIN="$PWD/target/debug/course2md" cargo run --manifest-path desktop/Cargo.toml
 ```
 
-`sources.py` 默认先 fast-forward pull `~/Developer/zed` 和 `~/Developer/gpui-component` 的 main，再建立 `desktop/.deps` 下的独立工作树。可通过 `--developer-dir` 指定仓库根目录；`--no-pull` 仅复用本次已更新的源码。开发不使用版本号或固定 commit。两个原始工作区必须干净，脚本不会替你丢弃修改。
+`sources.py` 默认先在项目同级的 `course2md-dependencies/` 中 clone 或 fast-forward pull `zed` 和 `gpui-component` 的 main，再建立 `desktop/.deps` 下的独立工作树，避免占用系统盘。可通过 `--developer-dir` 指定其他仓库根目录；`--no-pull` 仅复用本次已更新的源码。开发不使用版本号或固定 commit。两个原始工作区必须干净，脚本不会替你丢弃修改。
 
 组件主线现属于 GPUI Kit，使用重新发布的 `gpui-pre` 包名。准备脚本只在独立工作树中将依赖映射到 Zed GPUI，并让组件宏兼容原始 `gpui` 包名；不改动开发者原始工作区。上游布局变更时脚本会明确失败，要求检查兼容调整。
 
@@ -29,8 +30,8 @@ COURSE2MD_BIN="$PWD/target/debug/course2md" cargo run --manifest-path desktop/Ca
 ## 本机打包
 
 ```sh
-python3 -m pip install -r desktop/scripts/requirements-packaging.txt
-python3 desktop/scripts/package.py --debug
+uv sync
+uv run python desktop/scripts/package.py --debug
 ```
 
 产物位于 `desktop/target/packages/`。macOS 为包含 CLI 和 MLX Metal 库的 `.app`；Windows 为两份 `.exe`；Linux 为两份可执行文件以及桌面入口。Windows/Linux 解压后保留两份程序在同一目录。本机默认 ad-hoc 签名；发布 CI 使用已有 Developer ID 与 Apple API 凭据签名、公证并生成 DMG。macOS ZIP 使用 ditto 保留签名所需的符号链接。
@@ -44,10 +45,11 @@ Windows 构建将多尺寸 ICO 嵌入 GUI 程序的资源编号 `1`，与 GPUI �
 完成开发、测试和实际界面验收后冻结**当时使用的**源码：
 
 ```sh
-python3 desktop/scripts/sources.py --freeze
+uv sync
+uv run python desktop/scripts/sources.py --freeze
 # 一起提交 sources.lock.json 和 desktop/Cargo.lock
-python3 desktop/scripts/sources.py --locked
-python3 desktop/scripts/package.py
+uv run python desktop/scripts/sources.py --locked
+uv run python desktop/scripts/package.py
 ```
 
 发布命令核对实际工作树与冻结记录，并使用 Cargo `--locked`。普通开发命令仍继续追踪 main。CI 为三个系统分别构建；发布使用冻结记录，PR 构建使用主线。可以手动运行 release 工作流并指定版本，全部构建成功后再创建对应 tag 和 GitHub Release。

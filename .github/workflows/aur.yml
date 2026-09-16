@@ -30,13 +30,13 @@ jobs:
     steps:
       - name: Install tools
         run: |
-          pacman -Syu --noconfirm --needed base-devel git openssh python desktop-file-utils ffmpeg yt-dlp libxcb libxkbcommon libxkbcommon-x11 fontconfig libx11 wayland vulkan-icd-loader
+          pacman -Syu --noconfirm --needed base-devel git openssh python uv desktop-file-utils ffmpeg yt-dlp libxcb libxkbcommon libxkbcommon-x11 fontconfig libx11 wayland vulkan-icd-loader
           id builder &>/dev/null || useradd -m builder
 
       - uses: actions/checkout@v4
 
       - name: Test release resolution
-        run: python3 -m unittest discover -s packaging -p 'test_release_version.py'
+        run: uv run python -m unittest discover -s packaging -p 'test_release_version.py'
 
       - name: Resolve published release
         id: release
@@ -45,7 +45,7 @@ jobs:
           REQUESTED_VERSION: ${{ inputs.version }}
           RELEASE_BRANCH: ${{ github.event.workflow_run.head_branch }}
           RELEASE_SHA: ${{ github.event.workflow_run.head_sha }}
-        run: python3 packaging/release-version.py
+        run: uv run python packaging/release-version.py
 
       - name: Setup AUR SSH (builder)
         if: ${{ steps.release.outputs.publish == 'true' && !inputs.dry_run }}

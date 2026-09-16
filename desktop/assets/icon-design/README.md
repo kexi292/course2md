@@ -32,7 +32,7 @@
 在安装了 Xcode（含 Icon Composer）与 Pillow 的 macOS 环境运行：
 
 ```sh
-python3 desktop/assets/icon-design/export.py
+uv run python desktop/assets/icon-design/export.py
 ```
 
 脚本调用 Apple 的 `ictool` 原生渲染器导出外观，再生成 ICNS 与尺寸预览，并同步更新 `desktop/assets/` 下的打包资源；Pillow 只负责静态排版、颜色转换和缩放。此版本使用 Icon Composer 2.0 / 115.1、设计代际 27。
