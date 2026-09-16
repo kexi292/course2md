@@ -7,7 +7,7 @@ install:
         exit 1
     fi
     if [[ ! -d desktop/.deps/zed || ! -d desktop/.deps/component ]]; then
-        echo "Run python3 desktop/scripts/sources.py first." >&2
+        echo "Run uv run python desktop/scripts/sources.py first." >&2
         exit 1
     fi
     cargo build --release
@@ -18,7 +18,7 @@ install:
     res="$app/Contents/Resources"
     rm -rf "$app"
     mkdir -p "$bin" "$res"
-    python3 - "$app" <<'PY'
+    uv run python - "$app" <<'PY'
     from pathlib import Path
     import plistlib, tomllib, sys
     sys.path.insert(0, "desktop/scripts")
@@ -34,7 +34,7 @@ install:
         **macos_versions(version),
         "NSHighResolutionCapable": True,
         "NSPrincipalClass": "NSApplication",
-        "LSMinimumSystemVersion": "14.0",
+        "LSMinimumSystemVersion": "15.0",
         "CFBundleIconFile": "course2md.icns",
     }, (app / "Contents/Info.plist").open("wb"))
     PY
