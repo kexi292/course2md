@@ -1,5 +1,5 @@
 //! Model evidence is loaded in the background; preparation uses the existing model job.
-use super::{settings_detail_group, settings_detail_row, settings_value};
+use super::{settings_detail_group, settings_detail_row, settings_status_row, settings_value};
 use crate::theme::*;
 use crate::*;
 use course2md::{
@@ -21,7 +21,7 @@ impl Request {
             provider,
             model: model
                 .filter(|model| !model.trim().is_empty())
-                .unwrap_or("qwen3-1.7b")
+                .unwrap_or(course2md::config::DEFAULT_ASR_MODEL)
                 .into(),
             root: root.into(),
         }
@@ -50,6 +50,8 @@ pub(super) struct State {
     cancelled: bool,
     details: bool,
     cache_details: std::collections::BTreeSet<String>,
+    /// 渲染期只登记 key，真正的 entries 写入与后台检查在 cx.defer 中执行
+    pending_checks: std::collections::BTreeSet<String>,
 }
 
 /// A read-only view for setup. Checks and downloads keep the same ownership as Settings.
@@ -61,22 +63,17 @@ pub(crate) struct ModelSetupSnapshot {
     pub(crate) notice: Option<(String, bool)>,
     pub(crate) cancelled: bool,
 }
-fn bytes(value: u64) -> String {
-    if value >= 1024 * 1024 * 1024 {
-        format!("{:.2} GB", value as f64 / (1024_f64.powi(3)))
-    } else if value >= 1024 * 1024 {
-        format!("{:.1} MB", value as f64 / (1024_f64.powi(2)))
-    } else {
-        format!("{value} 字节")
-    }
-}
 fn provider_name(provider: AsrProvider) -> &'static str {
-    match provider {
-        AsrProvider::Coreml => "Apple 原生",
-        AsrProvider::Gpu => "GPU",
-        AsrProvider::Cpu => "CPU",
-        AsrProvider::Npu => "Intel NPU",
-        AsrProvider::Api => "语音服务",
+    crate::provider_label(Some(provider))
+}
+
+/// 模型展示名的唯一权威来源（与设置/引导页的选择标签一致）。
+pub(crate) fn model_display_name(model: &str) -> String {
+    match model {
+        "qwen3-1.7b" => "Qwen3 1.7B".to_owned(),
+        "qwen3-0.6b" => "Qwen3 0.6B".to_owned(),
+        "whisper" => "Whisper".to_owned(),
+        _ => model.to_owned(),
     }
 }
 impl Desktop {
@@ -130,7 +127,27 @@ impl Desktop {
         root: &Path,
         cx: &mut Context<Self>,
     ) {
-        self.check_model_request(Request::new(provider, model, root), false, cx);
+        // 调用方多在渲染路径：这里只登记意图并 defer，真正的 entries 写入与
+        // 后台文件系统检查不在渲染期发生（SKILL.md：渲染期不做文件/网络工作）
+        let request = Request::new(provider, model, root);
+        if request.provider == AsrProvider::Api {
+            return;
+        }
+        let key = request.key();
+        let state = &mut self.settings_ui.model_diagnostics;
+        if state.entries.contains_key(&key) || !state.pending_checks.insert(key) {
+            return;
+        }
+        let desktop = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = desktop.update(cx, |this, cx| {
+                this.settings_ui
+                    .model_diagnostics
+                    .pending_checks
+                    .remove(&request.key());
+                this.check_model_request(request, false, cx);
+            });
+        });
     }
     fn check_model_request(&mut self, request: Request, force: bool, cx: &mut Context<Self>) {
         if request.provider == AsrProvider::Api {
@@ -155,27 +172,29 @@ impl Desktop {
                 cache_directories: Default::default(),
             },
         );
+        // inspect() 会对数 GB 的模型文件做同步 SHA-256，必须离开 executor；
+        // 见 crate::spawn_blocking_io 的说明
+        let work = crate::spawn_blocking_io(move || {
+            let result = course2md::models::status::inspect(
+                request.provider,
+                &request.model,
+                &request.root,
+            )
+            .map_err(|error| format!("{error:#}"));
+            let directories = result
+                .as_ref()
+                .ok()
+                .into_iter()
+                .flat_map(|status| &status.parts)
+                .filter(|part| part.path.is_dir())
+                .map(|part| part.path.clone())
+                .collect();
+            (result, directories)
+        });
         cx.spawn(async move |this, cx| {
-            let (result, cache_directories) = cx
-                .background_executor()
-                .spawn(async move {
-                    let result = course2md::models::status::inspect(
-                        request.provider,
-                        &request.model,
-                        &request.root,
-                    )
-                    .map_err(|error| format!("{error:#}"));
-                    let directories = result
-                        .as_ref()
-                        .ok()
-                        .into_iter()
-                        .flat_map(|status| &status.parts)
-                        .filter(|part| part.path.is_dir())
-                        .map(|part| part.path.clone())
-                        .collect();
-                    (result, directories)
-                })
-                .await;
+            let Ok((result, cache_directories)) = work.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 if let Some(entry) = this.settings_ui.model_diagnostics.entries.get_mut(&key)
                     && entry.generation == generation
@@ -253,7 +272,7 @@ impl Desktop {
             .preparing
             .clone()
             .unwrap_or_else(|| self.default_model_request());
-        self.settings_ui.model_diagnostics.result = Some((
+        let result = (
             if success {
                 format!(
                     "{} · {} 的准备已完成，正在重新检查缓存。",
@@ -275,7 +294,14 @@ impl Desktop {
                 )
             },
             !success && !cancelled,
-        ));
+        );
+        self.settings_ui.model_diagnostics.result = Some(result.clone());
+        // 同步到引导页的准备记录（取代渲染期的 retain_setup_model_result）
+        self.onboarding.apply_model_preparation_result(
+            &request.key(),
+            result,
+            cancelled && !success,
+        );
         self.refresh_model_diagnostics(cx);
         cx.notify();
     }
@@ -375,35 +401,45 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Div {
+        self.model_readiness_panel_with(provider, model, root, true, window, cx)
+    }
+    /// `provider_row`：是否展示「本机引擎」行。工作台的选择器已是方式事实来源，传 false；
+    /// 设置页的模型管理面板传 true（面板独立承担状态摘要）。
+    pub fn model_readiness_panel_with(
+        &self,
+        provider: AsrProvider,
+        model: Option<&str>,
+        root: &Path,
+        provider_row: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Div {
         let request = Request::new(provider, model, root);
         let key = request.key();
         let entry = self.settings_ui.model_diagnostics.entries.get(&key);
         let device_issue = self.model_device_issue(provider);
         let mut cache_details = None;
-        let mut view = v_flex()
-            .w_full()
-            .min_w_0()
-            .gap_3()
-            .child(settings_detail_row(
+        let mut view = v_flex().w_full().min_w_0().gap_3();
+        if provider_row {
+            view = view.child(settings_status_row(
                 SharedString::from(format!("model-provider-label-{key}")),
-                "识别方式",
+                "本机引擎",
                 settings_value(
                     SharedString::from(format!("model-provider-{key}")),
                     provider_name(provider),
-                ),
-            ))
-            .child(settings_detail_row(
-                SharedString::from(format!("model-name-label-{key}")),
-                "模型",
-                settings_value(
-                    SharedString::from(format!("model-name-{key}")),
-                    match request.model.as_str() {
-                        "qwen3-1.7b" => "Qwen3-ASR 1.7B".to_owned(),
-                        "qwen3-0.6b" => "Qwen3-ASR 0.6B".to_owned(),
-                        _ => request.model.clone(),
-                    },
-                ),
+                )
+                .w_auto(),
             ));
+        }
+        view = view.child(settings_status_row(
+            SharedString::from(format!("model-name-label-{key}")),
+            "模型",
+            settings_value(
+                SharedString::from(format!("model-name-{key}")),
+                model_display_name(&request.model),
+            )
+            .w_auto(),
+        ));
         if let Some(issue) = &device_issue {
             view = view
                 .child(settings_detail_row(
@@ -422,12 +458,10 @@ impl Desktop {
             .and_then(|entry| entry.result.as_ref())
             .and_then(|result| result.as_ref().ok());
         if checking {
-            view = view.child(settings_detail_row(
+            view = view.child(settings_status_row(
                 SharedString::from(format!("model-checking-label-{key}")),
                 "模型状态",
                 h_flex()
-                    .w_full()
-                    .min_w_0()
                     .gap_2()
                     .items_center()
                     .child(crate::motion::spinner(
@@ -439,6 +473,7 @@ impl Desktop {
                             SharedString::from(format!("model-checking-{key}")),
                             "正在检查模型…",
                         )
+                        .w_auto()
                         .role(Role::Status),
                     ),
             ));
@@ -455,14 +490,28 @@ impl Desktop {
             ));
         }
         if let Some(status) = status {
-            let (kind, label, description) = match status.state {
+            // 准备进行中必须展示真实阶段：缓存检查还停留在「待下载」会与进度条矛盾（review4#5）
+            let being_prepared = self
+                .settings_ui
+                .model_diagnostics
+                .preparing
+                .as_ref()
+                .is_some_and(|request| request.key() == key);
+            let (kind, label, description) = if being_prepared {
+                (
+                    BadgeKind::Progress,
+                    "准备中",
+                    "正在下载或校验模型文件，已下载完成的部分会保留。",
+                )
+            } else {
+                match status.state {
                 CacheState::Missing => (BadgeKind::Neutral, "待下载", "首次识别时自动准备。"),
                 CacheState::Partial => (
                     BadgeKind::Warning,
                     "待准备",
                     "尚未下载完整，继续准备会复用已有文件。",
                 ),
-                CacheState::Cached => (BadgeKind::Neutral, "已下载", "尚未验证加载。"),
+                CacheState::Cached => (BadgeKind::Success, "已下载", "尚未验证加载。"),
                 CacheState::Loaded => {
                     (BadgeKind::Success, "已验证可加载", "验证后模型文件未改变。")
                 }
@@ -471,21 +520,20 @@ impl Desktop {
                     "不支持",
                     "这种识别方式不支持当前模型。原选择保留，请明确选择支持的模型。",
                 ),
+                }
             };
-            view = view.child(settings_detail_row(
+            view = view.child(settings_status_row(
                 SharedString::from(format!("model-state-label-{key}")),
                 "模型状态",
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(badge(kind).child(label))
-                    .child(settings_value(
-                        SharedString::from(format!("model-state-{key}")),
-                        description,
-                    )),
+                badge(kind).child(label),
             ));
+            view = view.child(
+                theme::supporting_info(
+                    SharedString::from(format!("model-state-{key}")),
+                    description,
+                )
+                .text_size(TEXT_AUX),
+            );
             let detail_key = key.clone();
             let cache_open = self
                 .settings_ui
@@ -592,7 +640,7 @@ impl Desktop {
                                 row.child(
                                     settings_value(
                                         SharedString::from(format!("model-cached-size-{key}")),
-                                        format!("缓存占用 {}", bytes(status.bytes)),
+                                        format!("缓存占用 {}", crate::activity::bytes(status.bytes)),
                                     )
                                     .text_size(TEXT_AUX)
                                     .text_color(color(MUTED)),
@@ -649,7 +697,8 @@ impl Desktop {
                     .child(
                         settings_value(
                             "active-model-prepare",
-                            format!("正在准备 {}", request.model),
+                            // 对外展示用显示名，不外露缓存目录里的技术 ID（review4 可选）
+                            format!("正在准备 {}", model_display_name(&request.model)),
                         )
                         .role(Role::Status),
                     ),
@@ -658,29 +707,20 @@ impl Desktop {
                 .progress
                 .iter()
                 .filter(|(stage, progress)| {
-                    (stage.starts_with("model") || stage.contains("download"))
+                    crate::activity::is_model_transfer_stage(stage)
                         && progress.has_samples()
                         && !progress.done
                 })
                 .enumerate()
             {
-                let label = progress.detail(stage, true);
-                view = view
-                    .child(
-                        settings_value(
-                            ("model-download-progress", index),
-                            format!("{} · {label}", activity::title(stage)),
-                        )
-                        .text_sm(),
-                    )
-                    .when_some(progress.fraction(), |view, fraction| {
-                        view.child(crate::motion::progress(
-                            ("model-download-bar", index),
-                            fraction,
-                            window,
-                            cx,
-                        ))
-                    });
+                view = view.child(crate::motion::transfer_status(
+                    ("model-download-progress", index),
+                    crate::activity::model_transfer_phase(stage, &progress.message),
+                    &progress.transfer_metrics(stage, true),
+                    progress.fraction(),
+                    window,
+                    cx,
+                ));
             }
             actions = actions.child(
                 control("stop-model-preparation")
@@ -743,12 +783,11 @@ impl Desktop {
             }
             if !loaded {
                 view = view.child(
-                    settings_value(
+                    theme::supporting_info(
                         SharedString::from(format!("model-network-scope-{key}")),
                         "准备时可能下载模型，课程内容不会上传。",
                     )
-                    .text_sm()
-                    .text_color(color(MUTED)),
+                    .text_size(TEXT_AUX),
                 );
             }
         }
@@ -761,20 +800,24 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Div {
         let request = self.default_model_request();
-        let mut current = settings_detail_group("model-diagnostic-default", "默认识别模型");
+        let mut current = settings_detail_group("model-diagnostic-default", icons::storage(), "默认识别模型");
         if request.provider == AsrProvider::Api {
-            current = current.child(settings_detail_row(
-                "default-asr-provider-label",
-                "识别方式",
-                settings_value("default-asr-is-service", "语音服务，本机模型不参与。"),
+            current = current.child(crate::settings_ui::setting_surface().child(
+                settings_detail_row(
+                    "default-asr-provider-label",
+                    "识别方式",
+                    settings_value("default-asr-is-service", "语音服务，本机模型不参与。"),
+                ),
             ));
         } else {
-            current = current.child(self.model_readiness_panel(
-                request.provider,
-                Some(&request.model),
-                &request.root,
-                window,
-                cx,
+            current = current.child(crate::settings_ui::setting_surface().child(
+                self.model_readiness_panel(
+                    request.provider,
+                    Some(&request.model),
+                    &request.root,
+                    window,
+                    cx,
+                ),
             ));
         }
         let mut view = v_flex().w_full().min_w_0().gap_6().child(current);
@@ -784,7 +827,7 @@ impl Desktop {
             && active.key() != request.key()
         {
             view = view.child(
-                settings_detail_group("other-active-model", "正在准备的模型").child(
+                settings_detail_group("other-active-model", icons::storage(), "正在准备的模型").child(
                     self.model_readiness_panel(
                         active.provider,
                         Some(&active.model),
@@ -824,7 +867,7 @@ impl Desktop {
             );
             if self.settings_ui.model_diagnostics.details {
                 view = view.child(
-                    settings_detail_group("model-preparation-log-heading", "准备日志").child(
+                    settings_detail_group("model-preparation-log-heading", icons::task(), "准备日志").child(
                         settings_value(
                             "model-preparation-log",
                             self.logs.iter().cloned().collect::<Vec<_>>().join("\n"),
@@ -841,7 +884,7 @@ impl Desktop {
         let Some(environment) = &self.environment else {
             return v_flex();
         };
-        let mut hardware = settings_detail_group("model-hardware-heading", "设备与运行时");
+        let mut hardware = settings_detail_group("model-hardware-heading", icons::computer(), "设备与运行时");
         for (id, label, value) in [
             ("cpu-device", "CPU 架构", std::env::consts::ARCH),
             (
@@ -942,7 +985,7 @@ impl Desktop {
                                 move |this, _, _, cx| {
                                     let mut value = this.generation_edit_base();
                                     value.select_provider(Some(provider));
-                                    value.options.asr_model = Some("qwen3-1.7b".into());
+                                    value.options.asr_model = Some(course2md::config::DEFAULT_ASR_MODEL.into());
                                     if this.commit_generation(value, cx) {
                                         this.refresh_model_diagnostics(cx);
                                     }

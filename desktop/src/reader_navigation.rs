@@ -49,6 +49,20 @@ impl ReadingLayout {
         let &(top, height) = self.blocks.get(&index)?;
         Some(-top + restore_within(fraction, within, height))
     }
+
+    /// Height of a rendered item, without interpreting its position.
+    pub fn item_height(&self, index: usize) -> Option<f32> {
+        self.blocks.get(&index).map(|&(_, height)| height)
+    }
+
+    /// Offset of a found line inside its own item, leaving one line of context
+    /// above it. Both ends were recorded against the same viewport base, so the
+    /// base cancels out of the difference.
+    pub fn search_within(&self, block: usize, byte: usize) -> Option<f32> {
+        let &(line_top, line_height) = self.search_lines.get(&(block, byte))?;
+        let &(block_top, _) = self.blocks.get(&block)?;
+        Some((line_top - block_top - line_height).max(0.))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -331,6 +345,19 @@ mod tests {
         layout.record_search_line(1, 0, 20., 32.);
         assert_eq!(layout.search_offset(1, 0), Some(0.));
         assert_eq!(layout.search_offset(1, 42), None);
+    }
+    #[test]
+    fn search_within_is_relative_to_the_owning_item() {
+        let mut layout = ReadingLayout::default();
+        layout.record(1, 500., 320.);
+        layout.record_search_line(1, 130, 584., 32.);
+        assert_eq!(layout.search_within(1, 130), Some(52.));
+        layout.record_search_line(1, 0, 508., 32.);
+        assert_eq!(layout.search_within(1, 0), Some(0.));
+        assert_eq!(layout.search_within(1, 42), None);
+        assert_eq!(layout.search_within(2, 130), None);
+        assert_eq!(layout.item_height(1), Some(320.));
+        assert_eq!(layout.item_height(2), None);
     }
     #[test]
     fn source_links_do_not_invent_local_or_unknown_seek_support() {

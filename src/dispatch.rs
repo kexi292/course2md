@@ -169,10 +169,14 @@ pub fn is_active() -> bool {
 pub struct Guard(Arc<Ledger>);
 impl Drop for Guard {
     fn drop(&mut self) {
-        if let Ok(mut current) = ACTIVE.get_or_init(|| Mutex::new(None)).lock()
-            && current
-                .as_ref()
-                .is_some_and(|value| Arc::ptr_eq(value, &self.0))
+        // 锁中毒也要清掉当前 guard：否则 install 会一直报「同一进程不能同时执行两个任务」
+        let mut current = ACTIVE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if current
+            .as_ref()
+            .is_some_and(|value| Arc::ptr_eq(value, &self.0))
         {
             *current = None;
         }
@@ -188,7 +192,9 @@ pub fn install(
     let mut current = ACTIVE
         .get_or_init(|| Mutex::new(None))
         .lock()
-        .map_err(|_| anyhow::anyhow!("任务请求状态锁不可用 / Task request ledger lock unavailable"))?;
+        .map_err(|_| {
+            anyhow::anyhow!("任务请求状态锁不可用 / Task request ledger lock unavailable")
+        })?;
     anyhow::ensure!(
         current.is_none(),
         "同一进程不能同时执行两个任务 / Another task is already active"
@@ -203,6 +209,18 @@ pub fn check_control() -> Result<()> {
         ledger.check_intent(None).map_err(anyhow::Error::new)?;
     }
     Ok(())
+}
+
+/// 轮询任务控制文件，意图不再是 run 时返回 Err。配合 `tokio::select!` 打断
+/// 长时间运行的分支（子进程句谋 kill_on_drop 随分支 dropped 生效）。
+/// 无活动任务账本时 check_control 恒 Ok，此 future 永不完成，不影响 CLI 独立调用。
+pub async fn watch_control() -> anyhow::Error {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        if let Err(e) = check_control() {
+            return e;
+        }
+    }
 }
 
 /// Exposes unresolved attempts for task state reconciliation even if the process crashed.
@@ -301,7 +319,7 @@ impl Ledger {
             return Err(self.block(
                 "service_stopped",
                 None,
-                "此服务已停止使用，没有发送新请求 / Service stopped; no new request sent",
+                "此服务已删除，没有发送新请求 / Service deleted; no new request sent",
             ));
         }
         Ok(control)
@@ -549,7 +567,7 @@ pub fn json_request_described(
             validate,
         );
     }
-    // Legacy CLI has no durable task context. Only confirmed unsent/429 are retryable.
+    // The CLI has no durable task context. Only confirmed unsent/429 are retryable.
     let response = send().map_err(|e| Failure {
         status: None,
         retryable: e.definitely_unsent,

@@ -115,7 +115,6 @@ pub struct Manifest {
     pub version_id: String,
     pub title: String,
     pub created_at_ms: u64,
-    #[serde(default)]
     pub revision: u64,
     pub document: String,
     pub markdown: String,
@@ -288,7 +287,46 @@ pub fn has_readable_body(sections: &[Section]) -> bool {
 
 /// Build and fsync all files on the target volume, then publish one directory rename.
 /// The pointer is a separate atomic commit. A restart can finish it without rerunning AI.
+///
+/// 重阻塞 IO（逐图复制、SHA-256、fsync）不占 tokio worker 线程：
+/// 克隆输入后整个发布在 spawn_blocking 中执行。
 pub async fn publish(
+    target: &Target,
+    work_dir: &Path,
+    meta: &VideoMeta,
+    sections: &[Section],
+    summary: Option<&Summary>,
+    formats: &[crate::config::OutputFormat],
+    outcomes: Outcomes,
+) -> Result<Manifest> {
+    let target = target.clone();
+    let work_dir = work_dir.to_path_buf();
+    let meta = meta.clone();
+    let sections = sections.to_vec();
+    let summary = summary.cloned();
+    let formats = formats.to_vec();
+    let publish = move || {
+        publish_blocking(
+            &target,
+            &work_dir,
+            &meta,
+            &sections,
+            summary.as_ref(),
+            &formats,
+            outcomes,
+        )
+    };
+    // 无 Tokio reactor 的上下文（桌面单元测试）直接同步执行；有 reactor 时不占 worker 线程
+    if tokio::runtime::Handle::try_current().is_err() {
+        return publish();
+    }
+    tokio::task::spawn_blocking(publish)
+        .await
+        .context("发布工作进程中断 / Publish worker interrupted")?
+}
+
+/// publish 的同步实现（见 publish 的 spawn_blocking 纪律说明）。
+pub fn publish_blocking(
     target: &Target,
     work_dir: &Path,
     meta: &VideoMeta,

@@ -10,7 +10,6 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     ops::Range,
-    path::Path,
     rc::Rc,
     sync::{Arc, atomic::AtomicBool},
 };
@@ -331,7 +330,7 @@ pub(crate) struct State {
     loaded: Option<PathBuf>,
     generation: u64,
     data_loading: bool,
-    frames: Vec<Frame>,
+    frames: Rc<Vec<Frame>>,
     versions: Vec<Version>,
     issues: Vec<String>,
     pending_restore: Option<workspace::ReadingPosition>,
@@ -341,11 +340,21 @@ pub(crate) struct State {
     last_position: Option<(String, workspace::ReadingPosition)>,
     layout: Option<(f32, f32, f32)>,
     item_layout: Rc<RefCell<nav::ReadingLayout>>,
+    // The note tab's article flow is a variable-height `list`: persistent
+    // state, the flattened item sequence it describes and per-item focus
+    // containers that keep a focused control mounted while scrolled out.
+    note_list: ListState,
+    note_items: Rc<Vec<NoteItem>>,
+    note_focus: Rc<Vec<FocusHandle>>,
+    note_items_key: Option<(PathBuf, bool, usize)>,
+    note_list_rem: f32,
     viewer: Option<ImageViewer>,
     exports: BTreeMap<PathBuf, PathBuf>,
     export_folder: Option<PathBuf>,
     export_state: ExportState,
     source_loading: bool,
+    /// 进行中的重新定位探测取消标志：换笔记/新探测/完成时置位
+    source_probe_cancel: Option<Arc<AtomicBool>>,
     source: Option<nav::SourceTarget>,
     source_available: bool,
     offline_video: OfflineVideo,
@@ -438,7 +447,7 @@ impl State {
             loaded: None,
             generation: 0,
             data_loading: false,
-            frames: Vec::new(),
+            frames: Rc::default(),
             versions: Vec::new(),
             issues: Vec::new(),
             pending_restore: None,
@@ -448,11 +457,17 @@ impl State {
             last_position: None,
             layout: None,
             item_layout: Rc::default(),
+            note_list: ListState::new(0, ListAlignment::Top, px(1000.)),
+            note_items: Rc::default(),
+            note_focus: Rc::default(),
+            note_items_key: None,
+            note_list_rem: f32::NAN,
             viewer: None,
             exports: BTreeMap::new(),
             export_folder: None,
             export_state: ExportState::default(),
             source_loading: false,
+            source_probe_cancel: None,
             source: None,
             source_available: false,
             offline_video: OfflineVideo::NotRequested,
@@ -562,6 +577,155 @@ fn restored_reader_offset(
     index
         .and_then(|index| layout.restore(index, position.fraction, position.within))
         .unwrap_or(position.offset.min(0.))
+}
+
+/// The note tab's article is one flat sequence of list items: the scrolling
+/// title on short windows, the summary label and its paragraphs, then every
+/// remaining block in order. Items keep the block indexing of the full
+/// document so anchors, search targets and reading positions are unchanged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoteItem {
+    Title,
+    SummaryLabel(Option<usize>),
+    Block(usize),
+}
+
+fn note_summary_block(block: &PreviewBlock) -> bool {
+    match block {
+        PreviewBlock::Heading { anchor, .. } => anchor == "summary",
+        PreviewBlock::Paragraph { anchor, .. } => {
+            anchor == "summary-tldr" || anchor.starts_with("key-point-")
+        }
+        _ => false,
+    }
+}
+
+fn note_items(blocks: &[PreviewBlock], short_reader: bool) -> Vec<NoteItem> {
+    let mut items = Vec::with_capacity(blocks.len() + 2);
+    if short_reader {
+        items.push(NoteItem::Title);
+    }
+    let mut summary_label = None;
+    let mut summary_paragraphs = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        match block {
+            PreviewBlock::Heading { anchor, .. } if anchor == "summary" => {
+                summary_label = Some(index);
+            }
+            PreviewBlock::Paragraph { anchor, .. }
+                if anchor == "summary-tldr" || anchor.starts_with("key-point-") =>
+            {
+                summary_paragraphs.push(index);
+            }
+            _ => {}
+        }
+    }
+    if !summary_paragraphs.is_empty() {
+        items.push(NoteItem::SummaryLabel(summary_label));
+        items.extend(summary_paragraphs.into_iter().map(NoteItem::Block));
+    }
+    for (index, block) in blocks.iter().enumerate() {
+        if !note_summary_block(block) {
+            items.push(NoteItem::Block(index));
+        }
+    }
+    items
+}
+
+/// The document block an item carries, when it carries one.
+fn note_item_block(item: NoteItem) -> Option<usize> {
+    match item {
+        NoteItem::Title => None,
+        NoteItem::SummaryLabel(block) => block,
+        NoteItem::Block(block) => Some(block),
+    }
+}
+
+/// The block at or after the item, matching how the pixel-era layout lookup
+/// skipped unmeasured decorations like the scrolling title.
+fn note_top_block(items: &[NoteItem], item: usize) -> Option<usize> {
+    items
+        .get(item..)
+        .unwrap_or(&[])
+        .iter()
+        .find_map(|item| note_item_block(*item))
+        .or_else(|| {
+            items
+                .get(..item)
+                .unwrap_or(&[])
+                .iter()
+                .rev()
+                .find_map(|item| note_item_block(*item))
+        })
+}
+
+fn note_block_item(items: &[NoteItem], block: usize) -> Option<usize> {
+    items
+        .iter()
+        .position(|item| note_item_block(*item) == Some(block))
+}
+
+/// The note tab's reading position from the list's logical scroll top: the top
+/// item's block anchor, the pixel offset inside it and, once measured, the
+/// fraction of its height.
+fn note_capture_position(
+    items: &[NoteItem],
+    blocks: &[PreviewBlock],
+    list: &ListState,
+    layout: &nav::ReadingLayout,
+) -> Option<workspace::ReadingPosition> {
+    let top = list.logical_scroll_top();
+    // The top is a document boundary, not the first measured paragraph.
+    if top.item_ix == 0 && top.offset_in_item <= px(0.) {
+        return Some(workspace::ReadingPosition::default());
+    }
+    let index = note_top_block(items, top.item_ix)?;
+    let within = -f32::from(top.offset_in_item);
+    // Items above the scroll top are only measured once visited, so the pixel
+    // offset under-reports right after a restore. The persisted offset feeds a
+    // coarse "has a reading position" check (`< -8.`): past the first item the
+    // note is by definition not at its top, so keep the value past that marker.
+    let offset = f32::from(list.scroll_px_offset_for_scrollbar().y).min(if top.item_ix == 0 {
+        0.
+    } else {
+        -9.
+    });
+    Some(workspace::ReadingPosition {
+        paragraph: blocks.get(index).map(|block| block_anchor(block, index)),
+        seconds: block_time(blocks, index),
+        offset,
+        within,
+        fraction: layout
+            .item_height(index)
+            .map(|height| nav::within_fraction(within, height)),
+    })
+}
+
+/// Where the note list should scroll to restore a position or reveal a search
+/// match: the item index and, once the item is measured, the precise in-item
+/// offset (the found line with one line of context, or the saved fractional
+/// position). `None` scrolls to the document top.
+fn note_restore_target(
+    items: &[NoteItem],
+    blocks: &[PreviewBlock],
+    position: &workspace::ReadingPosition,
+    search: Option<(usize, usize)>,
+    layout: &nav::ReadingLayout,
+) -> Option<(usize, Option<f32>)> {
+    let block = search
+        .map(|(block, _)| block)
+        .or_else(|| note_position_index(blocks, position));
+    let item_ix = block.and_then(|block| note_block_item(items, block))?;
+    let offset = search
+        .and_then(|(block, byte)| layout.search_within(block, byte))
+        .or_else(|| {
+            block.and_then(|block| {
+                layout
+                    .item_height(block)
+                    .map(|height| -nav::restore_within(position.fraction, position.within, height))
+            })
+        });
+    Some((item_ix, offset))
 }
 fn frame_label(title: &str, frame: &Frame, index: usize) -> String {
     match frame.seconds {
@@ -679,7 +843,6 @@ struct ReaderText {
 struct ReaderSearchTarget {
     block: usize,
     byte: usize,
-    scroll: ScrollHandle,
     positions: Rc<RefCell<nav::ReadingLayout>>,
 }
 impl ReaderText {
@@ -762,10 +925,13 @@ impl Element for ReaderText {
         if let Some(target) = &self.search_target {
             let layout = self.styled_text.layout();
             if let Some(position) = layout.position_for_index(target.byte) {
+                // Window-absolute like the owning item's record: the base
+                // cancels in `search_within`, and the list state is borrowed
+                // while items prepaint, so it cannot be queried here.
                 target.positions.borrow_mut().record_search_line(
                     target.block,
                     target.byte,
-                    f32::from(position.y - target.scroll.bounds().top() - target.scroll.offset().y),
+                    f32::from(position.y),
                     f32::from(layout.line_height()),
                 );
             }
@@ -878,15 +1044,398 @@ fn paragraph(
             ReaderText::new(id, text, order as u64, highlights).with_search_target(search_target),
         )
 }
+
+/// Everything a virtualized note-flow item needs, gathered once per frame so
+/// the list's render closure only builds the visible window of blocks.
+struct NoteFlow {
+    items: Rc<Vec<NoteItem>>,
+    focus: Rc<Vec<FocusHandle>>,
+    preview: Rc<notes::Preview>,
+    frames: Rc<Vec<Frame>>,
+    source: Option<nav::SourceTarget>,
+    outline: Vec<(f64, String)>,
+    frame_index_by_path: HashMap<PathBuf, usize>,
+    missing_by_anchor: HashMap<String, Vec<usize>>,
+    matches: Vec<Match>,
+    match_index: usize,
+    find_open: bool,
+    data_loading: bool,
+    item_layout: Rc<RefCell<nav::ReadingLayout>>,
+    note_list: ListState,
+    desktop: WeakEntity<Desktop>,
+}
+
+impl NoteFlow {
+    fn chapter_title(&self, seconds: Option<f64>) -> Option<String> {
+        let seconds = seconds?;
+        // 章节边界语义：标题属于「最后一个不晚于它的目录章节」——
+        // 截图时间戳几乎从不与大纲时间重合，abs<1.5 的匹配永远落空（M7）
+        self.outline
+            .iter()
+            .filter(|(time, _)| *time <= seconds + 1.5)
+            .max_by(|(a, _), (b, _)| a.total_cmp(b))
+            .map(|(_, title)| title.clone())
+    }
+
+    /// Find highlights group per block; the current match reads stronger.
+    /// `matches` arrive in block order, so one binary search scopes a block.
+    fn highlight_runs(&self, index: usize) -> Vec<(Range<usize>, HighlightStyle)> {
+        if !self.find_open {
+            return Vec::new();
+        }
+        let start = self.matches.partition_point(|found| found.block < index);
+        self.matches[start..]
+            .iter()
+            .take_while(|found| found.block == index)
+            .enumerate()
+            .map(|(offset, found)| {
+                let current = start + offset == self.match_index;
+                (
+                    found.range.clone(),
+                    if current {
+                        HighlightStyle {
+                            background_color: Some(color(FIND_CURRENT).into()),
+                            underline: Some(UnderlineStyle {
+                                thickness: px(1.),
+                                color: Some(color(FIND_CURRENT_LINE).into()),
+                                wavy: false,
+                            }),
+                            ..Default::default()
+                        }
+                    } else {
+                        HighlightStyle {
+                            background_color: Some(color(FIND_HIGHLIGHT).into()),
+                            ..Default::default()
+                        }
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn search_target(&self, index: usize) -> Option<ReaderSearchTarget> {
+        if !self.find_open {
+            return None;
+        }
+        self.matches
+            .get(self.match_index)
+            .filter(|found| found.block == index)
+            .map(|found| ReaderSearchTarget {
+                block: index,
+                byte: found.range.start,
+                positions: self.item_layout.clone(),
+            })
+    }
+
+    /// One list item: uniform spacing between items, a focus container that
+    /// keeps a focused control mounted off-viewport, and the position record
+    /// that reading positions and search jumps resolve against.
+    fn item_wrapper(&self, index: usize, content: AnyElement) -> Stateful<Div> {
+        let block = note_item_block(self.items[index]);
+        let mut wrapper = div()
+            .w_full()
+            .min_w_0()
+            .flex_shrink_0()
+            .when(index + 1 != self.items.len(), |view| view.mb_3());
+        if let Some(block) = block {
+            let positions = self.item_layout.clone();
+            wrapper = wrapper.on_children_prepainted(move |bounds, _, _| {
+                if let Some(bounds) = bounds.first() {
+                    // Window-absolute records: only same-frame differences and
+                    // heights are read (search_within / item_height), so no
+                    // scroll-base adjustment is needed — and the list state is
+                    // mutably borrowed while items prepaint, so it must not be
+                    // queried here.
+                    positions.borrow_mut().record(
+                        block,
+                        f32::from(bounds.top()),
+                        f32::from(bounds.size.height),
+                    );
+                }
+            });
+        }
+        wrapper
+            .child(content)
+            .id(("note-item", index))
+            .track_focus(&self.focus[index])
+            .tab_stop(false)
+    }
+
+    fn reveal(
+        &self,
+        id: ElementId,
+        child: AnyElement,
+        full_width: bool,
+    ) -> crate::focus_scroll::RevealFocus {
+        let view = crate::focus_scroll::RevealFocus::in_list(id, child, self.note_list.clone());
+        if full_width { view } else { view.inline() }
+    }
+}
+
+/// Render one note-flow item. Mirrors the pre-virtualization article order:
+/// scrolling title, summary label and paragraphs, then remaining blocks.
+fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> AnyElement {
+    let Some(&item) = flow.items.get(item_ix) else {
+        return div().into_any_element();
+    };
+    let preview = &flow.preview;
+    let content = match item {
+        NoteItem::Title => theme::accessible_text("reader-title", preview.course.title.clone())
+            .role(Role::Heading)
+            .flex_shrink_0()
+            .min_w_0()
+            .whitespace_normal()
+            .text_size(TEXT_TITLE)
+            .font_weight(FontWeight::SEMIBOLD)
+            .into_any_element(),
+        NoteItem::SummaryLabel(_) => h_flex()
+            .gap_2()
+            .items_center()
+            .child(icons::article().size(rems(18. / 14.)).flex_shrink_0())
+            .child(
+                theme::accessible_text("reader-summary-label", "摘要")
+                    .role(Role::Heading)
+                    .text_size(TEXT_TITLE)
+                    .font_weight(FontWeight::SEMIBOLD),
+            )
+            .into_any_element(),
+        NoteItem::Block(index) => match &preview.blocks[index] {
+            PreviewBlock::Heading {
+                text,
+                anchor,
+                seconds,
+            } => {
+                let marks = flow.highlight_runs(index);
+                let chapter = flow.chapter_title(*seconds).filter(|_| text != "摘要");
+                // 章节标题只在本章第一个标题出现：同一章的后续时间戳标题保持为 chip（review2#1）
+                let chapter_changed = chapter.is_some()
+                    && chapter
+                        != preview.blocks[..index].iter().rev().find_map(|block| {
+                            if let PreviewBlock::Heading { seconds, .. } = block {
+                                flow.chapter_title(*seconds)
+                            } else {
+                                None
+                            }
+                        });
+                let outlined = chapter.filter(|_| chapter_changed);
+                // 无大纲且标题文本就是时间戳时，chip 独自承担章节标题。
+                let bare_timestamp = outlined.is_none()
+                    && seconds.is_some_and(|s| course2md::render::fmt_ts(s) == *text);
+                let display = outlined.unwrap_or_else(|| text.clone());
+                let heading: Option<AnyElement> = if bare_timestamp && marks.is_empty() {
+                    None
+                } else if marks.is_empty() {
+                    Some(
+                        theme::accessible_text(("reader-heading", index), display)
+                            .role(Role::Heading)
+                            .text_size(TEXT_TITLE)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .into_any_element(),
+                    )
+                } else {
+                    Some(
+                        div()
+                            .id(("reader-heading-wrap", index))
+                            .role(Role::Heading)
+                            .aria_label(text.clone())
+                            .text_size(TEXT_TITLE)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(
+                                ReaderText::new(
+                                    ("reader-heading-marks", index),
+                                    text.clone(),
+                                    index as u64,
+                                    marks,
+                                )
+                                .with_search_target(flow.search_target(index)),
+                            )
+                            .into_any_element(),
+                    )
+                };
+                v_flex()
+                    .id(SharedString::from(anchor.clone()))
+                    .gap_2()
+                    .when(index > 0, |view| view.pt_4())
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .items_center()
+                            .when_some(*seconds, |row, seconds| {
+                                let chip = div()
+                                    .text_size(TEXT_READER)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(color(GRAY))
+                                    .flex_shrink_0()
+                                    .whitespace_nowrap()
+                                    .child(course2md::render::fmt_ts(seconds));
+                                row.child(if bare_timestamp {
+                                    chip.id(("reader-heading", index))
+                                        .role(Role::Heading)
+                                        .aria_label(text.clone())
+                                } else {
+                                    chip.id(("reader-heading-chip", index))
+                                })
+                            })
+                            .children(heading),
+                    )
+                    .children(
+                        flow.missing_by_anchor
+                            .get(anchor.as_str())
+                            .into_iter()
+                            .flatten()
+                            .map(|&frame_index| {
+                                let frame = &flow.frames[frame_index];
+                                theme::accessible_text(
+                                    ("missing-body-image", frame_index),
+                                    format!(
+                                        "{}无法读取。对应正文保留在下方。",
+                                        frame_label(&preview.course.title, frame, frame_index)
+                                    ),
+                                )
+                                .text_sm()
+                                .text_color(color(WARNING))
+                            }),
+                    )
+                    .into_any_element()
+            }
+            PreviewBlock::Paragraph { text, anchor } => paragraph(
+                SharedString::from(anchor.clone()),
+                text.clone(),
+                index,
+                flow.highlight_runs(index),
+                flow.search_target(index),
+            )
+            .into_any_element(),
+            PreviewBlock::Image(path) => {
+                let frame_index = flow.frame_index_by_path.get(path).copied();
+                let frame = frame_index.and_then(|i| flow.frames.get(i));
+                if frame_index.is_none() && !flow.data_loading {
+                    return flow
+                        .item_wrapper(
+                            item_ix,
+                            theme::accessible_text(
+                                ("unreadable-inline-image", index),
+                                "这张截图无法读取；对应正文仍可阅读。",
+                            )
+                            .text_sm()
+                            .text_color(color(WARNING))
+                            .into_any_element(),
+                        )
+                        .into_any_element();
+                }
+                let label = frame
+                    .map(|frame| frame_label(&preview.course.title, frame, frame_index.unwrap()))
+                    .unwrap_or_else(|| format!("{}，正文图片", preview.course.title));
+                let aspect_ratio = frame
+                    .filter(|frame| frame.width > 0 && frame.height > 0)
+                    .map(|frame| frame.width as f32 / frame.height as f32)
+                    .unwrap_or(16. / 9.);
+                let rem_size = f32::from(window.rem_size());
+                let available_height =
+                    (f32::from(window.bounds().size.height) - rem_size * (40. / 14.) - 64.).max(0.);
+                let desktop = flow.desktop.clone();
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        flow.reveal(
+                            ("reveal-note-image", index).into(),
+                            control(("note-image", index))
+                                .ghost()
+                                .p_0()
+                                // 行内截图限高：默认窗口内摘要与正文能衔接（M7）
+                                .w(px((available_height * 0.24).min(160.) * aspect_ratio))
+                                .max_w_full()
+                                .h_auto()
+                                .min_h(px(0.))
+                                .border_0()
+                                .rounded(RADIUS_SMALL)
+                                .aspect_ratio(aspect_ratio)
+                                .accessibility_label(format!("放大{label}"))
+                                // 不再用 tooltip 文案提示放大：它会盖住摘要/正文；点击图本身即放大
+                                .disabled(frame_index.is_none())
+                                .child(
+                                    img(path.clone())
+                                        .size_full()
+                                        .rounded(RADIUS_SMALL)
+                                        .object_fit(ObjectFit::Contain)
+                                        .with_fallback(move || {
+                                            theme::accessible_text(
+                                                (
+                                                    "failed-reader-image",
+                                                    frame_index.unwrap_or(0)
+                                                ),
+                                                "这张截图无法读取；对应正文仍可阅读。",
+                                            )
+                                            .into_any_element()
+                                        }),
+                                )
+                                .on_click(move |_, window, cx| {
+                                    if let Some(index) = frame_index {
+                                        let _ = desktop.update(cx, |this, cx| {
+                                            this.open_reader_image(index, window, cx);
+                                        });
+                                    }
+                                })
+                                .into_any_element(),
+                            true,
+                        ),
+                    )
+                    // 「从此处观看」贴着它作用的截图（图下左对齐），不再挤进章节标题行（review2#1）
+                    .when_some(
+                        frame
+                            .and_then(|frame| frame.seconds)
+                            .and_then(|seconds| {
+                                flow.source
+                                    .as_ref()
+                                    .and_then(|source| nav::seek_url(source, seconds))
+                            }),
+                        |view, url| {
+                            view.child(
+                                h_flex().w_full().justify_start().child(
+                                    quiet(("seek-image", index))
+                                        .icon(icons::play_arrow())
+                                        .label("从此处观看")
+                                        .min_h(rems(1.6))
+                                        .accessibility_label("在原视频打开这个位置")
+                                        .on_click(move |_, _, cx| cx.open_url(&url)),
+                                ),
+                            )
+                        },
+                    )
+                    .when_some(
+                        frame.and_then(|frame| frame.caption.as_ref()),
+                        |figure, caption| {
+                            figure.child(
+                                theme::accessible_text(("figure-caption", index), caption.clone())
+                                    .text_size(TEXT_AUX)
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(color(GRAY)),
+                            )
+                        },
+                    )
+                    .into_any_element()
+            }
+        },
+    };
+    flow.item_wrapper(item_ix, content).into_any_element()
+}
+
 impl Desktop {
     pub(super) fn reader_viewer_open(&self) -> bool {
         self.reader_ui.viewer.is_some()
     }
 
     fn scroll_reader_page(&mut self, direction: f32, cx: &mut Context<Self>) {
-        let step = self.reader_scroll.bounds().size.height * 0.85 * direction;
-        let offset = self.reader_scroll.offset() + point(px(0.), step);
-        self.reader_scroll.set_offset(offset);
+        if self.result_tab == 0 {
+            let step = self.reader_ui.note_list.viewport_bounds().size.height * 0.85 * direction;
+            self.reader_ui.note_list.scroll_by(-step);
+        } else {
+            let step = self.reader_scroll.bounds().size.height * 0.85 * direction;
+            let offset = self.reader_scroll.offset() + point(px(0.), step);
+            self.reader_scroll.set_offset(offset);
+        }
         cx.notify();
     }
     pub fn save_library_presentation(&mut self, cx: &mut Context<Self>) {
@@ -921,25 +1470,23 @@ impl Desktop {
     }
     fn capture_reading_position(&self) -> Option<workspace::ReadingPosition> {
         let preview = self.preview.as_ref()?;
+        if self.result_tab == 0 {
+            return note_capture_position(
+                &self.reader_ui.note_items,
+                &preview.blocks,
+                &self.reader_ui.note_list,
+                &self.reader_ui.item_layout.borrow(),
+            );
+        }
         capture_reader_position(
             &self.reader_ui.item_layout.borrow(),
             f32::from(self.reader_scroll.offset().y),
             |index| {
-                if self.result_tab == 0 {
-                    (
-                        preview
-                            .blocks
-                            .get(index)
-                            .map(|block| block_anchor(block, index)),
-                        block_time(&preview.blocks, index),
-                    )
-                } else {
-                    self.reader_ui
-                        .frames
-                        .get(index)
-                        .map(|frame| (Some(frame.anchor.clone()), frame.seconds))
-                        .unwrap_or((None, None))
-                }
+                self.reader_ui
+                    .frames
+                    .get(index)
+                    .map(|frame| (Some(frame.anchor.clone()), frame.seconds))
+                    .unwrap_or((None, None))
             },
         )
     }
@@ -1044,8 +1591,12 @@ impl Desktop {
         let search = self.reader_ui.pending_search.take();
         let generation = self.reader_ui.restore_generation;
         let key = self.reading_key();
-        cx.on_next_frame(window, move |this, _, cx| {
+        cx.on_next_frame(window, move |this, window, cx| {
             if this.reader_ui.restore_generation != generation || this.reading_key() != key {
+                return;
+            }
+            if this.result_tab == 0 {
+                this.apply_note_restore(position, search, 0, window, cx);
                 return;
             }
             let positions = this.reader_ui.item_layout.borrow();
@@ -1065,7 +1616,84 @@ impl Desktop {
             cx.notify();
         });
     }
-    fn ensure_reader_data(&mut self, cx: &mut Context<Self>) {
+
+    /// Position the virtualized note flow at a saved position or search match.
+    /// The target item renders once it becomes the scroll top, so the precise
+    /// in-item offset (the found line, or the measured fractional position) is
+    /// applied on a following pass once the item has been measured again.
+    fn apply_note_restore(
+        &mut self,
+        position: workspace::ReadingPosition,
+        search: Option<Match>,
+        pass: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let list = self.reader_ui.note_list.clone();
+        let items = self.reader_ui.note_items.clone();
+        let Some(preview) = self.preview.clone() else {
+            self.reader_ui.restoring = false;
+            cx.notify();
+            return;
+        };
+        let search_key = search
+            .as_ref()
+            .map(|found| (found.block, found.range.start));
+        let target = note_restore_target(
+            &items,
+            &preview.blocks,
+            &position,
+            search_key,
+            &self.reader_ui.item_layout.borrow(),
+        );
+        let Some((item_ix, precise)) = target else {
+            list.scroll_to(ListOffset {
+                item_ix: 0,
+                offset_in_item: px(0.),
+            });
+            self.reader_ui.restoring = false;
+            self.reader_ui.last_position = None;
+            cx.notify();
+            return;
+        };
+        if let Some(offset) = precise {
+            list.scroll_to(ListOffset {
+                item_ix,
+                offset_in_item: px(offset.max(0.)),
+            });
+            self.reader_ui.restoring = false;
+            self.reader_ui.last_position = None;
+            cx.notify();
+            return;
+        }
+        // The item has not been measured this session: land on it first, then
+        // refine the in-item offset once its height is known.
+        list.scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: px((-position.within).max(0.)),
+        });
+        const RESTORE_MEASURE_PASSES: usize = 4;
+        if pass + 1 < RESTORE_MEASURE_PASSES {
+            let generation = self.reader_ui.restore_generation;
+            let key = self.reading_key();
+            cx.on_next_frame(window, move |this, window, cx| {
+                if this.reader_ui.restore_generation != generation || this.reading_key() != key {
+                    return;
+                }
+                this.apply_note_restore(position, search, pass + 1, window, cx);
+            });
+        } else {
+            self.reader_ui.restoring = false;
+            self.reader_ui.last_position = None;
+        }
+        cx.notify();
+    }
+    pub(crate) fn sync_reader_tab_stops(&mut self) {
+        for (index, focus) in self.reader_ui.view_focus.iter_mut().enumerate() {
+            *focus = focus.clone().tab_stop(index == self.result_tab);
+        }
+    }
+    pub(crate) fn ensure_reader_data(&mut self, cx: &mut Context<Self>) {
         let Some(preview) = &self.preview else {
             return;
         };
@@ -1079,10 +1707,15 @@ impl Desktop {
         self.reader_ui
             .information_scroll
             .set_offset(point(px(0.), px(0.)));
-        self.reader_ui.frames.clear();
+        self.reader_ui.frames = Rc::default();
         self.reader_ui.versions.clear();
         self.reader_ui.issues.clear();
         self.reader_ui.source = None;
+        // 换笔记：中止进行中的重新定位探测
+        if let Some(cancel) = self.reader_ui.source_probe_cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.reader_ui.source_loading = false;
         self.reader_ui.source_available = false;
         self.reader_ui.export_folder = None;
         self.reader_ui.offline_video = OfflineVideo::NotRequested;
@@ -1094,6 +1727,7 @@ impl Desktop {
         self.reader_ui.processing_details_open = false;
         self.reader_ui.clear_find = true;
         self.reader_ui.layout = None;
+        self.reader_ui.note_items_key = None;
         self.refresh_reader_data(cx);
     }
     fn refresh_reader_data(&mut self, cx: &mut Context<Self>) {
@@ -1120,25 +1754,26 @@ impl Desktop {
         self.reader_ui.data_loading = true;
         self.reader_ui.offline_opening = false;
         cx.spawn(async move |this, cx| {
-            let (data, source, source_available, offline_video) = cx
-                .background_executor()
-                .spawn(async move {
-                    let source = source.map(|source| match source {
-                        nav::SourceTarget::Local(path) => {
-                            nav::SourceTarget::Local(nav::relocated_source(&path, &locations))
-                        }
-                        other => other,
-                    });
-                    let available = source.as_ref().is_some_and(|source| match source {
-                        nav::SourceTarget::Web(_) => true,
-                        nav::SourceTarget::Local(path) => path.is_file(),
-                    });
-                    let offline_video = offline_request
-                        .map(|request| request.inspect())
-                        .unwrap_or_default();
-                    (load_reader_data(&preview), source, available, offline_video)
-                })
-                .await;
+            // 解析全文与离线检查是同步文件/子进程工作；见 crate::spawn_blocking_io 的说明
+            let (data, source, source_available, offline_video) = crate::spawn_blocking_io(move || {
+                let source = source.map(|source| match source {
+                    nav::SourceTarget::Local(path) => {
+                        nav::SourceTarget::Local(nav::relocated_source(&path, &locations))
+                    }
+                    other => other,
+                });
+                let available = source.as_ref().is_some_and(|source| match source {
+                    nav::SourceTarget::Web(_) => true,
+                    nav::SourceTarget::Local(path) => path.is_file(),
+                });
+                let offline_video = offline_request
+                    .map(|request| request.inspect())
+                    .unwrap_or_default();
+                (load_reader_data(&preview), source, available, offline_video)
+            })
+            .recv()
+            .await
+            .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
                 if this.reader_ui.generation != generation
                     || this
@@ -1151,7 +1786,7 @@ impl Desktop {
                 if this.reader_ui.pending_restore.is_none() && !this.reader_ui.restoring {
                     this.reader_ui.pending_restore = this.capture_reading_position();
                 }
-                this.reader_ui.frames = data.frames;
+                this.reader_ui.frames = Rc::new(data.frames);
                 this.reader_ui.versions = data.versions;
                 this.reader_ui.issues = data.issues;
                 this.reader_ui.export_folder = data.export_folder;
@@ -1206,10 +1841,10 @@ impl Desktop {
         let generation = self.reader_ui.generation;
         self.reader_ui.offline_opening = true;
         cx.spawn(async move |this, cx| {
-            let status = cx
-                .background_executor()
-                .spawn(async move { request.inspect() })
-                .await;
+            let status = crate::spawn_blocking_io(move || request.inspect())
+                .recv()
+                .await
+                .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
                 if this.reader_ui.generation != generation
                     || this
@@ -1297,17 +1932,23 @@ impl Desktop {
             let Some(path) = path else {
                 return;
             };
+            let cancel = Arc::new(AtomicBool::new(false));
+            let stored = cancel.clone();
+            let probing = cancel.clone();
             let _ = this.update(cx, |this, cx| {
+                // 前一次探测若还在跑，先取消再开始新的
+                if let Some(previous) = this.reader_ui.source_probe_cancel.take() {
+                    previous.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                this.reader_ui.source_probe_cancel = Some(stored);
                 this.reader_ui.source_loading = true;
                 cx.notify();
             });
             let input = path.to_string_lossy().into_owned();
             let identity = key.clone();
-            let checked = cx
-                .background_executor()
-                .spawn(async move {
-                    let source::SourceProbe::Single(source) =
-                        source::probe(input, false, Arc::new(AtomicBool::new(false)))?
+            let checked = crate::spawn_blocking_io(move || {
+                let source::SourceProbe::Single(source) =
+                    source::probe(input, false, probing)?
                     else {
                         anyhow::bail!("请选择可读取的视频文件");
                     };
@@ -1316,10 +1957,22 @@ impl Desktop {
                         "这个文件与生成笔记时的视频内容不同，请选择同一个原视频"
                     );
                     Ok::<_, anyhow::Error>(())
-                })
-                .await;
+            });
+            let checked = checked
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("检查原视频的工作线程意外结束")));
             let _ = this.update(cx, |this, cx| {
                 this.reader_ui.source_loading = false;
+                // 只清自己的标志：更晚开始的探测持有另一个 Arc
+                if this
+                    .reader_ui
+                    .source_probe_cancel
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &cancel))
+                {
+                    this.reader_ui.source_probe_cancel = None;
+                }
                 let result = checked.and_then(|_| {
                     this.workspace
                         .as_mut()
@@ -1427,6 +2080,7 @@ impl Desktop {
         if self.result_tab != 0 {
             self.save_reading_position(cx);
             self.result_tab = 0;
+            self.sync_reader_tab_stops();
         }
         let Some(preview) = &self.preview else {
             return;
@@ -1479,9 +2133,12 @@ impl Desktop {
                         preview.course.title = this.course_display_title(&preview.course);
                         this.preview = Some(preview);
                         this.result_tab = tab;
+                        this.sync_reader_tab_stops();
                         if refresh {
                             this.reader_ui.loaded = None;
                         }
+                        // 事件路径触发数据加载（渲染不再负责）
+                        this.ensure_reader_data(cx);
                         let has_saved_position = this.reading_key().is_some_and(|key| {
                             this.workspace.as_ref().is_some_and(|workspace| {
                                 workspace.state.positions.contains_key(&key)
@@ -1540,16 +2197,6 @@ impl Desktop {
             });
         })
         .detach();
-    }
-    pub fn export_note(
-        &mut self,
-        format: course2md::config::OutputFormat,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(preview) = &self.preview {
-            self.export_course(preview.course.clone(), format, window, cx);
-        }
     }
     pub fn export_course(
         &mut self,
@@ -1785,6 +2432,7 @@ impl Desktop {
         if self.result_tab != index {
             self.save_reading_position(cx);
             self.result_tab = index;
+            self.sync_reader_tab_stops();
             if index == 1
                 && !self
                     .reader_ui
@@ -1804,7 +2452,7 @@ impl Desktop {
         cx.notify();
     }
     pub fn reader_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let Some(preview) = self.preview.clone() else {
+        let Some(preview) = self.preview.clone().map(Rc::new) else {
             return crate::motion::enter(
                 "reader-opening",
                 h_flex()
@@ -1812,14 +2460,10 @@ impl Desktop {
                     .gap_2()
                     .py_6()
                     .child(crate::motion::spinner("reader-opening-spinner", cx))
-                    .child(theme::accessible_text("opening-note", "正在打开笔记…")),
-                cx,
-            );
+                    .child(theme::accessible_text("opening-note", "正在打开笔记…")));
         };
-        self.ensure_reader_data(cx);
-        for (index, focus) in self.reader_ui.view_focus.iter_mut().enumerate() {
-            *focus = focus.clone().tab_stop(index == self.result_tab);
-        }
+        // 渲染只读已提交快照：数据加载在 preview 变更的事件路径触发（ensure_reader_data），
+        // tab stops 在各 result_tab 赋值点同步
         if self.reader_ui.clear_find {
             self.reader_ui.clear_find = false;
             self.reader_ui
@@ -1870,11 +2514,22 @@ impl Desktop {
                 cx.listener(|this, _: &ReaderPageDown, _, cx| this.scroll_reader_page(-1., cx)),
             )
             .on_action(cx.listener(|this, _: &ReaderStart, _, cx| {
-                this.reader_scroll.set_offset(point(px(0.), px(0.)));
+                if this.result_tab == 0 {
+                    this.reader_ui.note_list.scroll_to(ListOffset {
+                        item_ix: 0,
+                        offset_in_item: px(0.),
+                    });
+                } else {
+                    this.reader_scroll.set_offset(point(px(0.), px(0.)));
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ReaderEnd, _, cx| {
-                this.reader_scroll.scroll_to_bottom();
+                if this.result_tab == 0 {
+                    this.reader_ui.note_list.scroll_to_end();
+                } else {
+                    this.reader_scroll.scroll_to_bottom();
+                }
                 cx.notify();
             }))
             .on_action(cx.listener(move |this, _: &CloseFind, window, cx| {
@@ -1938,13 +2593,6 @@ impl Desktop {
                     .collect()
             })
             .unwrap_or_default();
-        let chapter_title = |seconds: Option<f64>| -> Option<String> {
-            let seconds = seconds?;
-            outline
-                .iter()
-                .find(|(time, _)| (time - seconds).abs() < 1.5)
-                .map(|(_, title)| title.clone())
-        };
         let headings = reader_outline(&preview);
         let return_label = match self.result_origin {
             Page::New => "工作台",
@@ -2013,11 +2661,7 @@ impl Desktop {
             if label == "来源" || value.trim().is_empty() {
                 continue;
             }
-            facts.push(if label == "原稿" {
-                format!("{label}：{value}")
-            } else {
-                value.clone()
-            });
+            facts.push(value.clone());
         }
         if let Some(document) = &preview.document {
             let platform = match document.meta.extractor.as_str() {
@@ -2322,10 +2966,10 @@ impl Desktop {
         if !headings.is_empty() && reading_note {
             let toc_on = self.reader_ui.toc_open.unwrap_or(toc_fits_beside);
             search_row = search_row.child(
+                // 目录轨打开时以 accent 文字色表达状态（持久含义经由文字色，不是选中面）
                 quiet("note-contents")
                     .icon(icons::toc())
                     .label("目录")
-                    .bg(color(if toc_on { ACCENT_SOFT } else { SURFACE }))
                     .when(toc_on, |button| button.text_color(color(ACCENT_STRONG)))
                     .accessibility_label(if toc_on {
                         "收起目录"
@@ -2565,9 +3209,7 @@ impl Desktop {
                     .child(theme::accessible_text(
                         "reader-version-loading-label",
                         "正在打开笔记…",
-                    )),
-                cx,
-            ));
+                    ))));
         }
         let mut details = vec![("标题", icons::article(), preview.course.title.clone())];
         let local_source = self.reader_source().and_then(|source| match source {
@@ -2733,10 +3375,8 @@ impl Desktop {
                                     .track_scroll(&information_scroll)
                                     .child(content),
                             )
-                            .child(
-                                Scrollbar::vertical(&information_scroll)
-                                    .mode(ScrollbarMode::Scrolling),
-                            ),
+                            // 与设置页一致：macOS「始终显示滚动条」偏好开启时常驻（review4#4）
+                            .child(crate::backend::vertical_scrollbar(&information_scroll)),
                     ),
                 window,
                 cx,
@@ -2782,9 +3422,7 @@ impl Desktop {
                                     this.open_reader_version(newer.clone(), cx)
                                 })))
                             .into_any_element(),
-                        )),
-                    cx,
-                ));
+                        ))));
             }
         }
         if let Some(notice) = processing_notice(&preview.processing_issues) {
@@ -2974,9 +3612,7 @@ impl Desktop {
             ));
             page = page.child(crate::motion::enter(
                 "reader-processing-notice",
-                problem,
-                cx,
-            ));
+                problem));
         }
         if files_need_reload(&preview, &self.reader_ui.issues, &self.reader_ui.frames) {
             let course = preview.course.clone();
@@ -3033,97 +3669,45 @@ impl Desktop {
                                 this.load_reader_version(course.clone(), true, cx)
                             })))
                         .into_any_element(),
-                    )),
-                cx,
-            ));
+                    ))));
         }
-        // Find highlights group per block; the current match reads stronger.
-        let mut find_marks: BTreeMap<usize, Vec<(Range<usize>, bool)>> = BTreeMap::new();
-        if self.reader_ui.find_open {
-            for (position, found) in self.reader_ui.matches.iter().enumerate() {
-                find_marks
-                    .entry(found.block)
-                    .or_default()
-                    .push((found.range.clone(), position == self.reader_ui.match_index));
-            }
+        let reading_note = self.result_tab == 0;
+        let items = note_items(&preview.blocks, short_reader);
+        // The note flow's persistent list state follows the loaded note and the
+        // item sequence derived from it; text-scale changes only re-measure.
+        let items_key = (
+            preview.course.dir.clone(),
+            short_reader,
+            preview.blocks.len(),
+        );
+        if self.reader_ui.note_items_key.as_ref() != Some(&items_key) {
+            let focus: Vec<FocusHandle> = (0..items.len()).map(|_| cx.focus_handle()).collect();
+            self.reader_ui.note_list.reset(items.len());
+            self.reader_ui
+                .note_list
+                .splice_focusable(0..items.len(), focus.iter().cloned().map(Some));
+            self.reader_ui.note_focus = Rc::new(focus);
+            self.reader_ui.note_items_key = Some(items_key);
+            self.reader_ui.note_list_rem = rem_size;
+        } else if self.reader_ui.note_list_rem != rem_size {
+            self.reader_ui.note_list.remeasure();
+            self.reader_ui.note_list_rem = rem_size;
         }
-        let highlight_runs = |index: usize| -> Vec<(Range<usize>, HighlightStyle)> {
-            find_marks
-                .get(&index)
-                .map(|marks| {
-                    marks
-                        .iter()
-                        .map(|(range, current)| {
-                            (
-                                range.clone(),
-                                if *current {
-                                    HighlightStyle {
-                                        background_color: Some(color(FIND_CURRENT).into()),
-                                        underline: Some(UnderlineStyle {
-                                            thickness: px(1.),
-                                            color: Some(color(FIND_CURRENT_LINE).into()),
-                                            wavy: false,
-                                        }),
-                                        ..Default::default()
-                                    }
-                                } else {
-                                    HighlightStyle {
-                                        background_color: Some(color(FIND_HIGHLIGHT).into()),
-                                        ..Default::default()
-                                    }
-                                },
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
+        self.reader_ui.note_items = Rc::new(items);
+        let top_index = if reading_note {
+            let top = self.reader_ui.note_list.logical_scroll_top();
+            note_top_block(&self.reader_ui.note_items, top.item_ix).unwrap_or(0)
+        } else {
+            self.reader_ui
+                .item_layout
+                .borrow()
+                .top_item(f32::from(self.reader_scroll.offset().y))
+                .map(|(index, _, _)| index)
+                .unwrap_or(0)
         };
-        let top_index = self
-            .reader_ui
-            .item_layout
-            .borrow()
-            .top_item(f32::from(self.reader_scroll.offset().y))
-            .map(|(index, _, _)| index)
-            .unwrap_or(0);
         self.reader_ui.item_layout = Rc::default();
         let item_layout = self.reader_ui.item_layout.clone();
         let measured_scroll = self.reader_scroll.clone();
-        let current_match = self
-            .reader_ui
-            .matches
-            .get(self.reader_ui.match_index)
-            .filter(|_| self.reader_ui.find_open);
-        let search_target = |index: usize| {
-            current_match
-                .filter(|found| found.block == index)
-                .map(|found| ReaderSearchTarget {
-                    block: index,
-                    byte: found.range.start,
-                    scroll: measured_scroll.clone(),
-                    positions: item_layout.clone(),
-                })
-        };
-        let reading_note = self.result_tab == 0;
-        // One pass over the frames up front; the block loop below queries per
-        // image path and per body anchor instead of rescanning the frames.
-        let frame_index_by_path: HashMap<&Path, usize> = self
-            .reader_ui
-            .frames
-            .iter()
-            .enumerate()
-            .filter_map(|(index, frame)| frame.path.as_deref().map(|path| (path, index)))
-            .fold(HashMap::new(), |mut map, (path, index)| {
-                map.entry(path).or_insert(index);
-                map
-            });
-        let mut missing_by_anchor: HashMap<&str, Vec<usize>> = HashMap::new();
-        for (index, frame) in self.reader_ui.frames.iter().enumerate() {
-            if frame.path.is_none()
-                && let Some(anchor) = frame.body_anchor.as_deref()
-            {
-                missing_by_anchor.entry(anchor).or_default().push(index);
-            }
-        }
         let measured = |index: usize, child: AnyElement| {
             let positions = item_layout.clone();
             let scroll = measured_scroll.clone();
@@ -3148,295 +3732,90 @@ impl Desktop {
             .last()
             .map(|(index, _, _)| *index);
         // Match the exported HTML's continuous article: one text measure,
-        // regular 1.7-line body copy, and spacing between sections.
-        let mut article = v_flex()
-            .id("note-reader")
-            .role(Role::Document)
-            .aria_label(preview.course.title.clone())
-            .flex_1()
-            .min_h_0()
-            .min_w_0()
-            .w_full()
-            .when(reading_note, |view| view.max_w(READER_MEASURE))
-            .overflow_y_scroll()
-            .track_scroll(&self.reader_scroll)
-            .gap_3()
-            .py_3()
-            .children(scrolling_title);
-        let article_scroll = self.reader_scroll.clone();
-        let reveal_article = |id: ElementId, child: AnyElement, full_width: bool| {
-            let view = crate::focus_scroll::RevealFocus::new(id, child, article_scroll.clone());
-            if full_width { view } else { view.inline() }
-        };
-        let source = self.reader_source();
-        if self.result_tab == 0 {
-            let summary_paragraphs: Vec<(usize, String)> = preview
-                .blocks
+        // regular 1.7-line body copy, and spacing between sections. The note
+        // tab's blocks form a variable-height list: only the visible window
+        // and its overdraw are built each frame.
+        let article: AnyElement = if reading_note {
+            // One pass over the frames up front; the item closure queries per
+            // image path and per body anchor instead of rescanning the frames.
+            let frame_index_by_path: HashMap<PathBuf, usize> = self
+                .reader_ui
+                .frames
                 .iter()
                 .enumerate()
-                .filter_map(|(index, block)| match block {
-                    PreviewBlock::Paragraph { text, anchor }
-                        if anchor == "summary-tldr" || anchor.starts_with("key-point-") =>
-                    {
-                        Some((index, text.clone()))
-                    }
-                    _ => None,
-                })
-                .collect();
-            if !summary_paragraphs.is_empty() {
-                let summary_label = h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(icons::article().size(rems(18. / 14.)).flex_shrink_0())
-                    .child(
-                        theme::accessible_text("reader-summary-label", "摘要")
-                            .role(Role::Heading)
-                            .text_size(TEXT_TITLE)
-                            .font_weight(FontWeight::SEMIBOLD),
-                    )
-                    .into_any_element();
-                let summary_label = if let Some(index) = preview.blocks.iter().position(|block| {
-                    matches!(block, PreviewBlock::Heading { anchor, .. } if anchor == "summary")
-                }) {
-                    measured(index, summary_label).into_any_element()
-                } else {
-                    summary_label
-                };
-                article = article.child(
-                    v_flex()
-                        .id("reader-summary")
-                        .flex_shrink_0()
-                        .w_full()
-                        .max_w(READER_MEASURE)
-                        .gap_3()
-                        .child(summary_label)
-                        .children(summary_paragraphs.iter().map(|(index, text)| {
-                            measured(
-                                *index,
-                                paragraph(
-                                    SharedString::from(format!("summary-text-{index}")),
-                                    text.clone(),
-                                    *index,
-                                    highlight_runs(*index),
-                                    search_target(*index),
-                                )
-                                .into_any_element(),
-                            )
-                        })),
-                );
-            }
-            for (index, block) in preview.blocks.iter().enumerate() {
-                let consumed_by_summary = match block {
-                    PreviewBlock::Heading { anchor, .. } => anchor == "summary",
-                    PreviewBlock::Paragraph { anchor, .. } => {
-                        anchor == "summary-tldr" || anchor.starts_with("key-point-")
-                    }
-                    _ => false,
-                };
-                if consumed_by_summary {
-                    continue;
+                .filter_map(|(index, frame)| frame.path.clone().map(|path| (path, index)))
+                .fold(HashMap::new(), |mut map, (path, index)| {
+                    map.entry(path).or_insert(index);
+                    map
+                });
+            let mut missing_by_anchor: HashMap<String, Vec<usize>> = HashMap::new();
+            for (index, frame) in self.reader_ui.frames.iter().enumerate() {
+                if frame.path.is_none()
+                    && let Some(anchor) = frame.body_anchor.clone()
+                {
+                    missing_by_anchor.entry(anchor).or_default().push(index);
                 }
-                let view = match block {
-                    PreviewBlock::Heading {
-                        text,
-                        anchor,
-                        seconds,
-                    } => {
-                        let url = source.as_ref().and_then(|source| {
-                            seconds.and_then(|seconds| nav::seek_url(source, seconds))
-                        });
-                        let marks = highlight_runs(index);
-                        let outlined = chapter_title(*seconds).filter(|_| text != "摘要");
-                        // 无大纲且标题文本就是时间戳时，chip 独自承担章节标题。
-                        let bare_timestamp = outlined.is_none()
-                            && seconds.is_some_and(|s| course2md::render::fmt_ts(s) == *text);
-                        let display = outlined.unwrap_or_else(|| text.clone());
-                        let heading: Option<AnyElement> = if bare_timestamp && marks.is_empty() {
-                            None
-                        } else if marks.is_empty() {
-                            Some(
-                                theme::accessible_text(("reader-heading", index), display)
-                                    .role(Role::Heading)
-                                    .text_size(TEXT_TITLE)
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .into_any_element(),
-                            )
-                        } else {
-                            Some(
-                                div()
-                                    .id(("reader-heading-wrap", index))
-                                    .role(Role::Heading)
-                                    .aria_label(text.clone())
-                                    .text_size(TEXT_TITLE)
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .child(
-                                        ReaderText::new(
-                                            ("reader-heading-marks", index),
-                                            text.clone(),
-                                            index as u64,
-                                            marks,
-                                        )
-                                        .with_search_target(search_target(index)),
-                                    )
-                                    .into_any_element(),
-                            )
-                        };
-                        v_flex()
-                            .id(SharedString::from(anchor.clone()))
-                            .gap_2()
-                            .when(index > 0, |view| view.pt_4())
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .gap_2()
-                                    .items_center()
-                                    .when_some(*seconds, |row, seconds| {
-                                        let chip = div()
-                                            .text_size(TEXT_READER)
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(color(GRAY))
-                                            .flex_shrink_0()
-                                            .whitespace_nowrap()
-                                            .child(course2md::render::fmt_ts(seconds));
-                                        row.child(if bare_timestamp {
-                                            chip.id(("reader-heading", index))
-                                                .role(Role::Heading)
-                                                .aria_label(text.clone())
-                                        } else {
-                                            chip.id(("reader-heading-chip", index))
-                                        })
-                                    })
-                                    .children(heading)
-                                    .when_some(url, |row, url| {
-                                        row.child(reveal_article(
-                                            ("reveal-seek", index).into(),
-                                            (quiet(("seek", index))
-                                                .icon(icons::play_arrow())
-                                                .label("从此处观看")
-                                                .min_h(rems(1.6))
-                                                .accessibility_label(format!("在原视频打开 {text}"))
-                                                .on_click(move |_, _, cx| cx.open_url(&url)))
-                                            .into_any_element(),
-                                            false,
-                                        ))
-                                    }),
-                            )
-                            .children(
-                                missing_by_anchor
-                                    .get(anchor.as_str())
-                                    .into_iter()
-                                    .flatten()
-                                    .map(|&frame_index| {
-                                        let frame = &self.reader_ui.frames[frame_index];
-                                        theme::accessible_text(
-                                            ("missing-body-image", frame_index),
-                                            format!(
-                                                "{}无法读取。对应正文保留在下方。",
-                                                frame_label(
-                                                    &preview.course.title,
-                                                    frame,
-                                                    frame_index
-                                                )
-                                            ),
-                                        )
-                                        .text_sm()
-                                        .text_color(color(WARNING))
-                                    }),
-                            )
-                            .into_any_element()
-                    }
-                    PreviewBlock::Paragraph { text, anchor } => paragraph(
-                        SharedString::from(anchor.clone()),
-                        text.clone(),
-                        index,
-                        highlight_runs(index),
-                        search_target(index),
-                    )
-                    .into_any_element(),
-                    PreviewBlock::Image(path) => {
-                        let frame_index = frame_index_by_path.get(path.as_path()).copied();
-                        let frame = frame_index.and_then(|i| self.reader_ui.frames.get(i));
-                        if frame_index.is_none() && !self.reader_ui.data_loading {
-                            article = article.child(measured(
-                                index,
-                                theme::accessible_text(
-                                    ("unreadable-inline-image", index),
-                                    "这张截图无法读取；对应正文仍可阅读。",
-                                )
-                                .text_sm()
-                                .text_color(color(WARNING))
-                                .into_any_element(),
-                            ));
-                            continue;
-                        }
-                        let label = frame
-                            .map(|frame| {
-                                frame_label(&preview.course.title, frame, frame_index.unwrap())
-                            })
-                            .unwrap_or_else(|| format!("{}，正文图片", preview.course.title));
-                        let aspect_ratio = frame
-                            .filter(|frame| frame.width > 0 && frame.height > 0)
-                            .map(|frame| frame.width as f32 / frame.height as f32)
-                            .unwrap_or(16. / 9.);
-                        v_flex()
-                            .w_full()
-                            .gap_2()
-                            .child(reveal_article(
-                                ("reveal-note-image", index).into(),
-                                control(("note-image", index))
-                                    .ghost()
-                                    .p_0()
-                                    .w(px((available_height * 0.32).min(224.) * aspect_ratio))
-                                    .max_w_full()
-                                    .h_auto()
-                                    .min_h(px(0.))
-                                    .border_0()
-                                    .rounded(RADIUS_SMALL)
-                                    .aspect_ratio(aspect_ratio)
-                                    .accessibility_label(format!("放大{label}"))
-                                    .tooltip("点击放大截图")
-                                    .disabled(frame_index.is_none())
-                                    .child(
-                                        img(path.clone())
-                                            .size_full()
-                                            .rounded(RADIUS_SMALL)
-                                            .object_fit(ObjectFit::Contain)
-                                            .with_fallback(|| {
-                                                theme::accessible_text(
-                                                    "failed-reader-image",
-                                                    "这张截图无法读取；对应正文仍可阅读。",
-                                                )
-                                                .into_any_element()
-                                            }),
-                                    )
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        if let Some(index) = frame_index {
-                                            this.open_reader_image(index, window, cx);
-                                        }
-                                    }))
-                                    .into_any_element(),
-                                true,
-                            ))
-                            .when_some(
-                                frame.and_then(|frame| frame.caption.as_ref()),
-                                |figure, caption| {
-                                    figure.child(
-                                        theme::accessible_text(
-                                            ("figure-caption", index),
-                                            caption.clone(),
-                                        )
-                                        .text_size(TEXT_AUX)
-                                        .font_weight(FontWeight::NORMAL)
-                                        .text_color(color(GRAY)),
-                                    )
-                                },
-                            )
-                            .into_any_element()
-                    }
-                };
-                article = article.child(measured(index, view));
             }
+            let flow = NoteFlow {
+                items: self.reader_ui.note_items.clone(),
+                focus: self.reader_ui.note_focus.clone(),
+                preview: preview.clone(),
+                frames: self.reader_ui.frames.clone(),
+                source: self.reader_source(),
+                outline,
+                frame_index_by_path,
+                missing_by_anchor,
+                matches: self.reader_ui.matches.clone(),
+                match_index: self.reader_ui.match_index,
+                find_open: self.reader_ui.find_open,
+                data_loading: self.reader_ui.data_loading,
+                item_layout,
+                note_list: self.reader_ui.note_list.clone(),
+                desktop: cx.weak_entity(),
+            };
+            div()
+                .id("note-reader")
+                .role(Role::Document)
+                .aria_label(preview.course.title.clone())
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .h_full()
+                .max_w(READER_MEASURE)
+                .child(
+                    list(
+                        self.reader_ui.note_list.clone(),
+                        move |index, window, _cx| render_note_item(&flow, index, window),
+                    )
+                    .w_full()
+                    .h_full()
+                    .py_3(),
+                )
+                // 正文滚动容器也兑现「始终显示滚动条」偏好（review4#4）
+                .child(crate::backend::vertical_scrollbar_for(&self.reader_ui.note_list))
+                .into_any_element()
         } else {
+            let mut article = v_flex()
+                .id("note-reader")
+                .role(Role::Document)
+                .aria_label(preview.course.title.clone())
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .h_full()
+                .overflow_y_scroll()
+                .track_scroll(&self.reader_scroll)
+                .gap_3()
+                .py_3()
+                .children(scrolling_title);
+            let article_scroll = self.reader_scroll.clone();
+            let reveal_article = |id: ElementId, child: AnyElement, full_width: bool| {
+                let view = crate::focus_scroll::RevealFocus::new(id, child, article_scroll.clone());
+                if full_width { view } else { view.inline() }
+            };
             if self.reader_ui.data_loading && self.reader_ui.frames.is_empty() {
                 article = article.child(
                     h_flex()
@@ -3483,9 +3862,7 @@ impl Desktop {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.select_reader_view(0, window, cx)
                                 })),
-                        ),
-                    cx,
-                ));
+                        )));
             }
             if !self.reader_ui.frames.is_empty() && gallery_indices.is_empty() {
                 article = article.child(
@@ -3565,9 +3942,9 @@ impl Desktop {
                                     .size_full()
                                     .rounded_t(RADIUS_CARD)
                                     .object_fit(ObjectFit::Contain)
-                                    .with_fallback(|| {
+                                    .with_fallback(move || {
                                         theme::accessible_text(
-                                            "failed-reader-image",
+                                            ("failed-reader-image", index),
                                             "这张截图无法读取；对应正文仍可阅读。",
                                         )
                                         .into_any_element()
@@ -3653,6 +4030,7 @@ impl Desktop {
                     .collect::<Vec<_>>();
                 // The three-line preview is a defined content slot. Full captions
                 // and transcripts remain readable in the image viewer and article.
+                // 无搜索高亮时用原生省略渲染（StyledText 不产出「…」，静默裁切像断句错误，M9）
                 card_body = card_body.child(
                     div()
                         .id(("frame-excerpt", index))
@@ -3663,19 +4041,35 @@ impl Desktop {
                         .max_h(excerpt_line_height * 3.)
                         .flex_shrink_0()
                         .whitespace_normal()
-                        .text_ellipsis()
-                        .line_clamp(3)
                         .text_size(TEXT_BODY)
                         .font_weight(FontWeight::NORMAL)
                         .line_height(excerpt_line_height)
                         .text_color(color(GRAY))
-                        .child(StyledText::new(excerpt).with_highlights(excerpt_marks)),
+                        .when(excerpt_marks.is_empty(), |view| {
+                            view.text_ellipsis()
+                                .line_clamp(3)
+                                .child(excerpt.clone())
+                        })
+                        .when(!excerpt_marks.is_empty(), |view| {
+                            view.child(StyledText::new(excerpt).with_highlights(excerpt_marks))
+                        }),
                 );
                 grid =
                     grid.child(measured(index, card.child(card_body).into_any_element()).h_full());
             }
             article = article.child(grid);
-        }
+            // 正文滚动容器也兑现「始终显示滚动条」偏好（review4#4）
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .w_full()
+                .h_full()
+                .child(article)
+                .child(crate::backend::vertical_scrollbar(&self.reader_scroll))
+                .into_any_element()
+        };
         // Wide reading opens the contents automatically. Manual choices are retained
         // across tab changes, note changes and subsequent window resizing.
         let toc_open = self.reader_ui.toc_open.unwrap_or(toc_fits_beside)
@@ -3689,7 +4083,7 @@ impl Desktop {
                 .w_full()
                 .gap(px(24.))
                 .items_stretch()
-                .child(article.h_full())
+                .child(article)
                 .child(self.reader_toc_panel(&headings, current_chapter, true, cx))
                 .into_any_element()
         } else if toc_open {
@@ -3699,7 +4093,7 @@ impl Desktop {
                 .min_h_0()
                 .w_full()
                 .h_full()
-                .child(article.h_full())
+                .child(article)
                 .child(
                     div()
                         .absolute()
@@ -3709,7 +4103,7 @@ impl Desktop {
                 )
                 .into_any_element()
         } else {
-            article.into_any_element()
+            article
         };
         let controls = if let Some(header) = fixed_header {
             v_flex()
@@ -3737,9 +4131,7 @@ impl Desktop {
         crate::motion::state_enter(
             SharedString::from(format!("reader-open:{}", preview.course.dir.display())),
             root.child(controls)
-                .child(v_flex().flex_1().min_h_0().w_full().child(body)),
-            cx,
-        )
+                .child(v_flex().flex_1().min_h_0().w_full().child(body)))
     }
     /// Contents are a reading rail; persistent selection belongs to the row
     /// surface so pointer feedback cannot erase the current chapter.
@@ -3820,14 +4212,14 @@ impl Desktop {
                                     .w_full()
                                     .min_w_0()
                                     .gap_2()
-                                    .items_baseline()
+                                    // 时间戳固定首行右栏；标题只在左列换行（M8）
+                                    .items_start()
                                     .child(
                                         div()
                                             .flex_1()
                                             .min_w_0()
-                                            .whitespace_normal()
+                                            .whitespace_nowrap()
                                             .text_ellipsis()
-                                            .line_clamp(2)
                                             .line_height(relative(1.4))
                                             .font_weight(FontWeight::SEMIBOLD)
                                             .text_color(color(if on { ACCENT_STRONG } else { INK }))
@@ -4308,8 +4700,9 @@ impl Desktop {
                                                 .size_full()
                                                 .object_fit(ObjectFit::Contain)
                                                 .with_fallback(|| {
+                                                    // 放大查看器同时只存在一个，固定 id 无碰撞
                                                     theme::accessible_text(
-                                                        "failed-reader-image",
+                                                        "failed-reader-image-enlarged",
                                                         "这张截图无法读取；对应正文仍可阅读。",
                                                     )
                                                     .into_any_element()
@@ -4536,146 +4929,51 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
     let mut data = ReaderData::default();
     let dir = &preview.course.dir;
     data.export_folder = existing_export_folder(dir, &preview.outputs);
-    let provenance = if preview.course.manifest.is_some() {
-        course2md::legacy::provenance(dir)
-    } else {
-        course2md::legacy::read(dir).map(|note| note.map(|note| note.provenance))
-    };
-    match provenance {
-        Ok(Some(provenance)) => {
-            // One indexing pass: per-image transcript and body-anchor lookups
-            // below are slice lookups instead of rescanning the blocks.
-            let resources: HashMap<&str, _> =
-                provenance
-                    .resources
-                    .iter()
-                    .fold(HashMap::new(), |mut map, resource| {
-                        map.entry(resource.reference.as_str()).or_insert(resource);
-                        map
-                    });
-            let blocks = &provenance.blocks;
-            let mut run_end = vec![blocks.len(); blocks.len() + 1];
-            let mut next_anchor: Vec<Option<String>> = vec![None; blocks.len() + 1];
-            for index in (0..blocks.len()).rev() {
-                run_end[index] = match &blocks[index] {
-                    course2md::legacy::Block::Paragraph { .. } => run_end[index + 1].max(index + 1),
-                    _ => index,
-                };
-                next_anchor[index] = match &blocks[index] {
-                    course2md::legacy::Block::Heading { .. } => {
-                        Some(format!("legacy-heading-{index}"))
-                    }
-                    course2md::legacy::Block::Paragraph { .. } => {
-                        Some(format!("legacy-paragraph-{index}"))
-                    }
-                    _ => next_anchor[index + 1].clone(),
-                };
-            }
-            let mut seconds = None;
-            let mut anchor = None;
-            for (index, block) in blocks.iter().enumerate() {
-                match block {
-                    course2md::legacy::Block::Heading { seconds: time, .. } => {
-                        seconds = *time;
-                        anchor = Some(format!("legacy-heading-{index}"));
-                    }
-                    course2md::legacy::Block::Paragraph { .. } => {
-                        anchor = Some(format!("legacy-paragraph-{index}"));
-                    }
-                    course2md::legacy::Block::Image { reference, alt } => {
-                        let resource = resources.get(reference.as_str()).copied();
-                        let path = resource.and_then(|resource| {
-                            let relative = if preview.course.manifest.is_some() {
-                                Some(resource.path.as_str())
-                            } else {
-                                resource
-                                    .original_path
-                                    .as_deref()
-                                    .and_then(|path| path.strip_prefix("original/"))
-                            }?;
-                            course2md::artifact::safe_asset_path(dir, relative).ok()
-                        });
-                        let transcript = blocks[index + 1..run_end[index + 1]]
-                            .iter()
-                            .filter_map(|block| {
-                                if let course2md::legacy::Block::Paragraph { text } = block {
-                                    Some(text.as_str())
-                                } else {
-                                    None
-                                }
-                            })
-                            .collect::<Vec<_>>()
-                            .join("\n\n");
-                        let body_anchor = anchor
-                            .clone()
-                            .or_else(|| next_anchor[index + 1].clone());
-                        data.frames.push(checked_frame(Frame {
-                            anchor: format!("legacy-image-{index}"),
-                            path,
-                            seconds,
-                            caption: (!alt.trim().is_empty()).then(|| alt.clone()),
-                            transcript,
-                            body_anchor,
-                            width: 16,
-                            height: 9,
-                        }));
-                    }
-                }
-            }
-        }
-        Ok(None) => {
-            if let Some(manifest) = &preview.course.manifest {
-                for (index, frame) in manifest.frames.iter().enumerate() {
-                    let section = preview.document.as_ref().and_then(|document| {
-                        document
-                            .sections
-                            .iter()
-                            .enumerate()
-                            .find(|(_, section)| section.image == frame.image)
-                    });
-                    data.frames.push(checked_frame(Frame {
-                        anchor: format!("frame:{index}:{}", frame.image),
-                        path: course2md::artifact::safe_asset_path(dir, &frame.image).ok(),
-                        seconds: Some(frame.t),
-                        caption: None,
-                        transcript: section
-                            .map(|(_, section)| {
-                                section
-                                    .speech
-                                    .iter()
-                                    .map(|speech| speech.text.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("\n\n")
-                            })
-                            .unwrap_or_default(),
-                        body_anchor: section
-                            .map(|(index, _)| format!("section-{index}"))
-                            .or_else(|| {
-                                nav::nearest_time(
-                                    preview.blocks.iter().enumerate().map(|(index, block)| {
-                                        (
-                                            index,
-                                            match block {
-                                                PreviewBlock::Heading { seconds, .. } => *seconds,
-                                                _ => None,
-                                            },
-                                        )
-                                    }),
-                                    frame.t,
-                                )
-                                .map(|(i, _)| block_anchor(&preview.blocks[i], i))
-                            }),
-                        width: 16,
-                        height: 9,
-                    }));
-                }
-            }
-        }
-        Err(error) => data.issues.push(format!(
-            "图片来源记录暂时无法读取：{error:#}。正文仍可阅读。"
-        )),
-    }
     if let Some(manifest) = &preview.course.manifest {
+        for (index, frame) in manifest.frames.iter().enumerate() {
+            let section = preview.document.as_ref().and_then(|document| {
+                document
+                    .sections
+                    .iter()
+                    .enumerate()
+                    .find(|(_, section)| section.image == frame.image)
+            });
+            data.frames.push(checked_frame(Frame {
+                anchor: format!("frame:{index}:{}", frame.image),
+                path: course2md::artifact::safe_asset_path(dir, &frame.image).ok(),
+                seconds: Some(frame.t),
+                caption: None,
+                transcript: section
+                    .map(|(_, section)| {
+                        section
+                            .speech
+                            .iter()
+                            .map(|speech| speech.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n")
+                    })
+                    .unwrap_or_default(),
+                body_anchor: section
+                    .map(|(index, _)| format!("section-{index}"))
+                    .or_else(|| {
+                        nav::nearest_time(
+                            preview.blocks.iter().enumerate().map(|(index, block)| {
+                                (
+                                    index,
+                                    match block {
+                                        PreviewBlock::Heading { seconds, .. } => *seconds,
+                                        _ => None,
+                                    },
+                                )
+                            }),
+                            frame.t,
+                        )
+                        .map(|(i, _)| block_anchor(&preview.blocks[i], i))
+                    }),
+                width: 16,
+                height: 9,
+            }));
+        }
         let parent = dir
             .parent()
             .filter(|parent| parent.file_name().is_some_and(|name| name == "versions"));
@@ -5130,7 +5428,7 @@ mod tests {
             stages: Default::default(),
             error: None,
             artifact: Some(course.dir.clone()),
-            outcomes: None,
+            outcomes: serde_json::Value::Null,
             unread: false,
             logs: Vec::new(),
             blocked: Vec::new(),
@@ -5270,31 +5568,333 @@ mod tests {
                 .starts_with(&old.dir)
         );
     }
+}
+
+/// Tests for the virtualized note flow: item flattening, bounded rendering and/// reading-position round trips through the persistent list state.
+#[cfg(test)]
+mod flow_tests {
+    use super::{
+        NoteItem, nav, note_block_item, note_capture_position, note_item_block, note_items,
+        note_restore_target, note_top_block,
+    };
+    use crate::notes::PreviewBlock;
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState,
+        ParentElement as _, Render, Styled as _, TestAppContext, Window, div, list, px,
+    };
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    fn blocks(count: usize) -> Vec<PreviewBlock> {
+        (0..count)
+            .map(|index| {
+                if index % 10 == 0 {
+                    PreviewBlock::Heading {
+                        text: format!("章节 {index}"),
+                        anchor: format!("h-{index}"),
+                        seconds: Some(index as f64 * 30.),
+                    }
+                } else {
+                    PreviewBlock::Paragraph {
+                        text: format!("正文段落 {index}。").repeat(8),
+                        anchor: format!("p-{index}"),
+                    }
+                }
+            })
+            .collect()
+    }
+
     #[test]
-    fn legacy_images_keep_authored_captions_and_unknown_times() {
-        let root = tempfile::tempdir().unwrap();
-        image::RgbImage::new(6, 4)
-            .save(root.path().join("slide.png"))
-            .unwrap();
-        std::fs::write(
-            root.path().join("course.md"),
-            "# 人工课程\n\n## 补充主题\n\n![手写图注](slide.png)\n\n这段说明来自人工原稿。\n",
-        )
-        .unwrap();
-        let scan = crate::notes::scan_library(root.path()).unwrap();
-        let preview = crate::notes::read_preview(scan.courses[0].clone()).unwrap();
-        let data = load_reader_data(&preview);
-        assert_eq!(data.frames.len(), 1);
-        assert_eq!(data.frames[0].seconds, None);
-        assert_eq!(data.frames[0].caption.as_deref(), Some("手写图注"));
-        assert!(data.frames[0].transcript.contains("人工原稿"));
-        assert!(data.frames[0].path.is_some());
-        assert!(
-            data.frames[0]
-                .body_anchor
-                .as_deref()
-                .unwrap()
-                .starts_with("legacy-")
+    fn note_items_flatten_title_summary_and_blocks_in_order() {
+        let mut note = vec![
+            PreviewBlock::Heading {
+                text: "摘要".into(),
+                anchor: "summary".into(),
+                seconds: None,
+            },
+            PreviewBlock::Paragraph {
+                text: "总览".into(),
+                anchor: "summary-tldr".into(),
+            },
+            PreviewBlock::Paragraph {
+                text: "要点".into(),
+                anchor: "key-point-0".into(),
+            },
+        ];
+        note.extend(blocks(6));
+        let items = note_items(&note, true);
+        assert_eq!(items.len(), 1 + 3 + 6);
+        assert_eq!(items[0], NoteItem::Title);
+        assert_eq!(items[1], NoteItem::SummaryLabel(Some(0)));
+        assert_eq!(items[2], NoteItem::Block(1));
+        assert_eq!(items[3], NoteItem::Block(2));
+        assert_eq!(items[4], NoteItem::Block(3));
+        assert_eq!(note_block_item(&items, 0), Some(1));
+        assert_eq!(note_block_item(&items, 8), Some(items.len() - 1));
+        assert_eq!(note_top_block(&items, 0), Some(0));
+        assert_eq!(note_top_block(&items, 2), Some(1));
+
+        // A summary without its heading still leads with an unindexed label.
+        let mut unheaded = vec![PreviewBlock::Paragraph {
+            text: "总览".into(),
+            anchor: "summary-tldr".into(),
+        }];
+        unheaded.extend(blocks(3));
+        let items = note_items(&unheaded, false);
+        assert_eq!(items[0], NoteItem::SummaryLabel(None));
+        assert_eq!(note_top_block(&items, 0), Some(0));
+        assert_eq!(note_item_block(items[0]), None);
+
+        assert!(note_items(&[], false).is_empty());
+        assert_eq!(note_items(&[], true), [NoteItem::Title]);
+    }
+
+    #[test]
+    fn note_position_round_trips_through_the_list_state() {
+        let note = blocks(200);
+        let items = note_items(&note, false);
+        let list = ListState::new(items.len(), ListAlignment::Top, px(1000.));
+        let heights: Vec<f32> = (0..items.len())
+            .map(|i| 40. + (i % 7) as f32 * 30.)
+            .collect();
+
+        // The document top is a boundary, not the first paragraph.
+        assert_eq!(
+            note_capture_position(&items, &note, &list, &nav::ReadingLayout::default()),
+            Some(crate::workspace::ReadingPosition::default())
         );
+        assert_eq!(
+            note_restore_target(
+                &items,
+                &note,
+                &crate::workspace::ReadingPosition::default(),
+                None,
+                &nav::ReadingLayout::default(),
+            ),
+            None
+        );
+
+        // Scroll into the note; the rendered window records its measurements.
+        list.scroll_to(ListOffset {
+            item_ix: 53,
+            offset_in_item: px(13.),
+        });
+        let mut layout = nav::ReadingLayout::default();
+        for (index, height) in heights.iter().enumerate().take(60).skip(50) {
+            layout.record(index, 0., *height);
+        }
+        let position = note_capture_position(&items, &note, &list, &layout).unwrap();
+        assert_eq!(position.paragraph.as_deref(), Some("p-53"));
+        assert_eq!(position.seconds, Some(1500.));
+        assert_eq!(position.within, -13.);
+        assert_eq!(position.fraction, Some(13. / heights[53]));
+        assert!(position.offset < 0.);
+
+        // Scroll away: the next frame re-records only the new window, so the
+        // restore first lands on the item, then refines once it is measured.
+        list.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        let mut layout = nav::ReadingLayout::default();
+        for (index, height) in heights.iter().enumerate().take(10) {
+            layout.record(index, 0., *height);
+        }
+        assert_eq!(
+            note_restore_target(&items, &note, &position, None, &layout),
+            Some((53, None))
+        );
+        list.scroll_to(ListOffset {
+            item_ix: 53,
+            offset_in_item: px((-position.within).max(0.)),
+        });
+        for (index, height) in heights.iter().enumerate().take(64).skip(50) {
+            layout.record(index, 0., *height);
+        }
+        assert_eq!(
+            note_restore_target(&items, &note, &position, None, &layout),
+            Some((53, Some(13.)))
+        );
+        list.scroll_to(ListOffset {
+            item_ix: 53,
+            offset_in_item: px(13.),
+        });
+        let restored = note_capture_position(&items, &note, &list, &layout).unwrap();
+        assert_eq!(restored, position);
+
+        // A find match resolves to its recorded line, one line of context up.
+        layout.record_search_line(53, 40, 100., 20.);
+        assert_eq!(
+            note_restore_target(&items, &note, &position, Some((53, 40)), &layout),
+            Some((53, Some(80.)))
+        );
+    }
+
+    /// The same list wiring the reader uses: variable-height items recording
+    /// their viewport-relative geometry during prepaint.
+    struct NoteListHarness {
+        list: ListState,
+        layout: Rc<RefCell<nav::ReadingLayout>>,
+        renders: Rc<Cell<usize>>,
+        blocks: Vec<PreviewBlock>,
+        items: Rc<Vec<NoteItem>>,
+    }
+
+    impl NoteListHarness {
+        fn new(count: usize) -> Self {
+            let blocks = blocks(count);
+            let items = note_items(&blocks, false);
+            Self {
+                list: ListState::new(items.len(), ListAlignment::Top, px(1000.)),
+                layout: Rc::default(),
+                renders: Rc::new(Cell::new(0)),
+                blocks,
+                items: Rc::new(items),
+            }
+        }
+    }
+
+    impl Render for NoteListHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            // Like the app, each frame's records start empty and the visible
+            // window re-records during prepaint.
+            self.layout.replace(nav::ReadingLayout::default());
+            let layout = self.layout.clone();
+            let renders = self.renders.clone();
+            let items = self.items.clone();
+            div().size_full().child(
+                list(self.list.clone(), move |index, _window, _cx| {
+                    renders.set(renders.get() + 1);
+                    let positions = layout.clone();
+                    let items = items.clone();
+                    div()
+                        .w_full()
+                        .on_children_prepainted(move |bounds, _, _| {
+                            let Some(bounds) = bounds.first() else {
+                                return;
+                            };
+                            if let Some(block) = note_item_block(items[index]) {
+                                positions.borrow_mut().record(
+                                    block,
+                                    f32::from(bounds.top()),
+                                    f32::from(bounds.size.height),
+                                );
+                            }
+                        })
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(40. + (index % 7) as f32 * 30.))
+                                .debug_selector(move || format!("note-item-{index}")),
+                        )
+                        .into_any_element()
+                })
+                .w_full()
+                .h_full(),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn note_list_builds_only_the_visible_window_and_reaches_the_end(cx: &mut TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, _| NoteListHarness::new(500));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let first = cx.update(|_, cx| view.read(cx).renders.get());
+        assert!(
+            first > 0 && first < 60,
+            "first screen built {first} of 500 items"
+        );
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.list.scroll_to_end();
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        assert!(
+            cx.debug_bounds("note-item-499").is_some(),
+            "the last block renders after jumping to the end"
+        );
+        let total = cx.update(|_, cx| view.read(cx).renders.get());
+        assert!(
+            total < 160,
+            "500 blocks built {total} elements across two frames"
+        );
+
+        // Reading position round trip with records produced by real prepaint.
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.list.scroll_to(ListOffset {
+                    item_ix: 250,
+                    offset_in_item: px(17.),
+                });
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        let position = cx.update(|_, cx| view.read(cx).capture());
+        assert_eq!(position.paragraph.as_deref(), Some("h-250"));
+        assert_eq!(position.within, -17.);
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.list.scroll_to(ListOffset {
+                    item_ix: 0,
+                    offset_in_item: px(0.),
+                });
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        // First pass lands on the unmeasured item; second pass refines it.
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| view.restore_rough(&position));
+            window.draw(cx).clear(cx);
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |view, _| view.restore_precise(&position));
+            window.draw(cx).clear(cx);
+        });
+        cx.update(|_, cx| assert_eq!(view.read(cx).capture(), position));
+    }
+
+    impl NoteListHarness {
+        fn capture(&self) -> crate::workspace::ReadingPosition {
+            note_capture_position(&self.items, &self.blocks, &self.list, &self.layout.borrow())
+                .unwrap()
+        }
+
+        fn restore_rough(&mut self, position: &crate::workspace::ReadingPosition) {
+            let (item_ix, offset) = note_restore_target(
+                &self.items,
+                &self.blocks,
+                position,
+                None,
+                &self.layout.borrow(),
+            )
+            .unwrap();
+            assert_eq!(offset, None, "the scrolled-away item is unmeasured");
+            self.list.scroll_to(ListOffset {
+                item_ix,
+                offset_in_item: px((-position.within).max(0.)),
+            });
+        }
+
+        fn restore_precise(&mut self, position: &crate::workspace::ReadingPosition) {
+            let (item_ix, offset) = note_restore_target(
+                &self.items,
+                &self.blocks,
+                position,
+                None,
+                &self.layout.borrow(),
+            )
+            .unwrap();
+            let offset = offset.expect("the landed item is measured by now");
+            self.list.scroll_to(ListOffset {
+                item_ix,
+                offset_in_item: px(offset.max(0.)),
+            });
+        }
     }
 }

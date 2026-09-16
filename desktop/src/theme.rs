@@ -54,8 +54,6 @@ tokens!(
 );
 const COLOR_COUNT: usize = ALL_TOKENS.len();
 
-pub const SIDEBAR: ColorToken = INSET;
-pub const COVER: ColorToken = INSET;
 pub const MUTED: ColorToken = GRAY;
 pub const LINE: ColorToken = HAIRLINE;
 pub const BLUE: ColorToken = ACCENT_STRONG;
@@ -150,9 +148,11 @@ pub fn apply_preference(preference: &ThemePreferences, window: &mut Window, cx: 
         let t = if cx.reduce_motion() {
             1.
         } else {
-            (now.duration_since(paint.started).as_secs_f32() / 0.280).min(1.)
+            (now.duration_since(paint.started).as_secs_f32()
+                / (crate::motion::PALETTE_MS as f32 / 1000.))
+                .min(1.)
         };
-        let eased = 1. - (1. - t).powi(3);
+        let eased = crate::motion::ease_out(t);
         let next = std::array::from_fn(|i| blend(paint.from[i], target[i], eased));
         let changed = next != paint.current;
         paint.current = next;
@@ -236,6 +236,27 @@ pub const TEXT_TITLE: Rems = rems(1.286);
 pub const TEXT_READER: Rems = rems(1.143);
 /// Main page headline.
 pub const TEXT_DISPLAY: Rems = rems(2.);
+
+/// 页标题共享槽位：有意义图标 + 强调标签（SKILL.md 主 UI 标题约定）。
+pub fn page_heading(
+    id: impl Into<gpui::ElementId>,
+    icon: impl gpui::IntoElement,
+    title: impl Into<gpui::SharedString>,
+) -> gpui::Div {
+    use gpui::{prelude::*, *};
+    div()
+        .flex()
+        .items_center()
+        .min_w_0()
+        .gap(rems(10. / 14.))
+        .child(icon)
+        .child(
+            accessible_text(id, title.into())
+                .role(Role::Heading)
+                .text_size(TEXT_DISPLAY)
+                .font_weight(FontWeight::SEMIBOLD),
+        )
+}
 
 /* ---------- 中性阴影 ---------- */
 fn shadow_color(alpha: f32) -> gpui::Hsla {
@@ -409,11 +430,7 @@ pub fn init(cx: &mut App) {
     sync_component_theme(false, cx);
 }
 
-/// Compatibility wrapper for source confirmations.
-pub fn reveal(view: gpui::Div, id: impl Into<gpui::ElementId>, cx: &App) -> gpui::AnyElement {
-    crate::motion::enter(id, view, cx)
-}
-
+/// 展开/收起内容的共享动效入口（经 theme 导出供页面统一使用）
 pub fn disclosure(
     id: impl Into<gpui::ElementId>,
     open: bool,
@@ -646,32 +663,7 @@ pub fn quiet(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
 pub fn input_action(id: impl Into<gpui::ElementId>) -> gpui_component::button::Button {
     use gpui::Styled;
     let size = rems(28. / 14.);
-    quiet(id)
-        .h(size)
-        .min_h(size)
-        .w(size)
-        .min_w(size)
-        .px_0()
-}
-
-/// Inset note for supporting information.
-pub fn banner_note(
-    id: impl Into<gpui::ElementId>,
-    value: impl Into<gpui::SharedString>,
-) -> gpui::Stateful<gpui::Div> {
-    use gpui::*;
-    let value = value.into();
-    div()
-        .id(id)
-        .role(gpui::Role::Label)
-        .aria_label(value.clone())
-        .w_full()
-        .p(px(12.))
-        .rounded(RADIUS_CARD)
-        .bg(color(HOVER_WARM))
-        .text_size(TEXT_AUX)
-        .text_color(color(GRAY))
-        .child(value)
+    quiet(id).h(size).min_h(size).w(size).min_w(size).px_0()
 }
 
 /// Status badge kinds; text always pairs with its tinted background.
@@ -688,13 +680,14 @@ pub fn badge(kind: BadgeKind) -> gpui::Div {
     use gpui::{Styled, div, prelude::*};
     use gpui_component::Sizable;
     let (text, bg, icon) = match kind {
-        BadgeKind::Success => (SUCCESS, SUCCESS_BG, crate::icons::check_circle()),
-        BadgeKind::Warning => (WARNING, WARNING_BG, crate::icons::warning()),
-        BadgeKind::Danger => (DANGER, DANGER_BG, crate::icons::error()),
-        BadgeKind::Progress => (BADGE_PROGRESS, BADGE_PROGRESS_BG, crate::icons::schedule()),
-        BadgeKind::Neutral => (GRAY, INSET, crate::icons::info()),
+        BadgeKind::Success => (SUCCESS, SUCCESS_BG, Some(crate::icons::check_circle())),
+        BadgeKind::Warning => (WARNING, WARNING_BG, Some(crate::icons::warning())),
+        BadgeKind::Danger => (DANGER, DANGER_BG, Some(crate::icons::error())),
+        BadgeKind::Progress => (BADGE_PROGRESS, BADGE_PROGRESS_BG, Some(crate::icons::schedule())),
+        // Neutral 为纯文字片：ⓘ 专属说明文字（review2-settings#3）
+        BadgeKind::Neutral => (GRAY, INSET, None),
     };
-    div()
+    let mut view = div()
         .flex()
         .items_center()
         .flex_shrink_0()
@@ -707,8 +700,11 @@ pub fn badge(kind: BadgeKind) -> gpui::Div {
         .text_color(color(text))
         .text_size(TEXT_AUX)
         .font_weight(gpui::FontWeight::MEDIUM)
-        .whitespace_nowrap()
-        .child(icon.small())
+        .whitespace_nowrap();
+    if let Some(icon) = icon {
+        view = view.child(icon.small());
+    }
+    view
 }
 
 /// Preference switches share the accent and scale their geometry with UI text.

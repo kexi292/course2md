@@ -11,7 +11,6 @@ use crate::preferences::{
 };
 use base64::Engine as _;
 use serde_json::{Value, json};
-use std::io::Read;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -137,20 +136,16 @@ struct HttpTransport;
 
 impl Transport for HttpTransport {
     fn send(&self, request: &HttpRequest) -> Result<HttpResponse, TransportFailure> {
-        let agent = ureq::AgentBuilder::new()
-            .redirects(0)
-            .timeout_connect(Duration::from_secs(10))
-            .timeout_read(Duration::from_secs(30))
-            .timeout_write(Duration::from_secs(15))
-            .timeout(Duration::from_secs(45))
-            .build();
-        let mut call = agent
+        let agent = crate::bounded_http::json_agent(
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+            Some(Duration::from_secs(15)),
+            Duration::from_secs(45),
+        );
+        let call = agent
             .post(&request.endpoint)
-            .set("Content-Type", &request.content_type)
-            .set("Accept", "application/json");
-        if let Some(secret) = &request.authorization {
-            call = call.set("Authorization", &format!("Bearer {}", secret.expose()));
-        }
+            .set("Content-Type", &request.content_type);
+        let call = crate::bounded_http::json_call(call, request.authorization.as_ref());
         // A nonempty POST body is non-retryable in ureq 2. Each test creates a fresh agent,
         // so a recycled connection cannot trigger a hidden resend either.
         let response = match call.send_bytes(&request.body) {
@@ -159,15 +154,14 @@ impl Transport for HttpTransport {
             Err(ureq::Error::Transport(_)) => return Err(TransportFailure::Unknown),
         };
         let status = response.status();
-        let mut body = Vec::new();
-        response
-            .into_reader()
-            .take(MAX_RESPONSE + 1)
-            .read_to_end(&mut body)
-            .map_err(|_| TransportFailure::Unknown)?;
-        if body.len() as u64 > MAX_RESPONSE {
-            return Err(TransportFailure::ResponseTooLarge(status));
-        }
+        let body = crate::bounded_http::read_bounded(response, MAX_RESPONSE).map_err(|error| {
+            match error {
+                crate::bounded_http::BoundedReadError::TooLarge => {
+                    TransportFailure::ResponseTooLarge(status)
+                }
+                crate::bounded_http::BoundedReadError::Network(_) => TransportFailure::Unknown,
+            }
+        })?;
         Ok(HttpResponse { status, body })
     }
 }

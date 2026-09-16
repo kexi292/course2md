@@ -10,6 +10,9 @@ use crate::timeline::TranscriptEvent;
 use anyhow::Result;
 
 use std::path::Path;
+
+/// Intel NPU 设备节点（Linux accel 子系统）。doctor / wizard / 默认后端提示共用。
+pub const NPU_DEVICE_PATH: &str = "/dev/accel/accel0";
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -44,6 +47,8 @@ except ImportError as e:
 model_arg = sys.argv[1] if len(sys.argv) > 1 else "dseditor/Qwen3-ASR-1.7B-INT8_OpenVINO"
 port = int(sys.argv[2])  # Rust 侧永远显式传参（free_port 动态分配），不留默认端口
 device = sys.argv[3] if len(sys.argv) > 3 else "NPU"
+# 会话令牌：本机任意进程不应能中断转写或占用推理（127.0.0.1 不等于可信）
+token = sys.argv[4] if len(sys.argv) > 4 else ""
 
 model_path = model_arg
 if not os.path.isdir(model_path):
@@ -94,6 +99,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_POST(self):
+        if token and self.headers.get("X-Auth-Token") != token:
+            self.send_response(403)
+            self.end_headers()
+            return
         if self.path in ("/shutdown", "/v1/shutdown", "/exit"):
             self.send_response(200)
             self.end_headers()
@@ -168,7 +177,7 @@ pub fn run_npu(
         return Ok(vec![]);
     }
 
-    let (tmp, mut child, stderr_tail, base) = start_model_worker(model_id)?;
+    let (tmp, mut child, stderr_tail, base, token) = start_model_worker(model_id)?;
     let client = ureq::AgentBuilder::new().timeout(NPU_HTTP_TIMEOUT).build();
 
     let r = crate::asr::run_chunks(wav, &segs, cp, tmp.path(), "npu asr", |_i, _seg, chunk| {
@@ -177,6 +186,7 @@ pub fn run_npu(
         });
         let resp = client
             .post(&format!("{base}/audio/transcriptions"))
+            .set("X-Auth-Token", &token)
             .send_json(req_body)
             .map_err(|e| anyhow::anyhow!("NPU 转写请求失败，请检查网络和服务配置 / Request failed; check your connection and service settings: {e}"))?;
         let v: serde_json::Value = resp.into_json().map_err(|e| {
@@ -190,7 +200,7 @@ pub fn run_npu(
         Ok((!sanitized.is_empty()).then_some(sanitized))
     });
 
-    stop_model_worker(&mut child, &base);
+    stop_model_worker(&mut child, &base, &token);
 
     let events =
         r.map_err(|e| stderr_tail.attach(e, "NPU 识别错误详情 / NPU transcription error details"))?;
@@ -209,6 +219,7 @@ fn start_model_worker(
     crate::runtime::ManagedChild,
     crate::runtime::StderrTail,
     String,
+    String,
 )> {
     let t0 = Instant::now();
     let tmp = crate::runtime::TempWorkDir::new("npu")?;
@@ -216,9 +227,13 @@ fn start_model_worker(
     crate::checkpoint::atomic_write(&script_path, NPU_WORKER_SCRIPT.as_bytes())?;
 
     let port = crate::runtime::free_port()?;
+    // 每次会话一个不可猜的令牌：worker 的 127.0.0.1 服务不应被本机其他进程驱使
+    let token = crate::execution::digest(
+        format!("npu-session-token-{}-{port}-{t0:?}", std::process::id()).as_bytes(),
+    );
     tracing::info!(model = %model_id, port, "starting npu worker");
     crate::progress::stage("model-load", "start");
-    let mut child = spawn_npu_worker(&script_path, model_id, port)?;
+    let mut child = spawn_npu_worker(&script_path, model_id, port, &token)?;
     let stderr_tail = child
         .take_stderr()
         .map(|s| crate::runtime::drain_stderr(s, "npu_worker"))
@@ -231,6 +246,7 @@ fn start_model_worker(
         NPU_READY_TIMEOUT,
         &mut child,
         Some("\"status\":\"ok\""),
+        Some(&crate::dispatch::check_control),
     ) {
         return Err(e.context(format!(
             "Intel NPU 服务启动失败/超时（首次模型编译可能需要更多时间） / Intel NPU service failed to start or timed out (the first model compilation may take longer); stderr tail:\n{}",
@@ -243,16 +259,17 @@ fn start_model_worker(
     );
 
     crate::progress::stage("model-load", "done");
-    Ok((tmp, child, stderr_tail, base))
+    Ok((tmp, child, stderr_tail, base, token))
 }
 
-fn stop_model_worker(child: &mut crate::runtime::ManagedChild, base: &str) {
+fn stop_model_worker(child: &mut crate::runtime::ManagedChild, base: &str, token: &str) {
     // 优雅关闭：POST /shutdown → try_wait 轮询 ~2s → 未退再 SIGTERM 进程组
     // （避免 uv 衍生的孙子进程残留）→ 短等 → 仍未退由 ManagedChild Drop 兜底。
     let client = ureq::AgentBuilder::new().timeout(NPU_HTTP_TIMEOUT).build();
     let _ = client
         .post(&format!("{base}/shutdown"))
         .timeout(SHUTDOWN_TIMEOUT)
+        .set("X-Auth-Token", token)
         .send_json(serde_json::json!({}));
     if !wait_exit(child, SHUTDOWN_WAIT) {
         #[cfg(unix)]
@@ -268,8 +285,8 @@ fn stop_model_worker(child: &mut crate::runtime::ManagedChild, base: &str) {
 
 /// Prepare the exact NPU model through the normal worker; no media is sent.
 pub fn prepare_npu_model(model_id: &str) -> Result<()> {
-    let (_temporary, mut child, _stderr, base) = start_model_worker(model_id)?;
-    stop_model_worker(&mut child, &base);
+    let (_temporary, mut child, _stderr, base, token) = start_model_worker(model_id)?;
+    stop_model_worker(&mut child, &base, &token);
     Ok(())
 }
 
@@ -278,7 +295,12 @@ fn wait_exit(child: &mut crate::runtime::ManagedChild, timeout: Duration) -> boo
     child.wait_within(timeout).is_ok()
 }
 
-fn spawn_npu_worker(script: &Path, model: &str, port: u16) -> Result<crate::runtime::ManagedChild> {
+fn spawn_npu_worker(
+    script: &Path,
+    model: &str,
+    port: u16,
+    token: &str,
+) -> Result<crate::runtime::ManagedChild> {
     // 优先使用 uv（自动处理隔离环境与依赖），若无则回退系统 python3
     let mut cmd = if crate::runtime::which("uv").is_some() {
         let mut c = Command::new("uv");
@@ -310,6 +332,7 @@ fn spawn_npu_worker(script: &Path, model: &str, port: u16) -> Result<crate::runt
         .arg(model)
         .arg(port.to_string())
         .arg("NPU")
+        .arg(token)
         .stdout(Stdio::null())
         // stderr 不能 inherit：脚本里全是 print，会插在进度条重绘中间，
         // 破坏 indicatif 的原地更新（同 issue #4）。piped + 后台 drain。

@@ -57,8 +57,8 @@ stops if a patch no longer applies or finds unrecognized source modifications.
 Validation:
 
 ```sh
-python3 -m unittest discover -s desktop/scripts -p test_sources.py
-python3 desktop/scripts/sources.py --locked
+uv run python -m unittest discover -s desktop/scripts -p test_sources.py
+uv run python desktop/scripts/sources.py --locked
 cargo check --manifest-path desktop/Cargo.toml
 ```
 

@@ -19,6 +19,16 @@ pub fn is_first_run(opts_provider_is_none: bool, file: &crate::settings::ConfigF
 }
 
 /// 满足首次运行条件时执行向导并返回写盘后的新配置；否则原样返回。
+/// 用户选择「退出，稍后下载」：向导正常结束，不带错误码。由 main 识别并干净退出。
+#[derive(Debug)]
+pub struct ExitWizard;
+impl std::fmt::Display for ExitWizard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("已退出首次使用向导 / Exited the first-run wizard")
+    }
+}
+impl std::error::Error for ExitWizard {}
+
 pub fn maybe_run(
     opts: &crate::cli::RunOpts,
     file: &crate::settings::ConfigFile,
@@ -125,7 +135,7 @@ fn run_wizard(
                             println!(
                                 "稍后下载模型，再重新运行视频命令： / Download the model, then rerun your video command: course2md models download"
                             );
-                            std::process::exit(0);
+                            return Err(ExitWizard.into());
                         }
                     }
                 }
@@ -165,7 +175,7 @@ fn pick_local_provider() -> Result<LocalPick> {
     if crate::runtime::which("llama-server").is_some() {
         cands.push(AsrProvider::Gpu);
     }
-    if std::path::Path::new("/dev/accel/accel0").exists() {
+    if std::path::Path::new(crate::npu::NPU_DEVICE_PATH).exists() {
         cands.push(AsrProvider::Npu);
     }
     if crate::runtime::which("llama-server").is_some() {
@@ -230,11 +240,12 @@ fn provider_label(p: AsrProvider) -> &'static str {
     }
 }
 
-/// 云端分支：base_url / api_key / model 三项，缺省值与 settings::AsrApi 默认对齐。
+/// 云端分支：base_url / api_key / model 三项，缺省值直接取自 settings::AsrApi::default()。
 fn configure_cloud(cfg: &mut crate::settings::ConfigFile) -> Result<()> {
+    let defaults = crate::settings::AsrApi::default();
     cfg.asr_api.base_url = dialoguer::Input::new()
         .with_prompt("服务地址 / Base URL (OpenAI-compatible)")
-        .default("https://openrouter.ai/api/v1".to_string())
+        .default(defaults.base_url)
         .interact_text()?;
     cfg.asr_api.api_key = dialoguer::Password::new()
         .with_prompt("API Key（输入隐藏；留空使用环境变量） / API key (hidden; leave blank to use COURSE2MD_ASR_API_KEY)")
@@ -242,7 +253,7 @@ fn configure_cloud(cfg: &mut crate::settings::ConfigFile) -> Result<()> {
         .interact()?;
     cfg.asr_api.model = dialoguer::Input::new()
         .with_prompt("模型名 / Model name")
-        .default("qwen/qwen3-asr-flash-2026-02-10".to_string())
+        .default(defaults.model)
         .interact_text()?;
     cfg.asr_api.base_url = cfg.asr_api.base_url.trim().to_string();
     cfg.asr_api.model = cfg.asr_api.model.trim().to_string();

@@ -164,7 +164,7 @@ fn palette_choice(palette: PaletteId, selected: bool, amount: f32) -> gpui_base:
             if selected { "，已选择" } else { "" }
         ))
         .when(cfg!(test), |card| {
-            card.debug_selector(move || format!("palette-card-{}", palette as usize).into())
+            card.debug_selector(move || format!("palette-card-{}", palette as usize))
         })
         .child(
             v_flex()
@@ -191,7 +191,7 @@ fn palette_choice(palette: PaletteId, selected: bool, amount: f32) -> gpui_base:
                                 .text_color(color(INK))
                                 .when(cfg!(test), |label| {
                                     label.debug_selector(move || {
-                                        format!("palette-label-{}", palette as usize).into()
+                                        format!("palette-label-{}", palette as usize)
                                     })
                                 })
                                 .child(palette.name()),
@@ -281,7 +281,8 @@ impl Desktop {
             cx,
         );
         let available_height = (f32::from(window.viewport_size().height)
-            - f32::from(task_dialog_top(window)) - PICKER_GUTTER
+            - f32::from(task_dialog_top(window))
+            - PICKER_GUTTER
             - PICKER_PADDING * 2.
             - PICKER_BORDER * 2.
             - f32::from(window.rem_size()) * 3.
@@ -339,8 +340,14 @@ impl Desktop {
         });
         window.open_dialog(cx, move |dialog, window, _| {
             dialog
-                .title(crate::settings_ui::settings_value("palette-dialog-title", if dark { "深色主题" } else { "浅色主题" })
-                    .text_size(TEXT_TITLE).font_weight(FontWeight::SEMIBOLD))
+                .title(
+                    crate::settings_ui::settings_value(
+                        "palette-dialog-title",
+                        if dark { "深色主题" } else { "浅色主题" },
+                    )
+                    .text_size(TEXT_TITLE)
+                    .font_weight(FontWeight::SEMIBOLD),
+                )
                 .w(px(picker_width(window)))
                 .p(px(PICKER_PADDING))
                 .margin_top(task_dialog_top(window))
@@ -451,7 +458,7 @@ impl Desktop {
             .w_full()
             .min_w_0()
             .gap(px(24.))
-            .child(settings_row("appearance-mode-row", "外观模式", "", modes))
+            .child(settings_row("appearance-mode-row", icons::palette(), "外观模式", "", modes))
             .child(
                 v_flex()
                     .w_full()

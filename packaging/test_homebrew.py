@@ -24,9 +24,6 @@ class HomebrewChannelTests(unittest.TestCase):
                 self.assertEqual({path: path.read_bytes() for path in stable}, original)
                 self.assertEqual([p.name for p in paths], ['course2md-alpha.rb', 'course2md-gui@alpha.rb'])
                 formula, cask = [p.read_text() for p in paths]
-                alias = tap / 'Aliases/course2md@alpha'
-                self.assertTrue(alias.is_symlink())
-                self.assertEqual(alias.resolve(), paths[0].resolve())
                 self.assertIn('conflicts_with cask: ["course2md-gui",', cask)
                 self.assertIn('cask "course2md-gui@alpha"', cask)
                 self.assertNotIn('v1.7.0/', formula)
@@ -58,22 +55,6 @@ class HomebrewChannelTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     module.render(directory, version, lambda _: self.fail('must not download'))
             self.assertEqual(list(Path(directory).iterdir()), [])
-
-    def test_legacy_formula_is_migrated_only_after_assets_are_verified(self):
-        with tempfile.TemporaryDirectory() as directory:
-            tap = Path(directory)
-            legacy = tap / 'Formula/course2md@alpha.rb'
-            legacy.parent.mkdir()
-            legacy.write_text('legacy formula')
-            def missing_asset(_):
-                raise OSError('asset is missing')
-            with self.assertRaises(OSError):
-                module.render(tap, '2.0.0-alpha.1', missing_asset)
-            self.assertEqual(legacy.read_text(), 'legacy formula')
-            self.assertFalse((tap / 'Aliases').exists())
-            paths = module.render(tap, '2.0.0-alpha.1', self.digest)
-            self.assertFalse(legacy.exists())
-            self.assertEqual((tap / 'Aliases/course2md@alpha').resolve(), paths[0].resolve())
 
 
 if __name__ == '__main__':

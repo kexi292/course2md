@@ -7,7 +7,7 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, SyncSender},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -169,8 +169,14 @@ impl Job {
                 }
                 thread::sleep(Duration::from_millis(40));
             };
+            // 有界排空：子进程已死则管道必将 EOF，但卡住的 reader 不得把 Exit 永远挡在
+            // 门外（否则 job 永远存在、后续任务全部排队）。读不到的剩余输出允许丢失。
+            let drain_deadline = Instant::now() + Duration::from_secs(3);
             for reader in readers {
-                let _ = reader.join();
+                while !reader.is_finished() && Instant::now() < drain_deadline {
+                    thread::sleep(Duration::from_millis(20));
+                }
+                // 仍未完成的 reader：进程已死，线程会随管道 EOF 自行结束
             }
             let _ = tx.send(Event::Exit {
                 success,
@@ -335,6 +341,15 @@ pub fn tool_path() -> std::ffi::OsString {
     }
     std::env::join_paths(dirs).unwrap_or_default()
 }
+/// Presence of a llama.cpp runtime is independent of `--list-devices` succeeding.
+/// That flag can fail on CPU-only builds or older binaries that are still installed.
+pub(crate) fn llama_binary_on_path(path: &std::ffi::OsStr) -> bool {
+    ["llama-server", "llama-cli"].iter().any(|name| {
+        let file = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        std::env::split_paths(path).any(|dir| dir.join(&file).is_file())
+    })
+}
+
 pub fn resolve_cli() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("COURSE2MD_BIN") {
         let path = PathBuf::from(path);
@@ -373,30 +388,41 @@ pub struct Environment {
 impl Environment {
     pub fn detect() -> Self {
         let cli = resolve_cli().ok();
+        // (字段名, 命令, 参数) 与回填写在一起：数组重排不会造成静默错配
         let checks = std::thread::scope(|scope| {
-            let commands = [
+            let commands: Vec<(&'static str, &Path, &'static str)> = vec![
                 (
+                    "engine",
                     cli.as_deref().unwrap_or(Path::new("course2md")),
                     "--version",
                 ),
-                (Path::new("ffmpeg"), "-version"),
-                (Path::new("ffprobe"), "-version"),
-                (Path::new("yt-dlp"), "--version"),
-                (Path::new("llama-server"), "--list-devices"),
+                ("ffmpeg", Path::new("ffmpeg"), "-version"),
+                ("ffprobe", Path::new("ffprobe"), "-version"),
+                ("ytdlp", Path::new("yt-dlp"), "--version"),
+                ("llama-devices", Path::new("llama-server"), "--list-devices"),
             ];
-            commands
-                .map(|(bin, arg)| scope.spawn(move || probe(bin, &[arg])))
-                .map(|task| task.join().unwrap_or(None))
+            let handles: Vec<_> = commands
+                .into_iter()
+                .map(|(name, bin, arg)| {
+                    // GPU 首次枚举可能触发驱动初始化（实测偶发 17s），给足与引擎一致的余量
+                    let timeout = if name == "llama-devices" {
+                        Duration::from_secs(20)
+                    } else {
+                        Duration::from_secs(5)
+                    };
+                    (name, scope.spawn(move || probe(bin, &[arg], timeout)))
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|(name, task)| task.join().unwrap_or(None).map(|out| (name, out)))
+                .collect::<std::collections::BTreeMap<_, _>>()
         });
-        let gpu = checks[4].as_deref().and_then(|output| {
+        let llama = llama_binary_on_path(&tool_path());
+        let gpu = checks.get("llama-devices").and_then(|output| {
             output.lines().find_map(|line| {
                 let (id, description) = line.trim().split_once(':')?;
-                (id.starts_with("MTL")
-                    || id.starts_with("CUDA")
-                    || id.starts_with("Vulkan")
-                    || id.starts_with("SYCL")
-                    || id.starts_with("ROCm"))
-                .then(|| {
+                course2md::asr::is_gpu_device_id(id).then(|| {
                     description
                         .split(" (")
                         .next()
@@ -420,22 +446,22 @@ impl Environment {
                 .is_ok_and(|vendor| vendor.trim() == "0x8086")
         } else if cfg!(target_os = "windows") {
             probe(Path::new("powershell.exe"), &["-NoProfile", "-NonInteractive", "-Command",
-                "Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match 'Intel.*(AI Boost|NPU)' -and $_.Status -eq 'OK' } | Select-Object -ExpandProperty Name"])
+                "Get-CimInstance Win32_PnPEntity | Where-Object { $_.Name -match 'Intel.*(AI Boost|NPU)' -and $_.Status -eq 'OK' } | Select-Object -ExpandProperty Name"], Duration::from_secs(10))
                 .is_some_and(|name| !name.trim().is_empty())
         } else {
             false
         };
         let npu_runtime = ["uv", "python3", "python"].iter().any(|name| {
-                let executable = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-                std::env::split_paths(&tool_path()).any(|dir| dir.join(&executable).is_file())
-            });
+            let executable = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+            std::env::split_paths(&tool_path()).any(|dir| dir.join(&executable).is_file())
+        });
         let npu = npu_device && npu_runtime;
         Self {
-            engine: cli.is_some() && checks[0].is_some(),
-            ffmpeg: checks[1].is_some(),
-            ffprobe: checks[2].is_some(),
-            ytdlp: checks[3].is_some(),
-            llama: checks[4].is_some(),
+            engine: cli.is_some() && checks.contains_key("engine"),
+            ffmpeg: checks.contains_key("ffmpeg"),
+            ffprobe: checks.contains_key("ffprobe"),
+            ytdlp: checks.contains_key("ytdlp"),
+            llama,
             apple,
             gpu,
             npu,
@@ -447,7 +473,7 @@ impl Environment {
 
 /// Bounded, executable checks. Redirect output to a file so a verbose tool cannot
 /// fill a pipe while the detector waits; timed-out children are always reaped.
-fn probe(bin: &Path, args: &[&str]) -> Option<String> {
+fn probe(bin: &Path, args: &[&str], timeout: Duration) -> Option<String> {
     use std::io::{Read, Seek};
     let mut output = tempfile::tempfile().ok()?;
     let mut command = Command::new(bin);
@@ -468,7 +494,7 @@ fn probe(bin: &Path, args: &[&str]) -> Option<String> {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
             Ok(Some(_)) => return None,
-            Ok(None) if started.elapsed() < Duration::from_secs(5) => {
+            Ok(None) if started.elapsed() < timeout => {
                 thread::sleep(Duration::from_millis(25))
             }
             _ => {
@@ -485,6 +511,43 @@ fn probe(bin: &Path, args: &[&str]) -> Option<String> {
 }
 
 pub use crate::notes::{Course, Preview, read_preview, scan_library};
+
+/// macOS「始终显示滚动条」系统偏好：探测一次并缓存（states-and-motion 滚动条契约要求尊重该偏好）。
+/// 非 macOS 或读取失败按 Automatic（滚动时显示）。
+pub fn scrollbars_always_visible() -> bool {
+    static ALWAYS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ALWAYS.get_or_init(|| {
+        if !cfg!(target_os = "macos") {
+            return false;
+        }
+        std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleShowScrollBars"])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .is_some_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "Always")
+    })
+}
+
+/// 滚动条模式：常显偏好→Always；其余滚动时显示、闲置淡出。
+pub(crate) fn vertical_scrollbar(handle: &gpui::ScrollHandle) -> gpui_component::scroll::Scrollbar {
+    vertical_scrollbar_for(handle)
+}
+
+/// 任意 ScrollbarHandle（含 gpui::ListState 虚拟列表）都走同一模式决策：
+/// 系统「始终显示滚动条」偏好开启时常驻，否则滚动时显示。
+pub(crate) fn vertical_scrollbar_for<H: gpui_component::scroll::ScrollbarHandle + Clone>(
+    handle: &H,
+) -> gpui_component::scroll::Scrollbar {
+    use gpui_component::scroll::{Scrollbar, ScrollbarMode};
+    Scrollbar::vertical(handle).mode(if scrollbars_always_visible() {
+        ScrollbarMode::Always
+    } else {
+        ScrollbarMode::Scrolling
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -530,47 +593,126 @@ mod tests {
     }
 
     #[test]
-    fn legacy_run_format_flags_do_not_hide_readable_manual_notes() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("course.md"),
-            "# Updated notes\n\nManually added explanation.",
-        )
+    fn notes_without_requested_file_exports_stay_readable() {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let sections = vec![course2md::timeline::Section {
+            t: 0.,
+            end: 1.,
+            image: String::new(),
+            speech: vec![course2md::timeline::TranscriptEvent {
+                start: 0.,
+                end: 1.,
+                text: "Manually added explanation.".into(),
+                raw: None,
+            }],
+        }];
+        let target = course2md::artifact::Target {
+            task_id: "task-1".into(),
+            course_id: "course-1".into(),
+            source_id: "source-1".into(),
+            version_id: "v1".into(),
+            course_dir: root.path().join("note"),
+        };
+        let meta = course2md::fetch::VideoMeta {
+            title: "course".into(),
+            uploader: String::new(),
+            duration: 0.,
+            webpage_url: String::new(),
+            extractor: "local".into(),
+            id: "source".into(),
+        };
+        let manifest = smol::block_on(course2md::artifact::publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[],
+            Default::default(),
+        ))
         .unwrap();
-        std::fs::write(dir.path().join("structured.json"), "{}").unwrap();
-        std::fs::write(dir.path().join("run.json"), r#"{"formats":["md"]}"#).unwrap();
         let preview = read_preview(Course {
-            dir: dir.path().into(),
+            dir: target.version_dir(),
             title: "course".into(),
             modified: SystemTime::now(),
             slides: 0,
-            segments: 0,
+            segments: 1,
             thumbnail: None,
-            manifest: None,
+            manifest: Some(manifest),
             warning: None,
         })
         .unwrap();
         assert!(preview.outputs.is_empty());
-        assert!(preview.has_markdown);
         assert!(preview.plain_text.contains("Manually added explanation."));
     }
 
     #[test]
     fn preview_resolves_only_images_inside_the_course() {
         let dir = tempfile::tempdir().unwrap();
-        let course_dir = dir.path().join("course");
-        std::fs::create_dir_all(course_dir.join("frames")).unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(work.join("frames")).unwrap();
         image::RgbImage::new(2, 2)
-            .save(course_dir.join("frames/slide.jpg"))
+            .save(work.join("frames/slide.jpg"))
             .unwrap();
         std::fs::write(dir.path().join("outside.jpg"), b"private").unwrap();
+        let sections = vec![course2md::timeline::Section {
+            t: 0.,
+            end: 1.,
+            image: "frames/slide.jpg".into(),
+            speech: vec![course2md::timeline::TranscriptEvent {
+                start: 0.,
+                end: 1.,
+                text: "Readable explanation.".into(),
+                raw: None,
+            }],
+        }];
+        let target = course2md::artifact::Target {
+            task_id: "task-1".into(),
+            course_id: "course-1".into(),
+            source_id: "source-1".into(),
+            version_id: "v1".into(),
+            course_dir: dir.path().join("course"),
+        };
+        let meta = course2md::fetch::VideoMeta {
+            title: "Course".into(),
+            uploader: String::new(),
+            duration: 0.,
+            webpage_url: String::new(),
+            extractor: "local".into(),
+            id: "source".into(),
+        };
+        smol::block_on(course2md::artifact::publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[],
+            Default::default(),
+        ))
+        .unwrap();
+        let version = target.version_dir();
+        // Tamper with the published records: the frame reference now escapes the note.
+        let mut manifest: course2md::artifact::Manifest =
+            serde_json::from_slice(&std::fs::read(version.join("manifest.json")).unwrap()).unwrap();
+        manifest.frames[0].image = "../../outside.jpg".into();
         std::fs::write(
-            course_dir.join("course.md"),
-            "# Course\n\nReadable explanation.\n![slide](frames/slide.jpg)\n![escape](frames/../../outside.jpg)\n",
+            version.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut document: course2md::artifact::Document =
+            serde_json::from_slice(&std::fs::read(version.join("document.json")).unwrap()).unwrap();
+        document.sections[0].image = "../../outside.jpg".into();
+        std::fs::write(
+            version.join("document.json"),
+            serde_json::to_vec_pretty(&document).unwrap(),
         )
         .unwrap();
         let preview = read_preview(Course {
-            dir: course_dir,
+            dir: version,
             title: "Course".into(),
             modified: SystemTime::now(),
             slides: 0,
@@ -586,7 +728,7 @@ mod tests {
                 .iter()
                 .filter(|b| matches!(b, PreviewBlock::Image(_)))
                 .count(),
-            1
+            0
         );
         assert!(
             !preview
@@ -637,5 +779,22 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn llama_runtime_is_present_when_the_binary_exists_even_if_device_listing_fails() {
+        let missing = tempfile::tempdir().unwrap();
+        assert!(!llama_binary_on_path(missing.path().as_os_str()));
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir
+            .path()
+            .join(format!("llama-server{}", std::env::consts::EXE_SUFFIX));
+        std::fs::write(&bin, b"not-executable").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(llama_binary_on_path(dir.path().as_os_str()));
     }
 }

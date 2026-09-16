@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 
 // —— 内置默认值（唯一来源）：main.rs 的 CLI 合并、settings.rs 的展示统一引用这里 ——
 /// SSIM 画面相似度阈值（越高越敏感、截图越多）
+/// 默认本地识别模型（canonical id）：引擎与桌面共用同一来源。
+/// 各后端的模型清单/别名表仍在 models.rs / model_status.rs 各自维护。
+pub const DEFAULT_ASR_MODEL: &str = "qwen3-1.7b";
 pub const DEFAULT_SIMILARITY: f64 = 0.85;
 /// 画面采样间隔（秒）
 pub const DEFAULT_SAMPLE_INTERVAL: f64 = 1.0;
@@ -59,13 +62,11 @@ pub fn asr_endpoint(api: &crate::settings::AsrApi) -> AnyhowResult<String> {
     })
 }
 
-/// 云端 STT API key 环境变量：新名 `COURSE2MD_ASR_API_KEY` 优先，
-/// `OPENROUTER_API_KEY` 仅作兼容回落（旧文档/脚本中已存在）。
+/// 云端 STT API key 环境变量：`COURSE2MD_ASR_API_KEY`。
 pub fn asr_api_key_from_env() -> Option<String> {
-    ["COURSE2MD_ASR_API_KEY", "OPENROUTER_API_KEY"]
-        .into_iter()
-        .filter_map(|k| std::env::var(k).ok())
-        .find(|k| !k.trim().is_empty())
+    std::env::var("COURSE2MD_ASR_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
 }
 
 /// ASR 后端。typed enum 取代散落各处的字符串比较（`eq_ignore_ascii_case`）。
@@ -477,20 +478,22 @@ pub fn model_dir_from(opt: Option<&Path>) -> PathBuf {
 /// 展开 `~` / `~/...`（仅 Unix 主目录约定；无 HOME 时原样返回）。
 /// 防止配置里的 "~/cache" 真的在当前目录创建名为 `~` 的子目录。
 pub fn expand_tilde(p: PathBuf) -> PathBuf {
+    // 与 config_dir/cache_dir 同一 home 解析：Windows 上 HOME 可能缺席，退回 USERPROFILE
+    let home = || std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"));
     let Some(s) = p.to_str() else { return p };
     if s == "~" {
-        if let Some(h) = std::env::var_os("HOME") {
+        if let Some(h) = home() {
             return PathBuf::from(h);
         }
     } else if let Some(rest) = s.strip_prefix("~/")
-        && let Some(h) = std::env::var_os("HOME")
+        && let Some(h) = home()
     {
         return PathBuf::from(h).join(rest);
     }
     p
 }
 
-/// resume 三态解析：`--no-resume` > `--resume` > 配置文件 > 默认关闭。
+/// resume 三态解析：`--no-resume` > `--resume` > 配置文件 > 默认开启。
 /// 两级 CLI flag 互斥（clap conflicts_with），不会同时为 true。
 pub fn resolve_resume(cli_resume: bool, cli_no_resume: bool, file_resume: Option<bool>) -> bool {
     if cli_no_resume {
@@ -557,7 +560,7 @@ pub fn default_provider_hint() -> AsrProvider {
     if cfg!(apple_native) {
         AsrProvider::Coreml
     } else if cfg!(target_os = "linux")
-        && Path::new("/dev/accel/accel0").exists()
+        && Path::new(crate::npu::NPU_DEVICE_PATH).exists()
         && crate::error::require_cmd("llama-server").is_err()
     {
         AsrProvider::Npu
@@ -656,8 +659,9 @@ fn youtube_id(s: &str) -> Option<String> {
 /// 文件系统限制的路径。
 const MAX_COMPONENT_CHARS: usize = 80;
 
-/// 保留中文等标题字符，去掉路径非法符。
-pub fn sanitize_component(s: &str) -> String {
+/// 统一的文件名净化原语：路径非法符与空白折叠为 `-`，裁剪首尾，超长截断。
+/// `fallback` 为净化后为空时的名字（调用方语义：untitled / summary）。
+pub fn sanitize_filename_with_fallback(s: &str, fallback: &str) -> String {
     let mut out = String::new();
     let mut prev_dash = false;
     for c in s.chars() {
@@ -676,10 +680,15 @@ pub fn sanitize_component(s: &str) -> String {
     let out = out.trim_matches(['-', '.', ' ']).to_string();
     let out: String = out.chars().take(MAX_COMPONENT_CHARS).collect();
     if out.is_empty() {
-        "untitled".into()
+        fallback.to_string()
     } else {
         out
     }
+}
+
+/// 保留中文等标题字符，去掉路径非法符（= sanitize_filename_with_fallback(_, "untitled")）。
+pub fn sanitize_component(s: &str) -> String {
+    sanitize_filename_with_fallback(s, "untitled")
 }
 
 #[cfg(test)]

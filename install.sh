@@ -70,10 +70,12 @@ echo "已安装：$BIN_DIR/course2md"
 # MLX Metal kernels：CoreML 推理需要与二进制同目录（仅 macOS arm64）
 if [ "$os-$arch" = "darwin-arm64" ] || [ "$os-$arch" = "darwin-aarch64" ]; then
   mlb="$(mktemp)"
+  mlx_installed=0
   trap 'rm -f "$tmp" "$mlb"' EXIT
   if command -v gh >/dev/null 2>&1; then
     if gh release download -R "$REPO" -p "mlx-macos-arm64.metallib" -O "$mlb" --clobber 2>/dev/null; then
       install -m 644 "$mlb" "$BIN_DIR/mlx.metallib"
+      mlx_installed=1
       echo "已安装：$BIN_DIR/mlx.metallib（CoreML 推理所需）"
     fi
   else
@@ -91,10 +93,15 @@ PY
     )"
     if [ -n "$url" ] && curl -fsSL "$url" -o "$mlb" 2>/dev/null; then
       install -m 644 "$mlb" "$BIN_DIR/mlx.metallib"
+      mlx_installed=1
       echo "已安装：$BIN_DIR/mlx.metallib（CoreML 推理所需）"
     fi
   fi
+  if [ "$mlx_installed" != 1 ]; then
+    echo "警告：MLX Metal 库下载失败，Apple 原生识别（CoreML）将不可用；" >&2
+    echo "      可重跑 install.sh 或手动从 release 资产 mlx-macos-arm64.metallib 安装到 $BIN_DIR/mlx.metallib" >&2
+  fi
 fi
 
-echo "请确保 PATH 包含 $BIN_DIR，例如：export PATH=\"\$HOME/bin:\$PATH\""
+echo "请确保 PATH 包含 ${BIN_DIR}，例如：export PATH=\"\$HOME/bin:\$PATH\""
 echo "首次运行会自动下载识别模型（macOS CoreML 约 1-2GB；其他平台 llama.cpp GGUF 约 2.4GB）。"

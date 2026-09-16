@@ -4,7 +4,6 @@ use crate::theme::*;
 use gpui_component::button::*;
 
 const SHELL_GUTTER: f32 = 24.;
-const WIDE_COLUMN: Rems = rems(82.);
 pub(super) const SETTINGS_SIDEBAR_WIDTH: f32 = 200.;
 pub(super) const SETTINGS_COLUMN_GAP: f32 = 32.;
 const SETTINGS_CONTENT_MAX_WIDTH: f32 = 800.;
@@ -12,14 +11,20 @@ const SETTINGS_SHELL_WIDTH: f32 =
     SETTINGS_SIDEBAR_WIDTH + SETTINGS_COLUMN_GAP + SETTINGS_CONTENT_MAX_WIDTH + SHELL_GUTTER * 2.;
 const SETTINGS_SIDEBAR_BREAKPOINT: f32 = 1100.;
 
+/// Capsule tabs already mark the current page. TitleBar's default bottom
+/// hairline would be unused chrome under 工作台 / 我的笔记 / 任务 / 设置.
+pub(crate) fn apply_shell_title_bar_chrome(bar: TitleBar) -> TitleBar {
+    bar.pl_0().bg(color(CANVAS)).border_b_0()
+}
+
 fn shell_column_for(page: Page) -> Div {
     shell_column_at(shell_column_width(page))
 }
 
 fn shell_column_width(page: Page) -> AbsoluteLength {
     match page {
+        // 全产品一条内容标尺：工作台/任务/笔记库/阅读共用 COLUMN（设置是侧栏构图，自成一体）
         Page::Settings => rems(SETTINGS_SHELL_WIDTH / 14.).into(),
-        Page::Library | Page::Result => WIDE_COLUMN.into(),
         _ => COLUMN.into(),
     }
 }
@@ -145,20 +150,15 @@ impl Desktop {
                     this.navigate(page, cx);
                 })),
         );
-        TitleBar::new()
-            .h(px(40. * scale + 16.))
-            .pl_0()
-            .bg(color(CANVAS))
-            .border_color(color(HAIRLINE))
-            .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .h_full()
-                    .child(div().w(px(side_width)).flex_shrink_0())
-                    .child(h_flex().flex_1().min_w_0().justify_center().child(nav))
-                    .child(div().w(px(side_width)).flex_shrink_0()),
-            )
+        apply_shell_title_bar_chrome(TitleBar::new().h(px(40. * scale + 16.))).child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .h_full()
+                .child(div().w(px(side_width)).flex_shrink_0())
+                .child(h_flex().flex_1().min_w_0().justify_center().child(nav))
+                .child(div().w(px(side_width)).flex_shrink_0()),
+        )
     }
 
     fn task_result_notice(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -278,9 +278,7 @@ impl Desktop {
                                 cx.notify();
                             })),
                     ),
-            ),
-            cx,
-        ))
+            )))
     }
     fn page_title(&self) -> String {
         match self.page {
@@ -305,20 +303,19 @@ impl Desktop {
             .items_center()
             .justify_between()
             .child(
-                accessible_text("page-title", self.page_title())
-                    .role(Role::Heading)
-                    .flex_1()
-                    .min_w_0()
-                    .whitespace_normal()
-                    .text_size(TEXT_DISPLAY)
-                    .font_weight(FontWeight::SEMIBOLD),
+                theme::page_heading(
+                    "page-title",
+                    icons::book_open().size(px(24.)).text_color(color(ACCENT_STRONG)),
+                    self.page_title(),
+                )
+                .flex_1()
+                .min_w_0(),
             )
             .when(self.library_controls_visible(cx), |row| {
                 row.child(
                     quiet("refresh-library")
                         .icon(icons::refresh())
-                        .accessibility_label("刷新课程库")
-                        .tooltip("刷新笔记")
+                        .label("刷新")
                         .loading(self.loading)
                         .disabled(self.loading)
                         .on_click(cx.listener(|this, _, _, cx| this.refresh_library(cx))),
@@ -374,11 +371,15 @@ impl Render for Desktop {
             Page::Settings => self.settings_page(window, cx),
             Page::Result => self.reader_page(window, cx),
         };
+        // Task and library content virtualize their long lists: the list owns
+        // scrolling for the page instead of the shared page-scroll container.
+        let self_scrolling = matches!(self.page, Page::Task | Page::Library);
         let content = v_flex()
             .gap_4()
-            .when(matches!(self.page, Page::Result | Page::Settings), |v| {
-                v.h_full().min_h_0()
-            })
+            .when(
+                matches!(self.page, Page::Result | Page::Settings) || self_scrolling,
+                |v| v.h_full().min_h_0(),
+            )
             .when(
                 self.reading && !matches!(self.page, Page::Library | Page::Result),
                 |v| {
@@ -473,9 +474,7 @@ impl Render for Desktop {
                                             })),
                                     )
                                 }),
-                        ),
-                    cx,
-                ))
+                        )))
             })
             .when_some(self.message.clone(), |v, message| {
                 let completed = message.starts_with("笔记已生成");
@@ -512,9 +511,7 @@ impl Render for Desktop {
                                         cx.notify();
                                     })),
                             ),
-                    ),
-                    cx,
-                ))
+                    )))
             })
             .child(
                 div()
@@ -524,7 +521,7 @@ impl Render for Desktop {
                     .min_w_0()
                     .w_full()
                     .when(
-                        !matches!(self.page, Page::Result | Page::Settings),
+                        !matches!(self.page, Page::Result | Page::Settings) && !self_scrolling,
                         |view| {
                             view.overflow_y_scroll()
                                 .track_scroll(&self.scrolls[self.page as usize])
@@ -532,10 +529,12 @@ impl Render for Desktop {
                     )
                     .child(
                         shell_column_for(self.page)
-                            .when(matches!(self.page, Page::Result | Page::Settings), |v| {
-                                v.h_full().min_h_0()
-                            })
-                            .when(self.page != Page::Settings, |v| v.pb_6())
+                            .when(
+                                matches!(self.page, Page::Result | Page::Settings)
+                                    || self_scrolling,
+                                |v| v.h_full().min_h_0(),
+                            )
+                            .when(self.page != Page::Settings && !self_scrolling, |v| v.pb_6())
                             .child(content),
                     ),
             );

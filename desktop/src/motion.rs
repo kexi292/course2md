@@ -1,22 +1,24 @@
 //! Small, shared motion vocabulary: entrances, retargetable values and live work.
-use crate::theme::{ACCENT, PROGRESS_FILL, PROGRESS_TRACK, color};
+use crate::activity::{TransferEta, TransferMetrics};
+use crate::theme::{
+    ACCENT, GRAY, INK, MUTED, PROGRESS_FILL, PROGRESS_TRACK, TEXT_AUX, TEXT_BODY, accessible_text,
+    color,
+};
 use gpui::{prelude::*, *};
-use gpui_component::{Icon, Sizable};
+use gpui_component::{Icon, Sizable, h_flex, v_flex};
 use std::time::Duration;
 
 pub const ENTER_MS: u64 = 160;
 pub const VALUE_MS: u64 = 200;
+/// 调色板切换过渡时长（theme::apply_preference 用，纳入同一运动词汇表）
+pub const PALETTE_MS: u64 = 280;
 
 pub fn ease_out(t: f32) -> f32 {
     1. - (1. - t.clamp(0., 1.)).powi(3)
 }
 
 /// IDs belong to a logical state, not a frame or a progress value.
-pub fn enter<E: IntoElement + Styled + 'static>(
-    id: impl Into<ElementId>,
-    view: E,
-    _cx: &App,
-) -> AnyElement {
+pub fn enter<E: IntoElement + Styled + 'static>(id: impl Into<ElementId>, view: E) -> AnyElement {
     // Keep the same ancestor ID chain when the preference changes. GPUI's
     // AnimationElement already paints the final state without scheduling frames
     // under reduce-motion; removing it here remounts every keyed child.
@@ -35,14 +37,14 @@ pub fn enter<E: IntoElement + Styled + 'static>(
 pub fn state_enter<E: IntoElement + Styled + 'static>(
     id: impl Into<ElementId>,
     view: E,
-    _cx: &App,
 ) -> AnyElement {
     let id = id.into();
     #[cfg(feature = "performance")]
     let trace_id = id.clone();
     view.with_animation(
         id,
-        Animation::new(Duration::from_millis(240))
+        // 与 Show/dismiss overlay 同一 starting range（150-220ms，states-and-motion.md）
+        Animation::new(Duration::from_millis(200))
             .with_easing(ease_out)
             .with_max_fps(60.),
         move |view, t| {
@@ -138,18 +140,113 @@ pub fn progress(
         .into_any_element()
 }
 
+/// Model downloads keep quantity, labeled speed and labeled remaining time
+/// on one stable block so the numbers do not hide behind a single sentence.
+pub fn transfer_status(
+    id: impl Into<ElementId>,
+    title: impl Into<SharedString>,
+    metrics: &TransferMetrics,
+    fraction: Option<f32>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Div {
+    let id = id.into();
+    let title = title.into();
+    let mut view = v_flex().w_full().min_w_0().gap_2().child(
+        accessible_text(SharedString::from(format!("{id:?}-title")), title)
+            .text_size(TEXT_BODY)
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(color(INK)),
+    );
+    if !metrics.quantity.is_empty() {
+        view = view.child(
+            accessible_text(
+                SharedString::from(format!("{id:?}-quantity")),
+                metrics.quantity.clone(),
+            )
+            .text_size(TEXT_BODY)
+            .text_color(color(INK)),
+        );
+    }
+    if metrics.speed.is_some() || matches!(&metrics.eta, Some(TransferEta::Remaining(_))) {
+        let mut meters = h_flex().w_full().min_w_0().gap_6().flex_wrap();
+        if let Some(speed) = &metrics.speed {
+            meters = meters.child(transfer_meter(
+                SharedString::from(format!("{id:?}-speed")),
+                "速度",
+                speed.clone(),
+            ));
+        }
+        if let Some(TransferEta::Remaining(value)) = &metrics.eta {
+            meters = meters.child(transfer_meter(
+                SharedString::from(format!("{id:?}-eta")),
+                "预计剩余",
+                value.clone(),
+            ));
+        }
+        view = view.child(meters);
+    }
+    if let Some(TransferEta::Note(value)) = &metrics.eta {
+        view = view.child(
+            accessible_text(
+                SharedString::from(format!("{id:?}-eta-note")),
+                value.clone(),
+            )
+            .text_size(TEXT_AUX)
+            .text_color(color(MUTED)),
+        );
+    }
+    if let Some(note) = &metrics.note {
+        view = view.child(
+            accessible_text(SharedString::from(format!("{id:?}-note")), note.clone())
+                .text_size(TEXT_AUX)
+                .text_color(color(GRAY)),
+        );
+    }
+    view.when_some(fraction, |view, fraction| {
+        view.child(progress(
+            SharedString::from(format!("{id:?}-bar")),
+            fraction,
+            window,
+            cx,
+        ))
+    })
+}
+
+fn transfer_meter(
+    id: impl Into<SharedString>,
+    label: &'static str,
+    value: impl Into<SharedString>,
+) -> Div {
+    let id = id.into();
+    v_flex()
+        .min_w(rems(7.))
+        .gap_1()
+        .child(
+            accessible_text(SharedString::from(format!("{id}-label")), label)
+                .text_size(TEXT_AUX)
+                .text_color(color(MUTED)),
+        )
+        .child(
+            accessible_text(SharedString::from(format!("{id}-value")), value)
+                .text_size(TEXT_BODY)
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(color(INK)),
+        )
+}
+
 pub fn disclosure(
     id: impl Into<ElementId>,
     open: bool,
     content: Div,
     _window: &mut Window,
-    cx: &mut App,
+    _cx: &mut App,
 ) -> AnyElement {
     if open {
         // Keep intrinsic measurement, padding and child layout in the normal
         // tree. Measuring in prepaint and clipping to a previous frame's height
         // cuts off controls when the content or available width changes.
-        enter(id, content, cx)
+        enter(id, content)
     } else {
         div().hidden().into_any_element()
     }
@@ -189,7 +286,7 @@ mod tests {
     }
 
     impl Render for PreferenceHarness {
-        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        fn render(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
             enter(
                 "motion-preference-parent",
                 div().child(StatefulChild {
@@ -197,7 +294,6 @@ mod tests {
                     mounts: self.mounts.clone(),
                     sample: self.sample.clone(),
                 }),
-                cx,
             )
         }
     }

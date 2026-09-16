@@ -98,7 +98,7 @@ fn inspect_location(location: &workspace::LibraryLocation) -> LocationCheck {
         needs_reassociation: false,
         problem: None,
     };
-    if !available || location.id == "legacy" {
+    if !available || location.id.is_empty() {
         return check;
     }
     match std::fs::read_to_string(location.root.join(".course2md-library-id")) {
@@ -191,8 +191,10 @@ impl Desktop {
             .as_ref()
             .map(|workspace| workspace.state.libraries.clone())
             .unwrap_or_else(|| {
+                // Without a workspace record the root has no registered id; an
+                // empty id skips the marker identity check for this placeholder.
                 vec![workspace::LibraryLocation {
-                    id: "legacy".into(),
+                    id: String::new(),
                     name: "课程库".into(),
                     root: self.library_root.clone(),
                     previous_roots: Vec::new(),
@@ -563,9 +565,13 @@ impl Desktop {
                 this.open_storage_dialog(window, cx);
                 cx.notify();
             });
-            let result = cx.background_executor().spawn(async move {
+            let work = crate::spawn_blocking_io(move || {
                 inspect_relocation(&state, &library_id, &destination)
-            }).await;
+            });
+            let result = work
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("核对课程库的工作线程意外结束")));
             let _ = this.update_in(cx, |this, window, cx| {
                 if this.storage_ui.generation != generation {
                     return;
@@ -659,7 +665,8 @@ impl Desktop {
         self.open_storage_dialog(window, cx);
         let root = location.root.clone();
         let worker_cancel = cancel.clone();
-        let worker = cx.background_executor().spawn(async move {
+        // 扫描会同步读取磁盘上的全部笔记；见 crate::spawn_blocking_io 的说明
+        let worker = crate::spawn_blocking_io(move || {
             let stamp = storage::directory_stamp(&root)?;
             let mut names = Vec::new();
             let mut unreadable = 0;
@@ -686,7 +693,10 @@ impl Desktop {
             Ok::<_, anyhow::Error>((stamp, names, unreadable))
         });
         cx.spawn_in(window, async move |this, cx| {
-            let result = worker.await;
+            let result = worker
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("重新关联的工作线程意外结束")));
             let Ok((stamp, names, unreadable)) = result else {
                 let message = result.unwrap_err().to_string();
                 let _ = this.update_in(cx, |this, _, cx| {
@@ -790,6 +800,19 @@ impl Desktop {
     pub fn restore_storage_state(&mut self, cx: &mut Context<Self>) {
         self.storage_ui.pending =
             storage::pending_journals(&self.preferences.root().join("storage"));
+        // 半残/损坏的迁移记录不能静默消失：在存储页给出可见错误与文件位置
+        let corrupt = storage::corrupt_journals(&self.preferences.root().join("storage"));
+        if !corrupt.is_empty() {
+            self.storage_ui.error = Some(format!(
+                "{} 个迁移记录无法读取（原文件已保留，可手动检查或删除）：{}",
+                corrupt.len(),
+                corrupt
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("、")
+            ));
+        }
         // If the registry transaction committed before the app closed, the
         // journal is merely behind; never offer to replay or undo that copy.
         self.storage_ui.pending.retain(|(path, journal)| {
@@ -1040,7 +1063,8 @@ impl Desktop {
             let progress = Arc::new(Mutex::new(Progress::default()));
             let worker_progress = progress.clone();
             let worker_cancel = cancel.clone();
-            let mut worker = cx.background_executor().spawn(async move {
+            // 迁移是大量同步文件读写；见 crate::spawn_blocking_io 的说明
+            let worker = crate::spawn_blocking_io(move || {
                 let report = |value| {
                     if let Ok(mut progress) = worker_progress.lock() {
                         *progress = value;
@@ -1059,8 +1083,12 @@ impl Desktop {
                 }
             });
             let result = loop {
-                if let Some(result) = smol::future::poll_once(&mut worker).await {
-                    break result;
+                match worker.try_recv() {
+                    Ok(result) => break result,
+                    Err(smol::channel::TryRecvError::Closed) => {
+                        break Err(anyhow::anyhow!("迁移工作线程意外结束"));
+                    }
+                    Err(smol::channel::TryRecvError::Empty) => {}
                 }
                 let snapshot = progress.lock().ok().map(|value| value.clone());
                 if let Some(snapshot) = snapshot {
@@ -1649,13 +1677,47 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let old = directory.path().join("old");
         let new = directory.path().join("moved");
-        std::fs::create_dir_all(old.join("note")).unwrap();
-        std::fs::write(
-            old.join("note/structured.json"),
-            include_str!("../../tests/fixtures/legacy/json/structured.json"),
-        )
-        .unwrap();
+        std::fs::create_dir_all(&old).unwrap();
         std::fs::write(old.join("video.mp4"), "original video").unwrap();
+        let work = old.join("note-work");
+        std::fs::create_dir_all(&work).unwrap();
+        let target = course2md::artifact::Target {
+            task_id: "task-relocate".into(),
+            course_id: "course-relocate".into(),
+            source_id: "local:original-video".into(),
+            version_id: "v1".into(),
+            course_dir: old.join("note"),
+        };
+        let sections = vec![course2md::timeline::Section {
+            t: 0.,
+            end: 1.,
+            image: String::new(),
+            speech: vec![course2md::timeline::TranscriptEvent {
+                start: 0.,
+                end: 1.,
+                text: "Relocation must preserve this body.".into(),
+                raw: None,
+            }],
+        }];
+        let meta = course2md::fetch::VideoMeta {
+            title: "Original title".into(),
+            uploader: String::new(),
+            duration: 0.,
+            webpage_url: String::new(),
+            extractor: "local".into(),
+            id: "original-video".into(),
+        };
+        smol::block_on(course2md::artifact::publish(
+            &target,
+            &work,
+            &meta,
+            &sections,
+            None,
+            &[],
+            Default::default(),
+        ))
+        .unwrap();
+        std::fs::remove_dir_all(&work).unwrap();
         let old = old.canonicalize().unwrap();
         let record = directory.path().join("workspace.json");
         let mut workspace = workspace::Workspace::open_at(

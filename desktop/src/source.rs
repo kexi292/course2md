@@ -43,12 +43,8 @@ impl Source {
             details.push(self.author.clone());
         }
         if seconds > 0 {
-            details.push(format!(
-                "{}:{:02}:{:02}",
-                seconds / 3600,
-                seconds / 60 % 60,
-                seconds % 60
-            ));
+            // 与 fmt_ts 同一记法（07:37，不带 0 小时位）：跨页时长一致（review2#8）
+            details.push(course2md::render::fmt_ts(seconds as f64));
         }
         details.join(" · ")
     }
@@ -350,6 +346,7 @@ pub fn video_links(input: &str) -> Vec<String> {
 }
 
 /// Compatibility wrapper. Call `probe` in the UI to present collection candidates.
+#[cfg(test)]
 pub fn inspect(input: String, online: bool, cancel: Arc<AtomicBool>) -> Result<Source> {
     match probe(input, online, cancel)? {
         SourceProbe::Single(source) => Ok(source),
@@ -876,6 +873,7 @@ pub fn read_subtitle(
 }
 
 /// An attached file can have any name/location; it never replaces the video.
+#[cfg(test)]
 pub fn attach_subtitle(
     source: &Source,
     path: PathBuf,

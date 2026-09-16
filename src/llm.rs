@@ -144,18 +144,18 @@ pub fn polish_sections_report(
     sections: &mut [Section],
     frames_root: &Path,
     s: &LlmSettings,
-) -> PolishReport {
+) -> Result<PolishReport> {
     let attempted = sections.iter().map(|section| section.speech.len()).sum();
     // 配置缺失一次性拦截：否则每个分块都会各发满重试后失败，白白放大请求量
     if let Err(e) = validate(s) {
         tracing::warn!(
             "{e:#}；保留原字幕，跳过润色 / Keeping original transcript; skipping LLM polish"
         );
-        return PolishReport {
+        return Ok(PolishReport {
             attempted,
             succeeded: 0,
             failed: attempted,
-        };
+        });
     }
     let total: usize = sections
         .iter()
@@ -170,16 +170,18 @@ pub fn polish_sections_report(
     // vision：同一 Section 的多 chunk 共用一张截图，只读盘 + base64 一次
     //（数 MB 大，逐 chunk 重复编码太贵）；所需截图不可读的 Section 整体保留原文。
     // 空 Section 不读图也不告警（其 chunks 迭代本就不会产生任务）。
-    let images: Vec<Option<Option<String>>> = sections
-        .iter()
-        .map(|sec| {
+    // 逐节检查任务控制文件：大课程读图期间暂停/取消也能及时生效
+    let mut images: Vec<Option<Option<String>>> = Vec::with_capacity(sections.len());
+    for sec in sections.iter() {
+        crate::dispatch::check_control()?;
+        images.push(
             if sec.speech.is_empty() {
                 Some(None)
             } else {
                 section_image_b64(s, frames_root, sec, &warned)
-            }
-        })
-        .collect();
+            },
+        );
+    }
     // worker 池：共享迭代器抢占式取 chunk，谁先完成谁取下一个
     let queue = std::sync::Mutex::new(
         sections
@@ -188,17 +190,26 @@ pub fn polish_sections_report(
             .flat_map(|(si, sec)| sec.speech.chunks_mut(BATCH).map(move |chunk| (si, chunk))),
     );
     let succeeded = std::sync::atomic::AtomicUsize::new(0);
+    let aborted = std::sync::Mutex::new(None::<anyhow::Error>);
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
                 loop {
+                    if let Err(e) = crate::dispatch::check_control() {
+                        let mut guard = aborted.lock().unwrap_or_else(|p| p.into_inner());
+                        if guard.is_none() {
+                            *guard = Some(e);
+                        }
+                        break;
+                    }
                     let next = queue.lock().map(|mut it| it.next());
                     match next {
                         Ok(Some((si, chunk))) => {
+                            // 从队列取走即计入进度：截图不可用的节不再让进度条停在不满格
+                            pb.inc(1);
                             let Some(image_b64) = images[si].as_ref() else {
                                 continue; // 截图不可用：整节保留原文（同原实现的提前返回）
                             };
-                            pb.inc(1);
                             let count =
                                 polish_chunk(&agent, s, chunk, image_b64.as_deref(), &warned);
                             succeeded.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
@@ -210,6 +221,9 @@ pub fn polish_sections_report(
             });
         }
     });
+    if let Some(e) = aborted.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        return Err(e);
+    }
     // 删除「成功润色为空串」的纯语气词条目（全部 chunk 完成后统一过滤；
     // 截图不可用而跳过的 Section 未经修改，retain 对其是 no-op）
     for sec in sections.iter_mut() {
@@ -217,11 +231,11 @@ pub fn polish_sections_report(
     }
     pb.finish();
     let succeeded = succeeded.load(std::sync::atomic::Ordering::Relaxed);
-    PolishReport {
+    Ok(PolishReport {
         attempted,
         succeeded,
         failed: attempted.saturating_sub(succeeded),
-    }
+    })
 }
 
 /// 读取本节的校对截图（vision=true 时）：外层 Some = 该节参与润色（内层为截图
@@ -610,15 +624,6 @@ pub(crate) struct ChatFailure {
     pub(crate) err: anyhow::Error,
 }
 
-/// Transport uncertainty and 5xx are never automatically retried.
-#[cfg(test)]
-fn is_retryable(e: &ureq::Error) -> bool {
-    match e {
-        ureq::Error::Status(code, _) => *code == 429,
-        ureq::Error::Transport(_) => false,
-    }
-}
-
 /// 进程级抖动序列：与纳秒异或打散，避免并发请求同步重试（不引入 rand）。
 static JITTER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -679,7 +684,7 @@ fn request_chat(
                 ?wait,
                 "LLM 请求失败，稍后重试 / LLM request failed; retrying shortly"
             );
-            std::thread::sleep(wait);
+            interruptible_backoff(wait)?;
         }
         match request_chat_once(agent, s, body, purpose, description) {
             Ok(resp) => return Ok(resp),
@@ -691,6 +696,21 @@ fn request_chat(
         retryable: false,
         err: anyhow::anyhow!("LLM 请求失败 / LLM request failed"),
     }))
+}
+
+/// 退避期间保持可取消：分段小睡并轮询任务控制文件。
+fn interruptible_backoff(wait: Duration) -> std::result::Result<(), ChatFailure> {
+    let mut slept = Duration::ZERO;
+    while slept < wait {
+        crate::dispatch::check_control().map_err(|err| ChatFailure {
+            retryable: false,
+            err,
+        })?;
+        let step = (wait - slept).min(Duration::from_millis(200));
+        std::thread::sleep(step);
+        slept += step;
+    }
+    Ok(())
 }
 
 /// 用户自定义校对指令；空白视为未设置，回落到内置提示词。
@@ -729,11 +749,18 @@ pub fn test_connection(s: &LlmSettings) -> Result<()> {
     } else {
         "连接失败。请检查服务地址、密钥和模型。 / Connection failed. Check the URL, API key, and model."
     };
-    let resp = ureq::post(&endpoint(&s.base_url))
+    // 与生产路径同一纪律：禁止跟随重定向；空密钥不发送 Bearer 头（本地无鉴权服务）
+    let agent = ureq::AgentBuilder::new()
         .timeout(Duration::from_secs(60))
-        .set("Authorization", &format!("Bearer {}", s.api_key))
-        .send_json(body)
-        .context(fail_hint)?;
+        .redirects(0)
+        .build();
+    let request = agent.post(&endpoint(&s.base_url));
+    let request = if s.api_key.is_empty() {
+        request
+    } else {
+        request.set("Authorization", &format!("Bearer {}", s.api_key))
+    };
+    let resp = request.send_json(body).context(fail_hint)?;
     let v: serde_json::Value = resp
         .into_json()
         .context("无法解析响应 / Cannot parse response")?;
@@ -994,27 +1021,7 @@ mod tests {
     }
 
     #[test]
-    fn retry_classification_and_backoff() {
-        use ureq::Error;
-        // Transport 无公共构造器：经由真实失败请求构造（127.0.0.1:1 必连接拒绝）
-        let transport = ureq::get("http://127.0.0.1:1/health")
-            .timeout(Duration::from_millis(500))
-            .call()
-            .unwrap_err();
-        assert!(
-            matches!(transport, Error::Transport(_)),
-            "closed port should be transport error"
-        );
-        assert!(!is_retryable(&transport), "网络结果不明不能自动重试");
-        let mk_status = |code: u16| {
-            let resp = ureq::Response::new(code, "x", "").unwrap();
-            Error::Status(code, resp)
-        };
-        assert!(is_retryable(&mk_status(429)), "限流可重试");
-        assert!(!is_retryable(&mk_status(500)));
-        assert!(!is_retryable(&mk_status(503)));
-        assert!(!is_retryable(&mk_status(400)), "参数错误重试无意义");
-        assert!(!is_retryable(&mk_status(401)), "鉴权错误重试无意义");
+    fn retry_backoff_progression() {
         // 指数退避：1s、2s、4s…（含 0~500ms 抖动）
         let b1 = backoff_duration(1).as_secs_f64();
         let b2 = backoff_duration(2).as_secs_f64();

@@ -451,23 +451,10 @@ pub fn render_standalone_md(title: &str, sm: &Summary) -> String {
     out
 }
 
-/// 把文件名中的非法字符替换为下划线（Windows 保留字符 + 全角引号等）。
+/// 导出文件名净化（= 共享净化原语，空名回退 "summary"）。
+/// 与 config::sanitize_component 同一规则，同类导出文件名不再取决于走哪条路径。
 pub fn sanitize_filename(name: &str) -> String {
-    let mut s = String::new();
-    for ch in name.chars() {
-        match ch {
-            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' | '\u{201c}' | '\u{201d}'
-            | '\u{ff1f}' | '\u{ff1a}' => s.push('_'),
-            c if c.is_control() => s.push('_'),
-            c => s.push(c),
-        }
-    }
-    let s = s.trim().trim_end_matches('.').to_string();
-    if s.is_empty() {
-        "summary".to_string()
-    } else {
-        s
-    }
+    crate::config::sanitize_filename_with_fallback(name, "summary")
 }
 
 /// 判断已渲染 markdown 是否已包含总结区块（幂等跳过；以哨兵注释为准，

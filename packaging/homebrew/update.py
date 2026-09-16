@@ -39,7 +39,7 @@ def render(tap, version, fetch_checksum=checksum):
     channel = match[1] or "stable"
     suffix = "" if channel == "stable" else f"@{channel}"
     # Homebrew only translates numeric @ suffixes into valid Ruby class names.
-    # Keep named prerelease channels as hyphenated formulae, with legacy aliases.
+    # Keep named prerelease channels as hyphenated formulae.
     formula_token = "course2md" if not suffix else f"course2md-{channel}"
     cask_token = f"course2md-gui{suffix}"
     conflicts = [f'"course2md-gui{("@" + other) if other != "stable" else ""}"'
@@ -75,17 +75,6 @@ def render(tap, version, fetch_checksum=checksum):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(source)
         print(path)
-    if suffix:
-        legacy = Path(tap) / "Formula" / f"course2md{suffix}.rb"
-        alias = Path(tap) / "Aliases" / f"course2md{suffix}"
-        target = Path("../Formula") / f"{formula_token}.rb"
-        alias.parent.mkdir(parents=True, exist_ok=True)
-        if alias.is_symlink() and alias.readlink() != target:
-            alias.unlink()
-        if not alias.is_symlink():
-            alias.symlink_to(target)
-        legacy.unlink(missing_ok=True)
-        print(alias)
     return list(rendered)
 
 

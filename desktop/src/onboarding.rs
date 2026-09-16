@@ -13,7 +13,6 @@ use course2md::{
     config::{AsrProvider, model_dir_from},
     models::status::CacheState,
 };
-use gpui_component::scroll::{Scrollbar, ScrollbarMode};
 use gpui_component::switch::Switch;
 use std::sync::{
     Arc,
@@ -33,6 +32,14 @@ enum InputField {
     Address,
     Model,
     Key,
+}
+
+pub(crate) fn saved_api_key_placeholder(has_saved_credential: bool) -> &'static str {
+    if has_saved_credential {
+        "••••••••"
+    } else {
+        ""
+    }
 }
 
 struct ServiceSetup {
@@ -55,6 +62,35 @@ struct ModelRequest {
     provider: AsrProvider,
     model: String,
     root: PathBuf,
+}
+
+impl ModelRequest {
+    // 与 model_diagnostics::Request::key 同一格式，跨模块匹配用
+    fn key(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.provider.as_str(),
+            self.model,
+            self.root.display()
+        )
+    }
+}
+
+impl State {
+    /// model_preparation_finished 事件调用：请求匹配时同步准备结果
+    pub(crate) fn apply_model_preparation_result(
+        &mut self,
+        request_key: &str,
+        result: (String, bool),
+        cancelled: bool,
+    ) {
+        if let Some(preparation) = &mut self.model_preparation
+            && preparation.request.key() == request_key
+        {
+            preparation.result = Some(result);
+            preparation.cancelled = cancelled;
+        }
+    }
 }
 
 struct ModelPreparation {
@@ -159,7 +195,6 @@ pub(crate) struct State {
     finish_failed: bool,
     model_details_open: bool,
     model_choices_open: bool,
-    engine_details_open: bool,
     model_preparation: Option<ModelPreparation>,
     model_status_request: Option<ModelRequest>,
     model_return_page: Option<Page>,
@@ -174,7 +209,7 @@ impl State {
             session: 0,
             provider: None,
             local_provider: None,
-            model: "qwen3-1.7b".into(),
+            model: course2md::config::DEFAULT_ASR_MODEL.into(),
             ai_proofread: true,
             ai_summary: false,
             speech: ServiceSetup::new(ServicePurpose::Speech, window, cx),
@@ -183,7 +218,6 @@ impl State {
             finish_failed: false,
             model_details_open: false,
             model_choices_open: false,
-            engine_details_open: false,
             model_preparation: None,
             model_status_request: None,
             model_return_page: None,
@@ -205,14 +239,7 @@ impl State {
 }
 
 fn provider_label(provider: Option<AsrProvider>) -> &'static str {
-    match provider {
-        None => "自动选择（推荐）",
-        Some(AsrProvider::Coreml) => "Apple 原生",
-        Some(AsrProvider::Gpu) => "GPU",
-        Some(AsrProvider::Cpu) => "CPU",
-        Some(AsrProvider::Npu) => "Intel NPU",
-        Some(AsrProvider::Api) => "语音服务",
-    }
+    crate::provider_label(provider)
 }
 
 #[derive(Clone, Copy)]
@@ -244,7 +271,7 @@ fn setup_cache_model(provider: AsrProvider, model: &str) -> String {
         return model.to_owned();
     }
     match provider {
-        AsrProvider::Cpu | AsrProvider::Gpu => "qwen3-1.7b".into(),
+        AsrProvider::Cpu | AsrProvider::Gpu => course2md::config::DEFAULT_ASR_MODEL.into(),
         AsrProvider::Coreml => {
             course2md::models::normalize_apple_model(model).unwrap_or_else(|_| model.to_owned())
         }
@@ -280,7 +307,7 @@ fn apply_provider_choice(
     if setup_model_supported(resolved, model) {
         return None;
     }
-    let previous = std::mem::replace(model, "qwen3-1.7b".into());
+    let previous = std::mem::replace(model, course2md::config::DEFAULT_ASR_MODEL.into());
     Some(format!(
         "{} 不支持“{}”，已改用 Qwen3 1.7B。",
         provider_label(Some(resolved)),
@@ -291,7 +318,7 @@ fn apply_provider_choice(
 /// A pre-existing alias or repository remains an explicit, visible choice.
 fn local_model_choices(provider: AsrProvider, current: &str) -> Vec<(String, String, String)> {
     let mut choices = vec![(
-        "qwen3-1.7b".to_owned(),
+        course2md::config::DEFAULT_ASR_MODEL.to_owned(),
         "Qwen3 1.7B".to_owned(),
         "默认 · 下载与内存占用较高".to_owned(),
     )];
@@ -425,30 +452,11 @@ fn evidence_covers(
     })
 }
 
-fn help(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Stateful<Div> {
-    settings_value(id, value).text_color(color(MUTED))
+fn help(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Div {
+    // 与设置页同一辅助信息处理：共享 ⓘ 图标 + 常规字重（review4#2）
+    theme::supporting_info(id, value)
 }
 
-fn model_preparation_phase(stage: &str, message: &str) -> String {
-    let lower = message.trim().to_ascii_lowercase();
-    if lower.contains("silero") {
-        "下载语音检测文件".into()
-    } else if lower.contains("compil") {
-        "编译识别模型".into()
-    } else if lower
-        .split(|character: char| !character.is_ascii_alphabetic())
-        .any(|word| matches!(word, "loading" | "load"))
-        || message.contains("加载")
-    {
-        "加载识别模型".into()
-    } else if lower.contains("qwen") && lower.contains('/') {
-        "下载 Qwen3 模型文件".into()
-    } else if lower.contains("whisper") && lower.contains('/') {
-        "下载 Whisper 模型文件".into()
-    } else {
-        activity::title(stage)
-    }
-}
 
 impl Desktop {
     pub(crate) fn start_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -478,7 +486,7 @@ impl Desktop {
             .options
             .asr_model
             .clone()
-            .unwrap_or("qwen3-1.7b".into());
+            .unwrap_or(course2md::config::DEFAULT_ASR_MODEL.into());
         self.onboarding.ai_proofread = generation.ai_proofread;
         self.onboarding.ai_summary = generation.ai_summary;
         let refs = self.preferences.default_refs();
@@ -489,10 +497,6 @@ impl Desktop {
         }
         self.onboarding.model_details_open = false;
         self.onboarding.model_choices_open = false;
-        self.onboarding.engine_details_open = self
-            .onboarding
-            .provider
-            .is_some_and(|provider| provider != AsrProvider::Api);
         self.onboarding.finish_failed = false;
         self.onboarding.model_status_request = None;
         self.onboarding.model_return_page = None;
@@ -577,7 +581,14 @@ impl Desktop {
         ] {
             service.inputs[&field].update(cx, |input, cx| input.set_value(value, window, cx));
         }
-        service.inputs[&InputField::Key].update(cx, |input, cx| input.set_masked(true, window, cx));
+        service.inputs[&InputField::Key].update(cx, |input, cx| {
+            input.set_placeholder(
+                saved_api_key_placeholder(draft.credential.is_some()),
+                window,
+                cx,
+            );
+            input.set_masked(true, window, cx);
+        });
     }
 
     fn setup_step(&mut self, step: Step, cx: &mut Context<Self>) {
@@ -708,22 +719,27 @@ impl Desktop {
         service.evidence.clear();
         self.onboarding.notice = None;
         let vault = self.preferences.vault();
-        let task = cx.background_executor().spawn(async move {
-            let mut results = Vec::new();
-            for kind in required {
-                let evidence =
-                    service_test::test_service(config.clone(), kind, vault.clone(), cancel.clone())
-                        .await;
-                let passed = evidence.outcome == TestOutcome::Passed;
-                results.push((kind, evidence));
-                if !passed || cancel.load(Ordering::Acquire) {
-                    break;
+        // 服务测试含同步 Keychain 读取与受限 HTTP；见 crate::spawn_blocking_io 的说明
+        let task = crate::spawn_blocking_io(move || {
+            smol::block_on(async move {
+                let mut results = Vec::new();
+                for kind in required {
+                    let evidence =
+                        service_test::test_service(config.clone(), kind, vault.clone(), cancel.clone())
+                            .await;
+                    let passed = evidence.outcome == TestOutcome::Passed;
+                    results.push((kind, evidence));
+                    if !passed || cancel.load(Ordering::Acquire) {
+                        break;
+                    }
                 }
-            }
-            results
+                results
+            })
         });
         cx.spawn(async move |this, cx| {
-            let results = task.await;
+            let Ok(results) = task.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 let mut persisted = true;
                 for (_, evidence) in &results {
@@ -914,20 +930,6 @@ impl Desktop {
             })
     }
 
-    fn retain_setup_model_result(&mut self) {
-        let Some(preparation) = &self.onboarding.model_preparation else {
-            return;
-        };
-        let request = &preparation.request;
-        let snapshot =
-            self.setup_model_snapshot(request.provider, Some(&request.model), &request.root);
-        if let Some(result) = snapshot.notice {
-            let preparation = self.onboarding.model_preparation.as_mut().unwrap();
-            preparation.result = Some(result);
-            preparation.cancelled = snapshot.cancelled;
-        }
-    }
-
     fn open_setup_model_status(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.onboarding.active && self.page == Page::New && !self.save_current_draft(cx) {
             return;
@@ -986,7 +988,7 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.retain_setup_model_result();
+        // 渲染不收敛状态：model_preparation 的结果在 model_preparation_finished 事件里同步
         let step = self.onboarding.step;
         let (number, title, description, icon) = match step {
             Step::Engine => (
@@ -1176,12 +1178,10 @@ impl Desktop {
                             .pb(px(if compact { 20. } else { 32. }))
                             .child(motion::state_enter(
                                 ("setup-step", number),
-                                scrolling_content,
-                                cx,
-                            )),
+                                scrolling_content)),
                     )
                     .child(
-                        Scrollbar::vertical(&self.onboarding.scroll).mode(ScrollbarMode::Scrolling),
+                        crate::backend::vertical_scrollbar(&self.onboarding.scroll),
                     ),
             )
             .child(
@@ -1344,69 +1344,35 @@ impl Desktop {
             v_flex()
                 .w_full()
                 .min_w_0()
-                .gap_2()
+                .gap_3()
+                .child(help(
+                    "setup-current-engine",
+                    format!(
+                        "{} · {}",
+                        if selected.is_none() {
+                            "自动选择，目前使用"
+                        } else {
+                            "固定引擎"
+                        },
+                        provider_label(Some(selected.unwrap_or(recommended)))
+                    ),
+                ))
                 .child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .items_center()
-                        .flex_wrap()
-                        .gap_2()
-                        .child(
-                            help(
-                                "setup-current-engine",
-                                format!(
-                                    "{} · {}",
-                                    if selected.is_none() {
-                                        "自动选择，目前使用"
-                                    } else {
-                                        "固定引擎"
-                                    },
-                                    provider_label(Some(selected.unwrap_or(recommended)))
-                                ),
-                            )
-                            .w_auto()
-                            .flex_1(),
-                        )
-                        .child(
-                            quiet("setup-show-engines")
-                                .icon(icons::tune())
-                                .label(if self.onboarding.engine_details_open {
-                                    "收起引擎"
-                                } else {
-                                    "更换引擎"
-                                })
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.onboarding.engine_details_open =
-                                        !this.onboarding.engine_details_open;
-                                    cx.notify();
-                                })),
-                        ),
+                    described_choice(
+                        "setup-engine-auto",
+                        "自动选择引擎",
+                        "根据本机运行环境选择；无需固定硬件方式",
+                        icons::auto_fix(),
+                        selected.is_none(),
+                        window,
+                        cx,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.select_setup_provider(None, cx);
+                    })),
                 )
-                .child(motion::disclosure(
-                    "setup-engines",
-                    self.onboarding.engine_details_open,
-                    v_flex()
-                        .gap_3()
-                        .child(
-                            described_choice(
-                                "setup-engine-auto",
-                                "自动选择引擎",
-                                "根据本机运行环境选择；无需固定硬件方式",
-                                icons::auto_fix(),
-                                selected.is_none(),
-                                window,
-                                cx,
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.select_setup_provider(None, cx);
-                            })),
-                        )
-                        .child(field_label("setup-fixed-engine-label", "固定引擎"))
-                        .child(choices),
-                    window,
-                    cx,
-                )),
+                .child(field_label("setup-fixed-engine-label", "固定引擎"))
+                .child(choices),
         );
         let provider = selected.unwrap_or(recommended);
         let models = local_model_choices(provider, &self.onboarding.model);
@@ -1544,11 +1510,15 @@ impl Desktop {
         let session = self.onboarding.session;
         let ticket = self.onboarding.service_mut(purpose).models.begin(&request);
         let vault = self.preferences.vault();
-        let task = cx
-            .background_executor()
-            .spawn(crate::model_discovery::discover(request, vault));
+        // discover() 内部是同步 Keychain/HTTP；见 crate::spawn_blocking_io 的说明
+        let task = crate::spawn_blocking_io(move || {
+            smol::block_on(crate::model_discovery::discover(request, vault))
+        });
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let result = task
+                .recv()
+                .await
+                .unwrap_or(Err(crate::model_discovery::Error::Network));
             let _ = this.update(cx, |this, cx| {
                 if !this.onboarding.active || this.onboarding.session != session {
                     return;
@@ -1954,9 +1924,7 @@ impl Desktop {
                 ));
             body = body.child(motion::state_enter(
                 ("setup-service-feedback", service.test_serial as usize),
-                feedback,
-                cx,
-            ));
+                feedback));
         }
         body
     }
@@ -2308,35 +2276,22 @@ impl Desktop {
             .progress
             .iter()
             .filter(|(stage, progress)| {
-                (stage.starts_with("model") || stage.contains("download"))
+                crate::activity::is_model_transfer_stage(stage)
                     && progress.has_samples()
                     && !progress.done
             })
             .enumerate()
         {
             has_phase = true;
-            let phase = model_preparation_phase(stage, &progress.message);
-            view = view
-                .child(semantic_label(
-                    ("setup-model-phase", index),
-                    phase,
-                    icons::download(),
-                ))
-                .child(
-                    help(
-                        ("setup-model-progress", index),
-                        progress.detail(stage, true),
-                    )
-                    .pl(rems(28. / 14.)),
-                )
-                .when_some(progress.fraction(), |view, fraction| {
-                    view.child(motion::progress(
-                        ("setup-model-progress-bar", index),
-                        fraction,
-                        window,
-                        cx,
-                    ))
-                });
+            let phase = activity::model_transfer_phase(stage, &progress.message);
+            view = view.child(motion::transfer_status(
+                ("setup-model-progress", index),
+                phase,
+                &progress.transfer_metrics(stage, true),
+                progress.fraction(),
+                window,
+                cx,
+            ));
         }
         if !has_phase {
             view = view.child(semantic_label(
@@ -2516,9 +2471,19 @@ impl Desktop {
             .flex_shrink_0()
             .gap_2()
             .when(
-                step == Step::Ai
-                    || (step == Step::Engine && self.onboarding.provider == Some(AsrProvider::Api)),
+                (step == Step::Ai
+                    && matches!(
+                        self.setup_service_action_label(ServicePurpose::Ai, cx),
+                        "检查配置" | "重新检查" | "重试保存"
+                    ))
+                    || (step == Step::Engine && self.onboarding.provider == Some(AsrProvider::Api)
+                        && matches!(
+                            self.setup_service_action_label(ServicePurpose::Speech, cx),
+                            "检查配置" | "重新检查" | "重试保存"
+                        )),
                 |v| {
+                    // 后果说明与发起它的检查动作同现同隐（review4#6）：
+                    // 服务已通过检查、动作是「保留并继续」时不展示
                     v.child(
                         help("setup-test-notice", "检查仅发送内置示例，服务商可能计费")
                             .text_size(TEXT_AUX),
@@ -2542,7 +2507,6 @@ impl Desktop {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<Div> {
-        self.retain_setup_model_result();
         if self.onboarding.active {
             return None;
         }
@@ -2556,12 +2520,12 @@ impl Desktop {
                 self.progress
                     .iter()
                     .find(|(stage, progress)| {
-                        (stage.starts_with("model") || stage.contains("download"))
+                        crate::activity::is_model_transfer_stage(stage)
                             && progress.has_samples()
                             && !progress.done
                     })
                     .map(|(stage, progress)| {
-                        let phase = model_preparation_phase(stage, &progress.message);
+                        let phase = activity::model_transfer_phase(stage, &progress.message);
                         progress
                             .fraction()
                             .map(|fraction| {
@@ -2657,8 +2621,8 @@ impl Desktop {
 mod tests {
     use super::{
         ProviderChoice, apply_provider_choice, engine_preferences, evidence_covers,
-        local_model_choices, newly_enabled_ai_tests, requested_tests, setup_cache_model,
-        setup_model_supported,
+        local_model_choices, newly_enabled_ai_tests, requested_tests, saved_api_key_placeholder,
+        setup_cache_model, setup_model_supported,
     };
     use crate::preferences::{
         Authentication, GenerationPreferences, ServiceConfiguration, ServiceProtocol,
@@ -2670,18 +2634,18 @@ mod tests {
     #[test]
     fn model_progress_distinguishes_download_from_loading() {
         assert_eq!(
-            super::model_preparation_phase(
+            super::activity::model_transfer_phase(
                 "model/apple",
                 "Downloading vendor/Qwen3-ASR/model.safetensors"
             ),
             "下载 Qwen3 模型文件"
         );
         assert_eq!(
-            super::model_preparation_phase("model/apple", "Loading vendor/Qwen3-ASR"),
+            super::activity::model_transfer_phase("model/apple", "Loading vendor/Qwen3-ASR"),
             "加载识别模型"
         );
         assert_eq!(
-            super::model_preparation_phase("model/apple", "Compiling model"),
+            super::activity::model_transfer_phase("model/apple", "Compiling model"),
             "编译识别模型"
         );
     }
@@ -2932,5 +2896,11 @@ mod tests {
             requested_tests(ServicePurpose::Ai, true, false, true),
             vec![TestKind::Proofread, TestKind::Vision]
         );
+    }
+
+    #[test]
+    fn saved_api_key_fields_show_dots_instead_of_an_empty_box() {
+        assert_eq!(saved_api_key_placeholder(true), "••••••••");
+        assert_eq!(saved_api_key_placeholder(false), "");
     }
 }

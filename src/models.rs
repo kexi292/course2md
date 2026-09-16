@@ -19,20 +19,17 @@ pub mod status;
 
 /// Normalize Apple model names without requiring the native Apple runtime.
 /// Configuration and cache inspection also need these names on other platforms.
-/// Keep legacy aliases compatible; callers must validate backend support before
-/// accepting a user-supplied model for a new conversion.
+/// 精确别名表（不再用子串猜测，未知输入一律报错）；调用方仍须验证后端支持。
 pub fn normalize_apple_model(s: &str) -> Result<String> {
     let s = s.trim().to_ascii_lowercase();
-    if s.contains("0.6") {
-        Ok("qwen3-0.6b".into())
-    } else if s.contains("whisper") {
-        Ok("whisper".into())
-    } else if s.is_empty() || s.contains("qwen") || s.contains("1.7") {
-        Ok("qwen3-1.7b".into())
-    } else {
-        anyhow::bail!(
+    match s.as_str() {
+        "" | "qwen" | "qwen3" | "1.7" | "1.7b" | "qwen3-1.7b" | "qwen3-asr-1.7b"
+        | "qwen3-asr-1.7b-q8_0.gguf" => Ok("qwen3-1.7b".into()),
+        "0.6" | "0.6b" | "qwen3-0.6b" | "qwen3-asr-0.6b" => Ok("qwen3-0.6b".into()),
+        "whisper" | "whisper-large-v3-turbo" => Ok("whisper".into()),
+        _ => anyhow::bail!(
             "未知的 Apple 模型 / Unknown Apple model: `{s}`. 请选择 / Choose: qwen3-1.7b, qwen3-0.6b, whisper"
-        )
+        ),
     }
 }
 
@@ -125,7 +122,10 @@ pub async fn prepare(
         }
         AsrProvider::Api => unreachable!(),
     };
-    let after = status::inspect(provider, model, root).unwrap_or(before);
+    let after = status::inspect(provider, model, root).unwrap_or_else(|error| {
+        tracing::warn!("模型二次检查失败，沿用准备前状态 / Post-prepare inspection failed; keeping the pre-prepare status: {error:#}");
+        before
+    });
     let loaded = result.is_ok() && matches!(provider, AsrProvider::Coreml | AsrProvider::Npu);
     let error = result.as_ref().err().map(|error| format!("{error:#}"));
     if let Err(error) = status::record_result(&after, loaded, error) {
@@ -140,7 +140,7 @@ const HF_REPO_PATH: &str = "ggml-org/Qwen3-ASR-1.7B-GGUF/resolve/main";
 
 /// llama GGUF 模型 slug：模型目录名由它派生，身份字符串与它同源
 ///（concat! 不接受常量，身份字符串用字面量 + 测试守住一致性）。
-const LLAMA_MODEL_SLUG: &str = "qwen3-1.7b";
+const LLAMA_MODEL_SLUG: &str = crate::config::DEFAULT_ASR_MODEL;
 const LLAMA_GGUF_IDENTITY: &str = "qwen3-1.7b-gguf";
 const LLAMA_MODEL_FILE: &str = "Qwen3-ASR-1.7B-Q8_0.gguf";
 const LLAMA_MMPROJ_FILE: &str = "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf";
@@ -479,6 +479,9 @@ mod tests {
             assert_eq!(normalize_apple_model(alias).unwrap(), canonical);
         }
         assert!(normalize_apple_model("unsupported-model").is_err());
+        // 子串猜测不再生效：含关键词的未知输入必须报错而不是静默误映射
+        assert!(normalize_apple_model("foo-0.6-bar").is_err());
+        assert!(normalize_apple_model("whisper-0.6").is_err());
     }
 
     #[test]

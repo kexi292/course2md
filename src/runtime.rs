@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// kill-on-drop 的子进程句柄。
@@ -132,18 +132,62 @@ pub fn drain_stderr(stderr: std::process::ChildStderr, target: &'static str) -> 
     StderrTail { lines }
 }
 
+/// 有界命令输出（stdout/stderr 经临时文件捕获，不受 pipe 缓冲与 GUI stdin 影响）。
+pub struct BoundedOutput {
+    pub status: ExitStatus,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// 短命令执行：stdin 关闭（ffmpeg 等工具在 GUI/管道 stdin 上会挂死）、
+/// 超时强制 kill（ManagedChild 兜底）、输出经临时文件捕获（防 pipe 写满再超时）。
+pub fn run_bounded(name: &'static str, cmd: &mut Command, timeout: Duration) -> Result<BoundedOutput> {
+    use std::io::{Read, Seek};
+    let mut stdout = tempfile::tempfile()?;
+    let mut stderr = tempfile::tempfile()?;
+    cmd.stdin(Stdio::null())
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?);
+    let mut child = ManagedChild::spawn(name, cmd)?;
+    let status = child.wait_within(timeout).map_err(|e| {
+        anyhow::anyhow!(
+            "{name} 超过 {:.0}s 未完成，已终止 / did not finish within the time limit and was killed: {e:#}",
+            timeout.as_secs_f64()
+        )
+    })?;
+    stdout.rewind()?;
+    stderr.rewind()?;
+    let mut out = String::new();
+    let mut err = String::new();
+    stdout.take(64 * 1024 * 1024).read_to_string(&mut out)?;
+    stderr.take(64 * 1024 * 1024).read_to_string(&mut err)?;
+    Ok(BoundedOutput {
+        status,
+        stdout: out,
+        stderr: err,
+    })
+}
+
 /// 轮询 `{base}/health` 直到成功；子进程中途退出立即失败（不等满超时）。
 /// `expect_body` 非空时还要求响应体包含该子串——防止端口被无关服务
 /// 抢占（free_port 存在 TOCTOU 窗口）而误判就绪。
+/// `control` 非空时每轮轮询前调用：返回 Err 表示外部要求中止（暂停/取消），
+/// 立即报错返回而不等满超时；子进程由 ManagedChild 的 Drop 兜底 kill。
 pub fn wait_ready(
     base: &str,
     timeout: Duration,
     child: &mut ManagedChild,
     expect_body: Option<&str>,
+    control: Option<&dyn Fn() -> Result<()>>,
 ) -> Result<()> {
     let t0 = Instant::now();
     let url = format!("{base}/health");
     loop {
+        if let Some(check) = control
+            && let Err(e) = check()
+        {
+            anyhow::bail!("{} 启动被中止 / startup aborted: {e:#}", child.name());
+        }
         if let Some(st) = child.try_wait() {
             anyhow::bail!(
                 "{} 启动失败 / exited during startup ({st}); see error details",
@@ -293,6 +337,35 @@ mod tests {
         );
         drop(second);
         assert!(lock_file(&path).is_ok());
+    }
+
+    /// issue：桌面取消任务后，llama-server 首次加载（最长 300s 超时）不得继续空等——
+    /// control 钩子每轮轮询，返回 Err 立即中止，进程由 Drop 兜底。
+    #[cfg(unix)]
+    #[test]
+    fn wait_ready_aborts_when_control_hook_fails() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let mut child = ManagedChild::spawn("sleep", &mut cmd).unwrap();
+        let t0 = Instant::now();
+        // 永远不就绪的端口 + 60s 超时；control 第二轮即报错，应远早于超时返回
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let result = wait_ready(
+            "http://127.0.0.1:9",
+            Duration::from_secs(60),
+            &mut child,
+            None,
+            Some(&|| {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1 {
+                    anyhow::bail!("测试取消 / test cancellation")
+                } else {
+                    Ok(())
+                }
+            }),
+        );
+        let err = result.expect_err("control 报错必须中止 wait_ready");
+        assert!(err.to_string().contains("启动被中止"), "{err:#}");
+        assert!(t0.elapsed() < Duration::from_secs(10), "取消不应等到超时");
     }
 
     #[test]

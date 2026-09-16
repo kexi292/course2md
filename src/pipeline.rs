@@ -38,18 +38,33 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
     } else {
         Some(Box::new(fetch::probe_video(&cfg.url).await?))
     };
+    // 本地视频先探时长：成功进 meta；失败不当 0 静默（merge 会失真），
+    // 延迟到诊断作用域内返回，失败同样写 run.json
+    let local_duration = if is_local {
+        Some(
+            media::probe_duration(local)
+                .await
+                .context("无法探测本地视频时长 / Could not probe the local video duration"),
+        )
+    } else {
+        None
+    };
     let meta = if let Some(video) = &probed {
         video.meta.clone()
     } else {
         VideoMeta {
             title: sanitize_stem(local),
             uploader: String::new(),
-            duration: media::probe_duration(local).await.unwrap_or(0.),
+            duration: local_duration
+                .as_ref()
+                .and_then(|probe| probe.as_ref().ok().copied())
+                .unwrap_or(0.),
             webpage_url: cfg.url.clone(),
             extractor: "local".into(),
             id: execution::file_digest(local)?,
         }
     };
+    let local_duration_error = local_duration.and_then(|probe| probe.err());
     progress::stage("fetch", "done");
     let platform = config::platform_from(&cfg.url, &meta.extractor);
     let source_id = if is_local {
@@ -102,6 +117,11 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
     std::fs::create_dir_all(&cfg.out_dir)?;
     let _lock = crate::runtime::lock_file(&cfg.out_dir.join(".task.lock"))?;
     execution::bind_work_dir(&cfg.out_dir, &binding)?;
+    if let Some(error) = local_duration_error {
+        // 与 run_prepared 失败同等待遇：失败诊断 run.json 照样落盘
+        write_failure_run_json(&cfg, is_local, &platform, &meta.id, &error, started);
+        return Err(error);
+    }
     let result = run_prepared(
         &cfg,
         &meta,
@@ -343,7 +363,7 @@ async fn reprocess(
         let media_path = if Path::new(&request.source).is_file() {
             PathBuf::from(&request.source)
         } else {
-            if !verified_file(&cfg.media_path(), &cfg.out_dir.join("media.sha256"))? {
+            if !prepare_cached_media(cfg)? {
                 anyhow::ensure!(
                     !Path::new(&request.source).is_absolute()
                         && !request.source_id.starts_with("local:"),
@@ -353,6 +373,8 @@ async fn reprocess(
                     !cfg.no_download,
                     "找不到截图所需的视频 / Video required for screenshots is unavailable"
                 );
+                // 与主路径同一纪律：无法校验的现存文件已由 prepare_cached_media 归档，
+                // 此处只会真正下载新内容，不会把未校验文件标记为已校验
                 crate::error::require_cmd("yt-dlp")?;
                 progress::stage("download", "start");
                 fetch::download(&cfg.url, &cfg.media_path(), cfg.max_height, false).await?;
@@ -648,37 +670,51 @@ async fn run_prepared(
     }
     crate::dispatch::check_control()?;
     let mut outcomes = Outcomes::default();
-    let (frames_result, transcript_result) = tokio::join!(cached_frames(cfg, &media_path), async {
-        let cache_path = cfg.out_dir.join("transcript.json");
-        if cache_path.is_file() {
-            let cache: TranscriptCache = serde_json::from_slice(&std::fs::read(&cache_path)?)
-                .context("已保存的文字损坏，原文件已保留 / Saved transcript is damaged")?;
-            execution::validate_events(&cache.events)?;
-            return Ok::<_, anyhow::Error>(cache);
-        }
-        let cache = if let Some((events, source)) = selected {
-            TranscriptCache { source, events }
-        } else {
-            progress::stage("audio", "start");
-            let audio = cfg.audio_path();
-            // A verified marker proves audio extraction completed; a bare WAV may be truncated.
-            if !verified_file(&audio, &cfg.out_dir.join("audio.sha256"))? {
-                media::extract_audio(&media_path, &audio).await?;
-                save_file_digest(&audio, &cfg.out_dir.join("audio.sha256"))?;
+    // 两路并行但都受 watch_control 打断：取消时任一路不再等到自身阶段边界才停；
+    // 被 dropped 的分支由 kill_on_drop 清理其子进程
+    let (frames_result, transcript_result) = tokio::join!(
+        async {
+            tokio::select! {
+                r = cached_frames(cfg, &media_path) => r,
+                e = crate::dispatch::watch_control() => Err(e),
             }
-            progress::stage("audio", "done");
-            crate::dispatch::check_control()?;
-            progress::stage("transcribe", "start");
-            let events = asr::run(cfg, &audio).await?;
-            progress::stage("transcribe", "done");
-            TranscriptCache {
-                source: "asr".into(),
-                events,
+        },
+        async {
+            let transcript_work = async {
+                let cache_path = cfg.out_dir.join("transcript.json");
+                let cache = if cache_path.is_file() {
+                    let cache: TranscriptCache = serde_json::from_slice(&std::fs::read(&cache_path)?)
+                        .context("已保存的文字损坏，原文件已保留 / Saved transcript is damaged")?;
+                    execution::validate_events(&cache.events)?;
+                    cache
+                } else if let Some((events, source)) = selected {
+                    TranscriptCache { source, events }
+                } else {
+                    progress::stage("audio", "start");
+                    let audio = cfg.audio_path();
+                    // A verified marker proves audio extraction completed; a bare WAV may be truncated.
+                    if !verified_file(&audio, &cfg.out_dir.join("audio.sha256"))? {
+                        media::extract_audio(&media_path, &audio).await?;
+                        save_file_digest(&audio, &cfg.out_dir.join("audio.sha256"))?;
+                    }
+                    progress::stage("audio", "done");
+                    crate::dispatch::check_control()?;
+                    progress::stage("transcribe", "start");
+                    let events = asr::run(cfg, &audio).await?;
+                    progress::stage("transcribe", "done");
+                    TranscriptCache {
+                        source: "asr".into(),
+                        events,
+                    }
+                };
+                crate::checkpoint::atomic_write(&cache_path, &serde_json::to_vec_pretty(&cache)?)?;
+                Ok::<_, anyhow::Error>(cache)
+            };
+            tokio::select! {
+                r = transcript_work => r,
+                e = crate::dispatch::watch_control() => Err(e),
             }
-        };
-        crate::checkpoint::atomic_write(&cache_path, &serde_json::to_vec_pretty(&cache)?)?;
-        Ok(cache)
-    });
+        });
     let frames = match frames_result {
         Ok(frames) if !frames.is_empty() => {
             outcomes.screenshots = Outcome::succeeded();
@@ -936,11 +972,11 @@ async fn polish_with_rollback(
     let llm = cfg.llm.clone();
     let root = cfg.out_dir.clone();
     let (mut sections, mut report) = tokio::task::spawn_blocking(move || {
-        let report = crate::llm::polish_sections_report(&mut sections, &root, &llm);
-        (sections, report)
+        crate::llm::polish_sections_report(&mut sections, &root, &llm)
+            .map(|report| (sections, report))
     })
     .await
-    .context("AI 校对工作进程中断 / Proofreading worker interrupted")?;
+    .context("AI 校对工作进程中断 / Proofreading worker interrupted")??;
     if !artifact::has_readable_body(&sections) {
         sections = original;
         report.succeeded = 0;

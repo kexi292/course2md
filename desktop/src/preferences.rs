@@ -1,6 +1,6 @@
 //! Independently committed preferences, incomplete service drafts and immutable service versions.
 //!
-//! This is the desktop's authority after legacy import. Credentials never enter these files.
+//! This is the desktop's configuration authority. Credentials never enter these files.
 //! Calling `apply_defaults` or submitting a task cannot publish a service editor draft.
 
 use crate::credentials::{CredentialRef, CredentialVault, Secret};
@@ -9,7 +9,7 @@ use course2md::config::{AsrProvider, TranscriptSource};
 use course2md::settings::{AsrApiMode, ConfigFile, Defaults, DesktopSettings};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -129,27 +129,6 @@ pub fn save_failure_message(group: PreferenceGroup, error: &anyhow::Error) -> St
     format!("{name}未保存：{reason}")
 }
 
-/// A remembered output path and retired onboarding flags do not create an import task.
-pub fn has_importable_legacy(config: &ConfigFile) -> bool {
-    let baseline = ConfigFile::default();
-    GenerationPreferences::from_legacy(config) != GenerationPreferences::from_legacy(&baseline)
-        || config.desktop.library_cards
-        || config.desktop.library_group_folders
-        || config.desktop.reduce_motion
-        || config.defaults.provider == Some(AsrProvider::Api)
-        || !config.asr_api.api_key.trim().is_empty()
-        || config.llm.enabled
-        || config.llm.summarize
-        || !config.llm.base_url.trim().is_empty()
-        || !config.llm.api_key.trim().is_empty()
-}
-
-/// Validate the fields that desktop import will use. Service configuration may intentionally
-/// be incomplete and becomes a draft; it must not prevent recovery of the original file.
-pub(crate) fn validate_legacy(config: &ConfigFile) -> Result<()> {
-    GenerationPreferences::from_legacy(config).validate_value()
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct GenerationPreferences {
@@ -194,31 +173,6 @@ impl Default for GenerationPreferences {
 }
 
 impl GenerationPreferences {
-    pub fn from_legacy(config: &ConfigFile) -> Self {
-        let mut options = config.defaults.clone();
-        options.out = None;
-        options.resume = Some(true);
-        if options.formats.is_none() {
-            options.formats = Some(Vec::new());
-        }
-        Self {
-            options,
-            ai_proofread: config.llm.enabled,
-            ai_summary: config.llm.summarize,
-            vision: config.llm.vision,
-            prompt: config.llm.prompt.clone(),
-            prompt_draft: None,
-            local_model_draft: None,
-            last_local_provider: config
-                .defaults
-                .provider
-                .filter(|provider| *provider != AsrProvider::Api),
-            subtitle_languages_draft: None,
-            ai_concurrency: config.llm.concurrency.max(1),
-            preferred_subtitle_languages: Vec::new(),
-        }
-    }
-
     pub fn needs_ai(&self) -> bool {
         self.ai_proofread || self.ai_summary
     }
@@ -264,6 +218,9 @@ impl GenerationPreferences {
         clear_service_fields(config);
     }
 }
+
+/// 界面文字大小档位：应用、下拉选项、持久化校验共用同一白名单
+pub const FONT_SCALES: [f32; 4] = [1.0, 1.25, 1.5, 2.0];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -570,11 +527,11 @@ struct ServicesState {
     drafts: BTreeMap<ServiceDraftId, ServiceDraft>,
     versions: BTreeMap<ServiceVersionId, ServiceVersion>,
     defaults: ServiceRefs,
-    /// Tombstones are retained even when a service is removed from the visible list.
+    /// Deleted service ids. Independent marker files keep dispatch blocked if
+    /// an older services.json backup is restored.
     stopped: BTreeMap<ServiceId, u64>,
     tests: BTreeMap<String, ServiceTestEvidence>,
     discarded_drafts: BTreeSet<ServiceDraftId>,
-    legacy_imported: bool,
 }
 
 /// Runtime-only configuration. Deliberately neither Debug nor Serialize. Consume immediately
@@ -644,7 +601,7 @@ impl Validate for ApplicationPreferences {
         if !self.appearance.valid() {
             bail!("请为浅色和深色外观分别选择对应的主题");
         }
-        if ![1.0, 1.25, 1.5, 2.0].contains(&self.font_scale) {
+        if !crate::preferences::FONT_SCALES.contains(&self.font_scale) {
             bail!("请选择 100%、125%、150% 或 200% 的文字大小");
         }
         Ok(())
@@ -728,6 +685,7 @@ impl Store {
         store.application = store.load_group(PreferenceGroup::Application);
         store.services = store.load_group(PreferenceGroup::Services);
         store.load_recovery_intents();
+        store.forget_retired_service_records();
         store
     }
 
@@ -832,17 +790,110 @@ impl Store {
     pub fn versions(&self) -> impl Iterator<Item = &ServiceVersion> {
         self.services.versions.values()
     }
+    /// 每个 service_id 只保留最新 version（列表页与选择器共用）
+    pub fn latest_versions(&self) -> BTreeMap<String, ServiceVersion> {
+        let mut latest = BTreeMap::<String, ServiceVersion>::new();
+        for version in self.versions() {
+            if latest
+                .get(&version.service_id)
+                .is_none_or(|old| old.number < version.number)
+            {
+                latest.insert(version.service_id.clone(), version.clone());
+            }
+        }
+        latest
+    }
     pub fn version(&self, id: &str) -> Option<&ServiceVersion> {
         self.services.versions.get(id)
     }
-    pub fn is_service_stopped(&self, service_id: &str) -> bool {
-        self.services.stopped.contains_key(service_id)
-            || self.root.join("stopped-services").join(service_id).exists()
+    pub fn is_service_retired(&self, service_id: &str) -> bool {
+        self.services.stopped.contains_key(service_id) || self.retired_marker(service_id).exists()
     }
     /// Display the currently loaded state without probing the filesystem.
     /// Actual publication, submission and execution still use dispatch checks.
-    pub fn service_stopped_in_snapshot(&self, service_id: &str) -> bool {
+    pub fn service_retired_in_snapshot(&self, service_id: &str) -> bool {
         self.services.stopped.contains_key(service_id)
+    }
+    fn retired_marker(&self, service_id: &str) -> PathBuf {
+        self.root.join("stopped-services").join(service_id)
+    }
+    /// The marker's presence is the whole record; nothing reads its body.
+    fn write_retire_marker(&self, service_id: &str) -> Result<()> {
+        atomic_write_with_retry(&self.retired_marker(service_id), b"deleted\n")
+    }
+    fn forget_retired_service_records(&mut self) {
+        if self.is_blocked(PreferenceGroup::Services) {
+            return;
+        }
+        let retired: BTreeSet<_> = self
+            .services
+            .stopped
+            .keys()
+            .cloned()
+            .chain(
+                std::fs::read_dir(self.root.join("stopped-services"))
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .filter_map(|entry| {
+                        entry
+                            .file_name()
+                            .to_str()
+                            .map(str::to_owned)
+                            .filter(|name| !name.starts_with('.'))
+                    }),
+            )
+            .collect();
+        if retired.is_empty() {
+            return;
+        }
+        let leftover: Vec<_> = self
+            .services
+            .versions
+            .values()
+            .filter(|version| retired.contains(&version.service_id))
+            .cloned()
+            .collect();
+        let leftover_drafts = self
+            .services
+            .drafts
+            .values()
+            .any(|draft| retired.contains(&draft.service_id));
+        if leftover.is_empty() && !leftover_drafts {
+            return;
+        }
+        for service_id in &retired {
+            // Legacy tombstones lived only in services.json; ensure the
+            // independent marker exists so a restored backup cannot revive
+            // dispatch for this service.
+            if !self.retired_marker(service_id).exists() {
+                let _ = self.write_retire_marker(service_id);
+            }
+        }
+        let mut next = self.services.clone();
+        next.versions
+            .retain(|_, version| !retired.contains(&version.service_id));
+        next.drafts
+            .retain(|_, draft| !retired.contains(&draft.service_id));
+        if next
+            .defaults
+            .asr
+            .as_ref()
+            .is_some_and(|id| !next.versions.contains_key(id))
+        {
+            next.defaults.asr = None;
+        }
+        if next
+            .defaults
+            .llm
+            .as_ref()
+            .is_some_and(|id| !next.versions.contains_key(id))
+        {
+            next.defaults.llm = None;
+        }
+        if self.persist(PreferenceGroup::Services, &next).is_ok() {
+            self.services = next;
+        }
     }
     pub fn test_evidence(
         &self,
@@ -1024,8 +1075,8 @@ impl Store {
             .drafts
             .get(draft_id)
             .ok_or_else(|| anyhow!("当前服务编辑已结束，请重新打开服务后再试"))?;
-        if self.is_service_stopped(&draft.service_id) {
-            bail!("此服务已停止使用。请添加新的服务，原任务不会自动恢复外发");
+        if self.is_service_retired(&draft.service_id) {
+            bail!("此服务已删除。请添加新的服务，原任务不会自动恢复外发");
         }
         let config = draft.configuration()?;
         if self.services.versions.values().any(|version| {
@@ -1091,29 +1142,53 @@ impl Store {
         Ok(())
     }
 
-    /// Commit the stop intent before returning success. The scheduler must call check_dispatch
-    /// at every request boundary. Already dispatched requests are still received and saved.
-    pub fn stop_service(&mut self, service_id: &str) -> Result<()> {
-        if !self
+    /// Delete the service configuration. Already dispatched requests are still
+    /// received and saved. A marker keeps later restores from sending new ones.
+    pub fn delete_service(&mut self, service_id: &str) -> Result<()> {
+        let versions: Vec<_> = self
             .services
             .versions
             .values()
-            .any(|version| version.service_id == service_id)
-        {
+            .filter(|version| version.service_id == service_id)
+            .cloned()
+            .collect();
+        if versions.is_empty() {
             bail!("找不到此服务");
         }
+        let credentials: Vec<_> = versions
+            .iter()
+            .filter_map(|version| version.config.credential.clone())
+            .collect();
+        self.write_retire_marker(service_id)?;
         let mut next = self.services.clone();
         next.stopped
             .entry(service_id.to_owned())
             .or_insert_with(now_seconds);
-        // An independent immutable intent must survive restoration of an older group backup.
-        // Otherwise a corrupt preferences file could undo a user's request to stop egress.
-        atomic_write_with_retry(
-            &self.root.join("stopped-services").join(service_id),
-            b"stopped\n",
-        )?;
+        next.versions
+            .retain(|_, version| version.service_id != service_id);
+        next.drafts
+            .retain(|_, draft| draft.service_id != service_id);
+        if next
+            .defaults
+            .asr
+            .as_ref()
+            .is_some_and(|id| !next.versions.contains_key(id))
+        {
+            next.defaults.asr = None;
+        }
+        if next
+            .defaults
+            .llm
+            .as_ref()
+            .is_some_and(|id| !next.versions.contains_key(id))
+        {
+            next.defaults.llm = None;
+        }
         self.persist(PreferenceGroup::Services, &next)?;
         self.services = next;
+        for reference in credentials {
+            let _ = self.vault.remove(&reference);
+        }
         Ok(())
     }
 
@@ -1124,13 +1199,13 @@ impl Store {
         let version = self
             .version(reference)
             .ok_or_else(|| anyhow!("找不到任务使用的服务版本，请选择服务后建立新尝试"))?;
-        match std::fs::metadata(self.root.join("stopped-services").join(&version.service_id)) {
-            Ok(_) => bail!("所选服务已停用，尚未发送新的请求"),
+        match std::fs::metadata(self.retired_marker(&version.service_id)) {
+            Ok(_) => bail!("此服务已删除，尚未发送新的请求"),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => bail!("暂时无法确认此服务是否已停用，尚未发送新的请求"),
+            Err(_) => bail!("暂时无法确认此服务是否已删除，尚未发送新的请求"),
         }
-        if self.is_service_stopped(&version.service_id) {
-            bail!("所选服务已停用，尚未发送新的请求");
+        if self.is_service_retired(&version.service_id) {
+            bail!("此服务已删除，尚未发送新的请求");
         }
         Ok(version)
     }
@@ -1172,8 +1247,8 @@ impl Store {
                 .version(id)
                 .context("找不到任务使用的服务版本，请选择服务后建立新尝试")?;
             ensure!(
-                !self.service_stopped_in_snapshot(&version.service_id),
-                "所选服务已停用，尚未发送新的请求"
+                !self.services.stopped.contains_key(&version.service_id),
+                "此服务已删除，尚未发送新的请求"
             );
             Ok(version)
         };
@@ -1213,10 +1288,47 @@ impl Store {
         Ok(config)
     }
 
+    #[cfg(test)]
     pub fn resolve_for_execution(
         &self,
         base: &ConfigFile,
         references: &ServiceRefs,
+    ) -> Result<ResolvedConfig> {
+        let mut secrets = HashMap::new();
+        for reference in self.credential_references_for(base, references)? {
+            secrets.insert(
+                reference.clone(),
+                self.vault.resolve(&reference)?.expose().to_owned(),
+            );
+        }
+        self.resolve_for_execution_with_secrets(base, references, &secrets)
+    }
+
+    /// Credential references a request build needs. Resolving them can block on the system
+    /// keychain (its authorization dialog queue may even be held by another application), so
+    /// UI callers must resolve these off the main thread and pass the results to
+    /// `resolve_for_execution_with_secrets`.
+    pub fn credential_references_for(
+        &self,
+        base: &ConfigFile,
+        references: &ServiceRefs,
+    ) -> Result<Vec<CredentialRef>> {
+        let required = references.required_for(base);
+        let mut needed = Vec::new();
+        for id in [required.asr, required.llm].into_iter().flatten() {
+            let version = self.check_dispatch(&id)?;
+            if let Some(reference) = &version.config.credential {
+                needed.push(reference.clone());
+            }
+        }
+        Ok(needed)
+    }
+
+    pub fn resolve_for_execution_with_secrets(
+        &self,
+        base: &ConfigFile,
+        references: &ServiceRefs,
+        secrets: &HashMap<String, String>,
     ) -> Result<ResolvedConfig> {
         let mut config = ResolvedConfig(self.config_for_refs(base, references)?);
         let required = references.required_for(base);
@@ -1224,11 +1336,14 @@ impl Store {
             if let Some(id) = id {
                 let version = self.check_dispatch(&id)?;
                 if let Some(reference) = &version.config.credential {
-                    let secret = self.vault.resolve(reference)?;
+                    let secret = secrets
+                        .get(reference)
+                        .cloned()
+                        .context("服务凭据尚未就绪，请重新打开服务设置保存一次")?;
                     if is_asr {
-                        config.0.asr_api.api_key = secret.expose().to_owned();
+                        config.0.asr_api.api_key = secret;
                     } else {
-                        config.0.llm.api_key = secret.expose().to_owned();
+                        config.0.llm.api_key = secret;
                     }
                 }
             }
@@ -1238,6 +1353,7 @@ impl Store {
 
     /// Async tests may finish after an edit. Only evidence for this exact content is attached
     /// to the current draft; stale results cannot label replacement fields as tested.
+    #[cfg(test)]
     pub fn record_draft_test(
         &mut self,
         draft_id: &str,
@@ -1260,132 +1376,6 @@ impl Store {
         let mut next = self.services.clone();
         next.tests.insert(evidence.fingerprint.clone(), evidence);
         self.persist(PreferenceGroup::Services, &next)?;
-        self.services = next;
-        Ok(())
-    }
-
-    pub fn legacy_imported(&self) -> bool {
-        self.services.legacy_imported
-    }
-
-    /// Import is explicit and one-time; callers must not continue saving/reading the old TOML
-    /// as a runtime authority. All groups commit independently, and service publication does
-    /// not occur until its captured credential and full configuration are durable.
-    pub fn import_legacy(&mut self, legacy: &ConfigFile) -> Result<()> {
-        if self.services.legacy_imported {
-            return Ok(());
-        }
-        if self
-            .revisions
-            .get(&PreferenceGroup::Generation)
-            .copied()
-            .unwrap_or(0)
-            == 0
-        {
-            self.save_generation(GenerationPreferences::from_legacy(legacy))?;
-        }
-        if self
-            .revisions
-            .get(&PreferenceGroup::Application)
-            .copied()
-            .unwrap_or(0)
-            == 0
-        {
-            self.save_application(ApplicationPreferences {
-                desktop: legacy.desktop.clone(),
-                ..ApplicationPreferences::default()
-            })?;
-        }
-        let mut next = self.services.clone();
-        let mut new_credentials = Vec::new();
-        let import_service_defaults = self
-            .revisions
-            .get(&PreferenceGroup::Services)
-            .copied()
-            .unwrap_or(0)
-            == 0;
-        for (purpose, address, model, key, protocol) in [
-            (
-                ServicePurpose::Speech,
-                &legacy.asr_api.base_url,
-                &legacy.asr_api.model,
-                &legacy.asr_api.api_key,
-                if legacy.asr_api.mode == AsrApiMode::Chat {
-                    ServiceProtocol::SpeechChat
-                } else {
-                    ServiceProtocol::SpeechTranscriptions
-                },
-            ),
-            (
-                ServicePurpose::Ai,
-                &legacy.llm.base_url,
-                &legacy.llm.model,
-                &legacy.llm.api_key,
-                ServiceProtocol::AiChat,
-            ),
-        ] {
-            // Legacy speech placeholders are not real configured services without either an
-            // explicit cloud selection or a credential. Do not manufacture an active service.
-            let used = match purpose {
-                ServicePurpose::Speech => {
-                    legacy.defaults.provider == Some(AsrProvider::Api) || !key.trim().is_empty()
-                }
-                ServicePurpose::Ai => {
-                    legacy.llm.enabled
-                        || legacy.llm.summarize
-                        || !address.trim().is_empty()
-                        || !key.trim().is_empty()
-                }
-            };
-            if !used {
-                continue;
-            }
-            let mut draft = ServiceDraft::new(purpose);
-            draft.protocol = protocol;
-            draft.address = address.clone();
-            draft.model = model.clone();
-            draft.revision = 1;
-            if !key.trim().is_empty() {
-                match self.vault.insert(Secret::new(key.clone())) {
-                    Ok(reference) => {
-                        draft.credential = Some(reference.clone());
-                        new_credentials.push(reference);
-                    }
-                    Err(error) => {
-                        for reference in &new_credentials {
-                            let _ = self.vault.remove(reference);
-                        }
-                        return Err(error);
-                    }
-                }
-            }
-            if let Ok(config) = draft.configuration() {
-                let version = ServiceVersion {
-                    id: new_id("service-version"),
-                    service_id: draft.service_id,
-                    number: 1,
-                    saved_at: now_seconds(),
-                    published_from: Some(draft.id.clone()),
-                    config,
-                };
-                if import_service_defaults {
-                    match purpose {
-                        ServicePurpose::Speech => next.defaults.asr = Some(version.id.clone()),
-                        ServicePurpose::Ai => next.defaults.llm = Some(version.id.clone()),
-                    }
-                }
-                next.versions.insert(version.id.clone(), version);
-            } else {
-                next.drafts.insert(draft.id.clone(), draft);
-            }
-        }
-        next.legacy_imported = true;
-        if let Err(error) = self.persist(PreferenceGroup::Services, &next) {
-            for reference in new_credentials {
-                let _ = self.vault.remove(&reference);
-            }
-            return Err(error);
-        }
         self.services = next;
         Ok(())
     }
@@ -1550,8 +1540,6 @@ impl Store {
                 self.services.drafts.insert(draft.id.clone(), draft);
             }
         }
-        // Keep legacy private edits readable for compatibility, but they are
-        // neither active services nor a user-facing recovery collection.
     }
 
     fn persist<T: Serialize + DeserializeOwned + Validate>(
@@ -1976,14 +1964,16 @@ mod tests {
     }
 
     #[test]
-    fn stop_is_persistent_and_only_blocks_actual_service_use() {
+    fn deleting_a_service_blocks_dispatch_and_clears_defaults() {
         let (directory, mut store) = isolated();
         let draft = complete_draft(&mut store, "model");
         let version = store
             .publish_service(&draft.id, BindingScope::Defaults)
             .unwrap();
-        store.stop_service(&version.service_id).unwrap();
+        store.delete_service(&version.service_id).unwrap();
         let reopened = Store::open(directory.path(), store.vault());
+        assert!(reopened.version(&version.id).is_none());
+        assert!(reopened.default_refs().llm.is_none());
         assert!(reopened.check_dispatch(&version.id).is_err());
         assert!(
             reopened
@@ -1994,7 +1984,13 @@ mod tests {
         config.llm.summarize = true;
         assert!(
             reopened
-                .config_for_refs(&config, &reopened.default_refs())
+                .config_for_refs(
+                    &config,
+                    &ServiceRefs {
+                        llm: Some(version.id.clone()),
+                        ..ServiceRefs::default()
+                    }
+                )
                 .is_err()
         );
     }
@@ -2077,21 +2073,6 @@ mod tests {
         assert!(!config.llm.enabled && config.llm.summarize && !config.llm.vision);
         assert_eq!(config.defaults.out, Some(PathBuf::from("/test-library")));
         assert!(config.llm.api_key.is_empty());
-    }
-
-    #[test]
-    fn old_storage_and_onboarding_markers_do_not_create_an_empty_settings_import() {
-        let mut config = ConfigFile::default();
-        config.defaults.out = Some(PathBuf::from("/isolated/existing-library"));
-        config.defaults.resume = Some(false);
-        config.desktop.setup_completed = true;
-        config.desktop.system_titlebar = true;
-        assert!(!has_importable_legacy(&config));
-        config.defaults.asr_model = Some("qwen3-0.6b".into());
-        assert!(has_importable_legacy(&config));
-        config.defaults.asr_model = None;
-        config.llm.prompt = Some("Preserve scientific terms.".into());
-        assert!(has_importable_legacy(&config));
     }
 
     #[test]
@@ -2200,22 +2181,23 @@ mod tests {
     }
 
     #[test]
-    fn restoring_a_pre_stop_backup_cannot_reenable_service_dispatch() {
+    fn restoring_a_pre_delete_backup_cannot_reenable_service_dispatch() {
         let (directory, mut store) = isolated();
         let draft = complete_draft(&mut store, "model");
         let version = store
             .publish_service(&draft.id, BindingScope::Defaults)
             .unwrap();
-        store.stop_service(&version.service_id).unwrap();
-        std::fs::write(directory.path().join("services.json"), b"corrupt primary").unwrap();
+        let backup = std::fs::read(directory.path().join("services.json")).unwrap();
+        store.delete_service(&version.service_id).unwrap();
+        std::fs::write(directory.path().join("services.json"), backup).unwrap();
         let recovered = Store::open(directory.path(), store.vault());
-        assert!(recovered.version(&version.id).is_some());
-        assert!(recovered.is_service_stopped(&version.service_id));
+        assert!(recovered.version(&version.id).is_none());
+        assert!(recovered.is_service_retired(&version.service_id));
         assert!(recovered.check_dispatch(&version.id).is_err());
     }
 
     #[test]
-    fn preview_uses_loaded_services_but_dispatch_rechecks_external_stop_markers() {
+    fn preview_uses_loaded_services_but_dispatch_rechecks_delete_markers() {
         let (directory, mut store) = isolated();
         let draft = complete_draft(&mut store, "model");
         let version = store
@@ -2228,14 +2210,41 @@ mod tests {
         assert_eq!(preview.llm.model, "model");
         let markers = directory.path().join("stopped-services");
         std::fs::create_dir_all(&markers).unwrap();
-        std::fs::write(markers.join(&version.service_id), b"stopped externally\n").unwrap();
-        // The renderer has a snapshot; it cannot authorize sending. Both real
-        // submission and execution must observe the independently written stop.
+        std::fs::write(markers.join(&version.service_id), b"deleted\n").unwrap();
         assert!(store.config_for_preview(&config, &refs).is_ok());
         assert!(store.config_for_refs(&config, &refs).is_err());
         assert!(store.resolve_for_execution(&config, &refs).is_err());
-        store.stop_service(&version.service_id).unwrap();
+        store.delete_service(&version.service_id).unwrap();
+        assert!(store.version(&version.id).is_none());
         assert!(store.config_for_preview(&config, &refs).is_err());
+    }
+
+    #[test]
+    fn previously_stopped_services_are_removed_on_open() {
+        let (directory, mut store) = isolated();
+        let draft = complete_draft(&mut store, "model");
+        let version = store
+            .publish_service(&draft.id, BindingScope::Defaults)
+            .unwrap();
+        let mut services = serde_json::from_slice::<serde_json::Value>(
+            &std::fs::read(directory.path().join("services.json")).unwrap(),
+        )
+        .unwrap();
+        services["value"]["stopped"] = serde_json::json!({ version.service_id.clone(): 1 });
+        std::fs::write(
+            directory.path().join("services.json"),
+            serde_json::to_vec(&services).unwrap(),
+        )
+        .unwrap();
+        let reopened = Store::open(directory.path(), store.vault());
+        assert!(reopened.version(&version.id).is_none());
+        assert!(reopened.default_refs().llm.is_none());
+        assert!(reopened.is_service_retired(&version.service_id));
+        assert!(
+            reopened
+                .versions()
+                .all(|item| item.service_id != version.service_id)
+        );
     }
 
     #[test]

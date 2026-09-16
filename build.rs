@@ -11,6 +11,8 @@ fn main() {
     let skip = std::env::var_os("COURSE2MD_NO_APPLE").is_some();
     println!("cargo:rerun-if-env-changed=COURSE2MD_NO_APPLE");
     println!("cargo:rerun-if-changed=native/apple-asr/Package.swift");
+    // swift package update 只改 resolved 文件；漏掉它会让本地构建静默链接旧静态库
+    println!("cargo:rerun-if-changed=native/apple-asr/Package.resolved");
     println!("cargo:rerun-if-changed=native/apple-asr/Sources");
 
     if target_os != "macos" || target_arch != "aarch64" || skip {

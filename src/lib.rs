@@ -11,7 +11,6 @@ pub mod error;
 pub mod execution;
 pub mod fetch;
 pub mod llm;
-pub mod legacy;
 pub mod media;
 pub mod models;
 pub mod npu;

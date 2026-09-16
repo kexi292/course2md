@@ -61,12 +61,8 @@ pub fn run() -> Result<()> {
     }
     #[cfg(apple_native)]
     {
-        let exe = std::env::current_exe().unwrap_or_default();
-        let dir = exe.parent().unwrap_or(Path::new("."));
-        let shaders = ["mlx.metallib", "default.metallib"]
-            .iter()
-            .any(|name| dir.join(name).is_file());
-        if shaders {
+        // 与运行时 ensure_metallib 同一搜索清单（exe 同目录/Resources/上级 Resources/CWD）
+        if crate::apple::find_metallib().is_some() {
             check(
                 &mut out,
                 true,
@@ -93,7 +89,7 @@ pub fn run() -> Result<()> {
         None => out.push("- gpu/cpu  缺少 llama-server / llama-server missing. 安装 llama.cpp 后重试 / Install llama.cpp to use these backends.".into()),
     }
     if cfg!(target_os = "linux") {
-        let device = Path::new("/dev/accel/accel0").exists();
+        let device = Path::new(crate::npu::NPU_DEVICE_PATH).exists();
         out.push(if device {
             "✓ npu  检测到 Intel NPU；仍需 OpenVINO 运行环境 / Intel NPU detected; OpenVINO runtime also required"
         } else {

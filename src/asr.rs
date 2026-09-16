@@ -30,6 +30,10 @@ const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(300);
 const API_HTTP_TIMEOUT: Duration = Duration::from_secs(120);
 /// llama-server 单 chunk 转写超时
 const LLAMA_HTTP_TIMEOUT: Duration = Duration::from_secs(180);
+/// ffmpeg silencedetect 上限：整段音频 VAD 只做一次，但不得无限挂死
+const VAD_TIMEOUT: Duration = Duration::from_secs(900);
+/// ffmpeg 单段切音频上限（chunk 最长 max_speech 秒，处理应远快于此）
+const CUT_TIMEOUT: Duration = Duration::from_secs(120);
 /// 云端 STT 并发 worker 数：网络往返是主要瓶颈
 const WORKERS: usize = 4;
 /// HTTP 重试：最多 3 次（1 次首发 + 2 次重试），指数退避 1s → 2s；
@@ -229,6 +233,7 @@ fn run_blocking(
         SERVER_READY_TIMEOUT,
         &mut child,
         Some("\"status\":\"ok\""),
+        Some(&crate::dispatch::check_control),
     ) {
         return Err(e.context(format!(
             "无法启动识别服务 / Could not start llama-server. Details:\n{}",
@@ -743,6 +748,14 @@ pub fn gpu_devices(bin: &Path) -> Result<Vec<String>> {
     parse_gpu_devices(&output)
 }
 
+/// `--list-devices` 也会报告 BLAS/Accelerate 这类 CPU 后端行；只有这些前缀才是 GPU。
+/// 桌面端（desktop/src/backend.rs）共用同一判定，避免两处白名单漂移。
+pub fn is_gpu_device_id(id: &str) -> bool {
+    ["MTL", "CUDA", "Vulkan", "SYCL", "ROCm"]
+        .iter()
+        .any(|prefix| id.starts_with(prefix))
+}
+
 fn parse_gpu_devices(output: &str) -> Result<Vec<String>> {
     let (_, rows) = output.split_once("Available devices:").context(
         "无法解析 llama-server GPU 列表，请更新 llama.cpp 后运行 llama-server --list-devices 检查 / Cannot parse the llama-server GPU list; update llama.cpp and check with llama-server --list-devices",
@@ -752,7 +765,7 @@ fn parse_gpu_devices(output: &str) -> Result<Vec<String>> {
         .map(str::trim)
         .filter(|line| {
             line.split_once(':').is_some_and(|(name, description)| {
-                !name.is_empty() && !description.trim().is_empty()
+                is_gpu_device_id(name) && !description.trim().is_empty()
             })
         })
         .map(str::to_owned)
@@ -938,31 +951,31 @@ fn transcribe_file(client: &ureq::Agent, base: &str, wav: &Path) -> Result<Strin
     });
     let v = post_json_retry(client, &format!("{base}/v1/chat/completions"), None, &body)
         .context("本地语音识别请求失败 / Local transcription request failed")?;
-    let text = v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string();
-    if text.is_empty() {
-        anyhow::bail!("本地识别返回空文本 / Local transcription returned empty text: {v}");
+    let choice = &v["choices"][0];
+    if choice.is_null() {
+        // 协议错误才失败：响应缺少 choices
+        anyhow::bail!("本地识别响应缺少 choices / Local transcription response missing choices: {v}");
     }
-    Ok(text)
+    // 空文本按无语音处理（与云端 transcribe_api 的 Ok(None) 同语义）：
+    // VAD 切出的近静音段在 llama-server 上常返回空，不该把整次 ASR 判死
+    Ok(choice["message"]["content"].as_str().unwrap_or("").to_string())
 }
 
 pub(crate) fn ffmpeg_vad(wav: &Path, max_speech: f32) -> Result<Vec<Seg>> {
-    let out = Command::new("ffmpeg")
-        .args(["-hide_banner", "-i"])
+    // stdin 关闭 + 超时强制 kill：ffmpeg 在 GUI/管道 stdin 上可能挂死（issue 审查）
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-nostdin", "-i"])
         .arg(wav)
-        .args(["-af", SILENCEDETECT_AF, "-f", "null", "-"])
-        .output()
-        .context("ffmpeg silencedetect")?;
+        .args(["-af", SILENCEDETECT_AF, "-f", "null", "-"]);
+    let out = crate::runtime::run_bounded("ffmpeg", &mut cmd, VAD_TIMEOUT)?;
     if !out.status.success() {
         anyhow::bail!(
             "ffmpeg silencedetect 失败（{0}）：{1} / ffmpeg silencedetect failed ({0}): {1}",
             out.status,
-            crate::error::tail_lines(&String::from_utf8_lossy(&out.stderr), 3)
+            crate::error::tail_lines(&out.stderr, 3)
         );
     }
-    let log = String::from_utf8_lossy(&out.stderr);
+    let log = &out.stderr;
     // 时长只探测一次，传入 normalize_segments（此前两处各 ffprobe 一次）；
     // 失败至少告警——静默落 0.0 会让末段语音丢失。
     let dur = match crate::media::probe_duration_blocking(wav) {
@@ -1231,18 +1244,17 @@ fn invert_silence(dur: f64, sil: &[(f64, f64)]) -> Vec<(f64, f64)> {
 
 pub fn cut_wav(src: &Path, start: f64, end: f64, dest: &Path) -> Result<()> {
     let dur = (end - start).max(0.05);
-    let st = Command::new("ffmpeg")
-        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss"])
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss"])
         .arg(format!("{start:.3}"))
         .arg("-t")
         .arg(format!("{dur:.3}"))
         .arg("-i")
         .arg(src)
         .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
-        .arg(dest)
-        .status()
-        .context("ffmpeg cut")?;
-    if !st.success() {
+        .arg(dest);
+    let out = crate::runtime::run_bounded("ffmpeg", &mut cmd, CUT_TIMEOUT)?;
+    if !out.status.success() {
         anyhow::bail!("无法切分音频 / ffmpeg could not split audio");
     }
     Ok(())
@@ -1260,6 +1272,11 @@ mod tests {
         let devices = super::parse_gpu_devices("Available devices:\n  Vulkan0: Intel Arc B390 (23719 MiB)\n  CUDA0: NVIDIA GPU (8192 MiB)\n").unwrap();
         assert_eq!(devices.len(), 2);
         assert!(devices[0].contains("Intel Arc B390"));
+        // BLAS/Accelerate 是 CPU 后端行，不得当作 GPU 报告（macOS 上 `--list-devices` 会列出它）。
+        let devices = super::parse_gpu_devices("Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n  MTL0: Apple M3 Max (110100 MiB, 110100 MiB free)\n").unwrap();
+        assert_eq!(devices.len(), 1);
+        assert!(devices[0].contains("Apple M3 Max"));
+        assert!(super::parse_gpu_devices("Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n").unwrap().is_empty());
         assert!(super::parse_gpu_devices("unknown option --list-devices").is_err());
     }
 

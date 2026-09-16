@@ -47,6 +47,9 @@ fn init_logging(verbose: u8, quiet: bool, json: bool) {
 
 fn main() -> std::process::ExitCode {
     let args: Vec<_> = std::env::args_os().collect();
+    // 近似扫描（先于 clap 解析，解析失败也要走对输出模式）：把值恰为 "--json"/
+    // "run-task" 的其他参数值（如 --llm-prompt "--json"）误判为 NDJSON 是可接受的
+    // 代价——它只影响解析失败时的错误格式，不影响成功路径的行为。
     let json_requested = args
         .iter()
         .skip(1)
@@ -86,6 +89,10 @@ fn main() -> std::process::ExitCode {
     match run(cli) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
+            // 向导的「退出，稍后下载」是正常结束，不是失败
+            if error.downcast_ref::<course2md::wizard::ExitWizard>().is_some() {
+                return std::process::ExitCode::SUCCESS;
+            }
             let message = format!("{error:#}");
             if json {
                 progress::emit(serde_json::json!({"type": "error", "message": message}));

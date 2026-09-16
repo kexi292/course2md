@@ -16,8 +16,8 @@
 
 ```sh
 swift desktop/assets/dmg/render.swift
-python3 -m pip install -r desktop/scripts/requirements-packaging.txt
-python3 desktop/scripts/package.py --debug --no-build
+uv sync
+uv run python desktop/scripts/package.py --debug --no-build
 ```
 
 `--no-build` 复用已构建的本机二进制。发布时沿用原有签名、公证、staple 顺序；dmgbuild 使用 ditto 复制应用。DMG 根目录只显示应用和 Applications，许可证与构建来源放入已签名应用的 Resources，ZIP 继续包含开发说明。

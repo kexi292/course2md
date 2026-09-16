@@ -16,13 +16,14 @@ pub struct FolderOrigin {
 }
 
 /// Resolved picker state shared by the full picker and the compact chip.
-struct FolderContext {
-    storage: Option<PathBuf>,
-    origin: FolderOrigin,
-    folder: Option<u64>,
-    load_error: Option<String>,
-    label: String,
-    folders: BTreeMap<u64, String>,
+#[derive(Clone)]
+pub(crate) struct FolderContext {
+    pub(crate) storage: Option<PathBuf>,
+    pub(crate) origin: FolderOrigin,
+    pub(crate) folder: Option<u64>,
+    pub(crate) load_error: Option<String>,
+    pub(crate) label: String,
+    pub(crate) folders: BTreeMap<u64, String>,
 }
 
 struct FolderDialog {
@@ -144,15 +145,21 @@ impl Desktop {
         let cancel = Arc::new(AtomicBool::new(false));
         self.preview_cancel = Some(cancel.clone());
         let online = self.online;
-        let handle = cx.windows().first().copied();
-        let task = cx
-            .background_executor()
-            .spawn(async move { source::probe(input, online, cancel) });
+        // 用发起探测的窗口而不是“第一个窗口”：回调只可能落回正确的窗口
+        let handle = Some(window.window_handle());
+        // probe 是同步网络/子进程工作；见 crate::spawn_blocking_io 的说明
+        let task = crate::spawn_blocking_io(move || source::probe(input, online, cancel));
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("识别工作线程意外结束")));
+            // worker 计数无论窗口存亡都必须归还（request_close 等待它归零）
+            let _ = this.update(cx, |this, _| {
+                this.preview_workers = this.preview_workers.saturating_sub(1);
+            });
             if let Some(handle) = handle {
                 let _ = cx.update_window(handle, |_, window, cx| this.update(cx, |this, cx| {
-                    this.preview_workers = this.preview_workers.saturating_sub(1);
                     if this.preview_generation != generation || this.value(Field::Source, cx) != request_input { return; }
                     if let Some((id, revision)) = &token {
                         if !this.workspace.as_ref().is_some_and(|workspace| workspace.state.matches_input(id, *revision)) { return; }
@@ -531,7 +538,7 @@ impl Desktop {
         .detach();
     }
 
-    fn folder_context(&self, course: Option<PathBuf>) -> FolderContext {
+    pub(crate) fn folder_context(&self, course: Option<PathBuf>) -> FolderContext {
         let storage = course.as_ref().map(|path| {
             self.courses
                 .iter()
@@ -593,7 +600,7 @@ impl Desktop {
         }
     }
 
-    fn folder_menu(
+    pub(crate) fn folder_menu(
         entity: WeakEntity<Desktop>,
         origin: FolderOrigin,
         storage: Option<PathBuf>,
@@ -647,80 +654,6 @@ impl Desktop {
         }
     }
 
-    /// Folder filter for the library toolbar (sidebar successor): lists 未分类 and
-    /// every folder of every readable registered library; the final form lands
-    /// with the notes-page milestone (M5).
-    pub fn folder_filter_menu(
-        entity: WeakEntity<Desktop>,
-        multi: bool,
-        sections: Vec<(PathBuf, String, Vec<(u64, String)>)>,
-        current_root: PathBuf,
-        current: Option<u64>,
-    ) -> impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static {
-        move |menu, _, _| {
-            let menu = menu.item(
-                PopupMenuItem::new("全部笔记")
-                    .icon(IconName::BookOpen)
-                    .checked(current.is_none())
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_, _, cx| {
-                            let _ = entity.update(cx, |this, cx| {
-                                this.folder_filter = None;
-                                this.scrolls[Page::Library as usize]
-                                    .set_offset(point(px(0.), px(0.)));
-                                cx.notify();
-                            });
-                        }
-                    }),
-            );
-            let mut menu = menu;
-            for (root, library_name, folders) in sections.iter() {
-                let mut entries: Vec<(u64, String)> = vec![(0u64, "未分类".to_owned())];
-                entries.extend(folders.iter().cloned());
-                menu = menu.separator();
-                for (id, name) in entries {
-                    let entity = entity.clone();
-                    let root = root.clone();
-                    let checked = current == Some(id) && current_root == root;
-                    let label = if multi {
-                        format!("{library_name} · {name}")
-                    } else {
-                        name
-                    };
-                    menu = menu.item(
-                        PopupMenuItem::new(label)
-                            .icon(IconName::Folder)
-                            .checked(checked)
-                            .on_click(move |_, _, cx| {
-                                let _ = entity.update(cx, |this, cx| {
-                                    this.library_root = root.clone();
-                                    if let Some(organization) = this.library_indexes.get(&root) {
-                                        this.library = organization.clone();
-                                    }
-                                    this.folder_filter = Some(id);
-                                    this.scrolls[Page::Library as usize]
-                                        .set_offset(point(px(0.), px(0.)));
-                                    this.navigate(Page::Library, cx);
-                                });
-                            }),
-                    );
-                }
-            }
-            menu.separator().item(
-                PopupMenuItem::new("新建文件夹…")
-                    .icon(icons::create_new_folder())
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_, window, cx| {
-                            let _ =
-                                entity.update(cx, |this, cx| this.begin_folder(None, window, cx));
-                        }
-                    }),
-            )
-        }
-    }
-
     pub fn folder_picker(
         &self,
         course: Option<PathBuf>,
@@ -769,51 +702,5 @@ impl Desktop {
                         .text_color(color(DANGER)),
                 )
             })
-    }
-
-    /// Compact folder assignment for library rows and card footers:
-    /// one-line truncated label capped by `max_w`, or icon-only
-    /// when the content column is narrow.
-    pub fn folder_chip(
-        &self,
-        course: Option<PathBuf>,
-        index: usize,
-        max_w: Option<Pixels>,
-        icon_only: bool,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let context = self.folder_context(course);
-        let label = context.label.clone();
-        control(("folder-picker", index))
-            .ghost()
-            .h_auto()
-            .min_h(rems(2.))
-            .min_w_0()
-            .flex_shrink(1.)
-            .when_some(max_w, |button, width| button.max_w(width))
-            .when(max_w.is_none(), |button| button.flex_1())
-            .px_2()
-            .text_color(color(MUTED))
-            .disabled(self.loading || context.load_error.is_some())
-            .icon(IconName::Folder)
-            .accessibility_label(format!("保存到文件夹：{label}"))
-            .tooltip(label.clone())
-            .when(!icon_only, |button| {
-                button.child(
-                    div()
-                        .min_w_0()
-                        .whitespace_nowrap()
-                        .text_ellipsis()
-                        .child(label),
-                )
-            })
-            .child(Icon::new(IconName::ChevronDown).size_4().flex_shrink_0())
-            .dropdown_menu(Self::folder_menu(
-                cx.entity().downgrade(),
-                context.origin,
-                context.storage,
-                context.folders,
-                context.folder,
-            ))
     }
 }

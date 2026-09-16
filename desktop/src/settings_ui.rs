@@ -15,7 +15,6 @@ use gpui_component::{
     checkbox::Checkbox,
     input::{InputContentType, Textarea, TextareaState},
     menu::{DropdownMenu, PopupMenuItem},
-    scroll::{Scrollbar, ScrollbarMode},
     switch::Switch,
 };
 use std::sync::{
@@ -88,11 +87,6 @@ pub(crate) struct State {
     generation_block_messages: std::collections::BTreeSet<String>,
     pending_generation: Option<GenerationPreferences>,
     pending_application: Option<ApplicationPreferences>,
-    legacy_status: Option<String>,
-    legacy: crate::legacy_settings::Inspection,
-    legacy_details_open: bool,
-    legacy_action_detail: Option<String>,
-    legacy_preserved: Option<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -166,11 +160,6 @@ impl State {
             generation_block_messages: Default::default(),
             pending_generation: None,
             pending_application: None,
-            legacy_status: None,
-            legacy: crate::legacy_settings::Inspection::inspect(course2md::settings::config_path()),
-            legacy_details_open: false,
-            legacy_action_detail: None,
-            legacy_preserved: None,
             _subscriptions: subscriptions,
         }
     }
@@ -200,42 +189,10 @@ pub(super) fn field_label(
         .font_weight(FontWeight::SEMIBOLD)
 }
 
-fn setting_label(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Div {
-    let value = value.into();
-    let icon = if value.contains("文字大小") {
-        icons::zoom_in()
-    } else if value.contains("外观") {
-        icons::palette()
-    } else if value.contains("动态效果") {
-        icons::play_arrow()
-    } else if value.contains("引导") {
-        icons::book_open()
-    } else if value == "视频处理与导出" {
-        icons::movie()
-    } else if value == "读取在线视频" {
-        icons::link()
-    } else if value.contains("认证") || value.contains("密钥") || value == "API Key" {
-        icons::shield()
-    } else if value.contains("名称") {
-        icons::edit()
-    } else if value.contains("字幕") || value.contains("语言") {
-        icons::subtitles()
-    } else if value.contains("识别") || value.contains("音频") {
-        icons::microphone()
-    } else if value.contains("AI") || value.contains("摘要") || value.contains("校对") {
-        icons::auto_fix()
-    } else if value.contains("服务") || value.contains("地址") || value.contains("接口") {
-        icons::cloud()
-    } else if value.contains("保存") || value.contains("位置") || value.contains("缓存") {
-        icons::folder_open()
-    } else if value.contains("模型") {
-        icons::storage()
-    } else {
-        icons::tune()
-    };
+fn setting_label(id: impl Into<ElementId>, icon: Icon, value: impl Into<SharedString>) -> Div {
     semantic_label(
         id,
-        value,
+        value.into(),
         icon.size(rems(20. / 14.)).text_color(color(GRAY)),
     )
 }
@@ -244,26 +201,29 @@ fn setting_label(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Di
 /// Controls align to this item's trailing edge and reflow as a unit.
 pub(super) fn settings_row(
     id: impl Into<ElementId>,
+    icon: Icon,
     label: &'static str,
     hint: &'static str,
     control: impl IntoElement,
 ) -> Div {
-    settings_form_row(id, label, hint, control, false)
+    settings_form_row(id, icon, label, hint, control, false)
 }
 
 /// Editing fields use a top label: errors and related actions stay with the
 /// input without forcing long values into the preference label/control grid.
 pub(super) fn settings_field_row(
     id: impl Into<ElementId>,
+    icon: Icon,
     label: &'static str,
     hint: &'static str,
     field: impl IntoElement,
 ) -> Div {
-    settings_form_row(id, label, hint, field, true)
+    settings_form_row(id, icon, label, hint, field, true)
 }
 
 fn settings_form_row(
     id: impl Into<ElementId>,
+    icon: Icon,
     label: &'static str,
     hint: &'static str,
     control: impl IntoElement,
@@ -275,7 +235,7 @@ fn settings_form_row(
             .w_full()
             .min_w_0()
             .gap_2()
-            .child(setting_label(id.clone(), label))
+            .child(setting_label(id.clone(), icon, label))
             .child(div().w_full().min_w_0().child(control))
             .when(!hint.is_empty(), |view| {
                 view.child(theme::supporting_info(
@@ -299,7 +259,7 @@ fn settings_form_row(
                 .max_w_full()
                 .min_h(CONTROL_HEIGHT)
                 .justify_center()
-                .child(setting_label(id.clone(), label)),
+                .child(setting_label(id.clone(), icon, label)),
         )
         .child(
             h_flex()
@@ -320,7 +280,30 @@ fn settings_form_row(
     })
 }
 
-fn setting_surface() -> Div {
+/// Status rows inside an existing card: label on the shared axis, value trailing.
+/// Do not wrap these in `settings_row`; that would give each item its own surface.
+pub(super) fn settings_status_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    value: impl IntoElement,
+) -> Div {
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .min_h(CONTROL_HEIGHT)
+        .items_center()
+        .gap_4()
+        .child(field_label(id, label).flex_1().min_w_0().max_w_full())
+        .child(
+            h_flex()
+                .flex_shrink_0()
+                .items_center()
+                .justify_end()
+                .child(value),
+        )
+}
+
+pub(super) fn setting_surface() -> Div {
     v_flex()
         .w_full()
         .min_w_0()
@@ -352,19 +335,14 @@ pub(super) fn settings_section(id: impl Into<ElementId>, title: &'static str, ic
     )
 }
 
-pub(super) fn settings_detail_group(id: impl Into<ElementId>, title: &'static str) -> Div {
+pub(super) fn settings_detail_group(id: impl Into<ElementId>, icon: Icon, title: &'static str) -> Div {
     v_flex().w_full().min_w_0().gap_3().child(
         h_flex()
             .min_w_0()
             .items_center()
             .gap_2()
             .child(
-                match title {
-                    "开源许可" => icons::code(),
-                    "所需程序" => icons::computer(),
-                    "检查服务" => icons::science(),
-                    _ => icons::info(),
-                }
+                icon
                 .size(rems(20. / 14.))
                 .flex_shrink_0()
                 .text_color(color(MUTED)),
@@ -427,7 +405,8 @@ fn service_protocol_label(protocol: ServiceProtocol) -> &'static str {
 fn settings_tab_icon(index: usize) -> Icon {
     match index {
         4 => icons::palette(),
-        0 => icons::tune(),
+        // 生成笔记 = 笔记/文档对象（tune 留给偏好/高级覆盖项，见 crosspage#8 图标指称）
+        0 => icons::subtitles(),
         1 => icons::cloud(),
         2 => icons::storage(),
         _ => icons::info(),
@@ -445,13 +424,6 @@ fn settings_tab_label(index: usize) -> &'static str {
     ["生成笔记", "服务与账号", "存储", "应用", "外观"][index.min(4)]
 }
 
-fn settings_tab_position(index: usize) -> usize {
-    SETTINGS_TABS
-        .iter()
-        .position(|(tab, _)| *tab == index)
-        .unwrap_or(0)
-}
-
 fn group(id: &'static str, title: &'static str) -> Div {
     let icon = match id {
         "language-settings" => icons::subtitles(),
@@ -465,7 +437,12 @@ fn group(id: &'static str, title: &'static str) -> Div {
     };
     settings_section(id, title, icon)
 }
-pub(super) fn preference(label: &'static str, hint: &'static str, control: Switch) -> Div {
+pub(super) fn preference(
+    icon: Option<Icon>,
+    label: &'static str,
+    hint: &'static str,
+    control: Switch,
+) -> Div {
     setting_surface().child(
         h_flex()
             .w_full()
@@ -481,10 +458,17 @@ pub(super) fn preference(label: &'static str, hint: &'static str, control: Switc
                         v_flex()
                             .min_h(CONTROL_HEIGHT)
                             .justify_center()
-                            .child(setting_label(
-                                SharedString::from(format!("preference-label-{label}")),
-                                label,
-                            )),
+                            .child(match icon {
+                                Some(icon) => setting_label(
+                                    SharedString::from(format!("preference-label-{label}")),
+                                    icon,
+                                    label,
+                                ),
+                                None => v_flex().child(field_label(
+                                    SharedString::from(format!("preference-label-{label}")),
+                                    label,
+                                )),
+                            }),
                     )
                     .when(!hint.is_empty(), |view| {
                         view.child(theme::supporting_info(
@@ -570,10 +554,16 @@ impl Desktop {
             },
         )
     }
-    fn setting_preference(&self, label: &'static str, hint: &'static str, control: Switch) -> Div {
+    fn setting_preference(
+        &self,
+        icon: Icon,
+        label: &'static str,
+        hint: &'static str,
+        control: Switch,
+    ) -> Div {
         self.reveal_setting(
             SharedString::from(format!("preference-reveal-{label}")),
-            preference(label, hint, control),
+            preference(Some(icon), label, hint, control),
         )
     }
     fn setting_field(&self, field: EditField, label: &'static str, _cx: &App) -> Div {
@@ -597,6 +587,13 @@ impl Desktop {
             ("setting-field-reveal", field as usize),
             settings_field_row(
                 ("setting-field-label", field as usize),
+                match field {
+                    EditField::Name => icons::edit(),
+                    EditField::Address => icons::cloud(),
+                    EditField::Key => icons::shield(),
+                    EditField::Model | EditField::LocalModel => icons::storage(),
+                    EditField::Languages => icons::subtitles(),
+                },
                 label,
                 if field == EditField::Address {
                     "填写基础地址或完整接口地址，包含 http:// 或 https://。"
@@ -710,11 +707,37 @@ impl Desktop {
             self.settings_return_focus = window.focused(cx);
         }
         self.navigate(Page::Settings, cx);
+        // 事件入口的准备动作（不是渲染副作用）：钳制遗留 tab、同步 tab stops、
+        // 首次水合输入框、按 key 去重的模型诊断检查
+        self.prepare_settings_view(window, cx);
         self.settings_ui.tab_focus[self.settings_tab.min(4)].focus(window, cx);
     }
 
+    pub(crate) fn prepare_settings_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.normalize_settings_tab();
+        self.sync_settings_tab_stops();
+        self.hydrate_settings_inputs(window, cx);
+        self.ensure_settings_model_diagnostic(cx);
+    }
+
+    fn normalize_settings_tab(&mut self) {
+        // 5 是旧分页的遗留值，无写入路径；读到时迁移到「服务与账号」
+        if self.settings_tab == 5 {
+            self.settings_tab = 1;
+        }
+        if self.settings_tab > 4 {
+            self.settings_tab = 4;
+        }
+    }
+    fn sync_settings_tab_stops(&mut self) {
+        for (index, focus) in self.settings_ui.tab_focus.iter_mut().enumerate() {
+            *focus = focus.clone().tab_stop(index == self.settings_tab);
+        }
+    }
     fn select_settings_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_tab = index;
+        self.normalize_settings_tab();
+        self.sync_settings_tab_stops();
         self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
         self.settings_ui.tab_focus[index].focus(window, cx);
         cx.notify();
@@ -778,17 +801,8 @@ impl Desktop {
     }
 
     pub fn settings_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.hydrate_settings_inputs(window, cx);
-        self.ensure_settings_model_diagnostic(cx);
-        if self.settings_tab == 5 {
-            self.settings_tab = 1;
-        }
-        if self.settings_tab > 4 {
-            self.settings_tab = 4;
-        }
-        for (index, focus) in self.settings_ui.tab_focus.iter_mut().enumerate() {
-            *focus = focus.clone().tab_stop(index == self.settings_tab);
-        }
+        // 渲染不得有副作用：hydrate/诊断检查/tab 钳制都在 open_settings、
+        // select_settings_tab、restore_settings_group 等事件入口完成
         let sidebar = crate::views::settings_uses_sidebar(window);
         let content_width = crate::views::settings_content_width(window);
         let layout_width = content_width
@@ -797,11 +811,12 @@ impl Desktop {
             } else {
                 0.
             };
-        let header = text("settings-page-title", "设置")
-            .role(Role::Heading)
-            .text_size(TEXT_DISPLAY)
-            .font_weight(FontWeight::SEMIBOLD)
-            .flex_shrink_0();
+        let header = theme::page_heading(
+            "settings-page-title",
+            icons::settings().size(px(24.)).text_color(color(ACCENT_STRONG)),
+            "设置",
+        )
+        .flex_shrink_0();
         let header = h_flex()
             .w_full()
             .min_w_0()
@@ -949,8 +964,7 @@ impl Desktop {
             )
             .when(!editing_service, |panel| {
                 panel.child(
-                    Scrollbar::vertical(&self.scrolls[Page::Settings as usize])
-                        .mode(ScrollbarMode::Scrolling),
+                    crate::backend::vertical_scrollbar(&self.scrolls[Page::Settings as usize]),
                 )
             });
         let body = div()
@@ -992,6 +1006,7 @@ impl Desktop {
         let languages = group("language-settings", "文字来源")
             .child(settings_row(
                 "subtitle-language-label",
+                icons::subtitles(),
                 "字幕语言",
                 "优先使用字幕，没有字幕时识别视频声音。",
                 v_flex()
@@ -1028,7 +1043,7 @@ impl Desktop {
                     )
                     .child(
                         quiet("toggle-language-details")
-                            .icon(icons::tune())
+                            .icon(icons::subtitles())
                             .label("自定义语言优先级")
                             .self_end()
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -1079,6 +1094,7 @@ impl Desktop {
             ));
         let mut recognition = group("asr-default-settings", "语音识别").child(settings_row(
             "asr-method-label",
+            icons::microphone(),
             "识别方式",
             if provider == "api" {
                 "视频声音会发送到所选语音服务。"
@@ -1106,6 +1122,7 @@ impl Desktop {
                         self.settings_ui.asr_details_open,
                         settings_row(
                             "asr-hardware-heading",
+                            icons::computer(),
                             "本机引擎",
                             "自动选择本机支持的引擎。固定引擎不可用时会提示原因。",
                             self.setting_choices("default-asr-hardware", "本机引擎")
@@ -1158,6 +1175,7 @@ impl Desktop {
             .child(self.service_picker(ServicePurpose::Ai, false, cx))
             .child(
                 self.setting_preference(
+                    icons::auto_fix(),
                     "AI 校对",
                     "修正识别错误和标点，保留原意与原语言。",
                     Switch::new("default-ai-proofread")
@@ -1171,6 +1189,7 @@ impl Desktop {
             )
             .child(
                 self.setting_preference(
+                    icons::summarize(),
                     "生成摘要",
                     "提炼课程要点并放在笔记开头。",
                     Switch::new("default-ai-summary")
@@ -1186,6 +1205,7 @@ impl Desktop {
         if value.ai_proofread {
             ai_options = ai_options.child(
                 self.setting_preference(
+                    icons::image(),
                     "发送截图辅助校对",
                     if value.vision {
                         "校对时会将对应截图与文字一起发送。"
@@ -1292,14 +1312,6 @@ impl Desktop {
             .min_w_0()
             .flex_shrink_0()
             .gap_6()
-            .child(
-                text(
-                    "generation-default-scope",
-                    "用于后续生成，也会更新当前未单独修改的选项。",
-                )
-                .text_sm()
-                .text_color(color(MUTED)),
-            )
             .child(languages)
             .child(recognition)
             .child(ai)
@@ -1307,6 +1319,7 @@ impl Desktop {
                 group("export-default-settings", "导出与离线保存")
                     .child(settings_row(
                         "export-format-label",
+                        icons::download(),
                         "同时导出",
                         "笔记自动保存在应用内；所选文件可通过阅读页的「打开导出文件夹」取用。",
                         h_flex().gap_3().flex_wrap().children(
@@ -1339,6 +1352,7 @@ impl Desktop {
                     ))
                     .child(
                         self.setting_preference(
+                            icons::movie(),
                             "保留视频供离线播放",
                             "保存在线来源的视频，会占用额外空间。",
                             Switch::new("default-keep-video")
@@ -1362,8 +1376,8 @@ impl Desktop {
             .options
             .asr_model
             .as_deref()
-            .unwrap_or("qwen3-1.7b");
-        let mut models = vec![("qwen3-1.7b", "Qwen3 1.7B")];
+            .unwrap_or(course2md::config::DEFAULT_ASR_MODEL);
+        let mut models = vec![(course2md::config::DEFAULT_ASR_MODEL, "Qwen3 1.7B")];
         if provider == Some(AsrProvider::Coreml)
             || (provider.is_none() && cfg!(target_os = "macos"))
             || provider == Some(AsrProvider::Npu)
@@ -1378,7 +1392,12 @@ impl Desktop {
             ]);
         }
         let known = models.iter().any(|(id, _)| *id == selected);
-        let picker = if models.len() > 3 {
+        let picker = if models.len() == 1 {
+            // 只有一个可选模型时不是「选择器」：展示静态值，不伪装可选择（settings#2）
+            let (_, label) = models[0];
+            settings_value("default-local-model-single", label.to_owned())
+                .into_any_element()
+        } else if models.len() > 3 {
             let current = selected.to_owned();
             let label = models
                 .iter()
@@ -1439,9 +1458,19 @@ impl Desktop {
             .gap_2()
             .child(picker)
             .child(
-                text("model-readiness-conclusion", conclusion)
-                    .text_size(TEXT_AUX)
-                    .text_color(color(if settled { MUTED } else { WARNING })),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        (if settled { icons::info() } else { icons::warning() })
+                            .size(rems(16. / 14.))
+                            .text_color(color(if settled { MUTED } else { WARNING })),
+                    )
+                    .child(
+                        text("model-readiness-conclusion", conclusion)
+                            .text_size(TEXT_AUX)
+                            .text_color(color(if settled { MUTED } else { WARNING })),
+                    ),
             )
             .child(
                 h_flex()
@@ -1451,7 +1480,12 @@ impl Desktop {
                     .flex_wrap()
                     .child(
                         quiet("toggle-model-details")
-                            .icon(icons::download())
+                            // 图标随动作语义切换：展开是下载管理，收起是折叠（review4 可选）
+                            .icon(if self.settings_ui.model_details_open {
+                                icons::chevron_up()
+                            } else {
+                                icons::download()
+                            })
                             .label(if self.settings_ui.model_details_open {
                                 "收起模型管理"
                             } else {
@@ -1480,6 +1514,7 @@ impl Desktop {
             );
         let mut view = v_flex().w_full().min_w_0().gap_2().child(settings_row(
             "local-model-heading",
+            icons::storage(),
             "识别模型",
             "",
             model_control,
@@ -1552,15 +1587,7 @@ impl Desktop {
                     .child(self.account_settings_page(cx)),
             ),
         );
-        let mut latest = BTreeMap::<String, ServiceVersion>::new();
-        for version in self.preferences.versions() {
-            if latest
-                .get(&version.service_id)
-                .is_none_or(|old| old.number < version.number)
-            {
-                latest.insert(version.service_id.clone(), version.clone());
-            }
-        }
+        let latest = self.preferences.latest_versions();
         for (purpose, heading_id, heading, add_label) in [
             (
                 ServicePurpose::Speech,
@@ -1576,10 +1603,19 @@ impl Desktop {
             ),
         ] {
             let mut section = group(heading_id, heading);
-            for version in latest
-                .values()
-                .filter(|version| version.config.protocol.purpose() == purpose)
-            {
+            if purpose == ServicePurpose::Speech {
+                // 空分区先说明用途：何时需要在线语音服务（与「生成笔记·识别方式」呼应）
+                section = section.child(theme::supporting_info(
+                    "speech-services-purpose",
+                    "没有字幕时可改用在线语音服务识别视频声音；音频会发送到所选服务。本机识别可用时不需要添加。",
+                ));
+            }
+            for version in latest.values().filter(|version| {
+                version.config.protocol.purpose() == purpose
+                    && !self
+                        .preferences
+                        .service_retired_in_snapshot(&version.service_id)
+            }) {
                 section = section.child(self.service_card(version, cx));
             }
             section = section.child(
@@ -1598,9 +1634,6 @@ impl Desktop {
 
     /// A saved service with capability-specific test results and quiet actions.
     fn service_card(&self, version: &ServiceVersion, cx: &mut Context<Self>) -> Div {
-        let stopped = self
-            .preferences
-            .service_stopped_in_snapshot(&version.service_id);
         let id = version.id.clone();
         let service_id = version.service_id.clone();
         let purpose = version.config.protocol.purpose();
@@ -1647,10 +1680,10 @@ impl Desktop {
                 )
             });
         let mut status_badges = Vec::new();
-        if stopped || tests.is_empty() {
+        if tests.is_empty() {
             status_badges.push(badge(BadgeKind::Neutral).child(text(
                 SharedString::from(format!("saved-service-badge-{id}")),
-                if stopped { "已停用" } else { "尚未测试" },
+                "尚未测试",
             )));
         }
         for (kind, evidence) in &tests {
@@ -1693,6 +1726,16 @@ impl Desktop {
                     .items_center()
                     .flex_wrap()
                     .child(
+                        (if purpose == ServicePurpose::Speech {
+                            icons::microphone()
+                        } else {
+                            icons::science()
+                        })
+                        .size(px(20.))
+                        .text_color(color(ACCENT_STRONG))
+                        .flex_shrink_0(),
+                    )
+                    .child(
                         text(
                             SharedString::from(format!("saved-service-title-{id}")),
                             version.config.name.clone(),
@@ -1702,46 +1745,44 @@ impl Desktop {
                         .min_w_0()
                         .whitespace_normal(),
                     )
-                    .when(!stopped, |row| {
-                        row.child(
-                            quiet(SharedString::from(format!("test-saved-service-{id}")))
-                                .icon(icons::science())
-                                .label("测试…")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_settings_service_editor(
-                                        purpose,
-                                        Some(test_id.clone()),
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            quiet(SharedString::from(format!("edit-saved-service-{id}")))
-                                .icon(icons::edit())
-                                .label("编辑")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.open_settings_service_editor(
-                                        purpose,
-                                        Some(edit_id.clone()),
-                                        window,
-                                        cx,
-                                    );
-                                })),
-                        )
-                        .child(
-                            quiet(SharedString::from(format!(
-                                "stop-saved-service-{service_id}"
-                            )))
-                            .icon(icons::close())
-                            .label("停用…")
-                            .on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    this.confirm_stop_service(service_id.clone(), window, cx)
-                                },
-                            )),
-                        )
-                    }),
+                    .child(
+                        quiet(SharedString::from(format!("test-saved-service-{id}")))
+                            .icon(icons::science())
+                            .label("测试…")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_settings_service_editor(
+                                    purpose,
+                                    Some(test_id.clone()),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        quiet(SharedString::from(format!("edit-saved-service-{id}")))
+                            .icon(icons::edit())
+                            .label("编辑")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_settings_service_editor(
+                                    purpose,
+                                    Some(edit_id.clone()),
+                                    window,
+                                    cx,
+                                );
+                            })),
+                    )
+                    .child(
+                        quiet(SharedString::from(format!(
+                            "delete-saved-service-{service_id}"
+                        )))
+                        .icon(icons::delete())
+                        .label("删除…")
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.confirm_delete_service(service_id.clone(), window, cx)
+                            },
+                        )),
+                    ),
             )
             .child(
                 text(
@@ -1773,20 +1814,14 @@ impl Desktop {
                             .text_size(TEXT_AUX)
                             .text_color(color(MUTED)),
                         )
-                        .when(!stopped, |row| {
-                            row.child(
-                                quiet(SharedString::from(format!("update-default-service-{id}")))
-                                    .icon(icons::check_circle())
-                                    .label("用于以后生成…")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.confirm_default_service(
-                                            default_id.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                        }),
+                        .child(
+                            quiet(SharedString::from(format!("update-default-service-{id}")))
+                                .icon(icons::check_circle())
+                                .label("用于以后生成…")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.confirm_default_service(default_id.clone(), window, cx);
+                                })),
+                        ),
                 )
             })
             .child(h_flex().gap_2().flex_wrap().children(status_badges))
@@ -1808,16 +1843,6 @@ impl Desktop {
                     )
                     .text_size(TEXT_AUX)
                     .text_color(color(GRAY)),
-                )
-            })
-            .when(stopped, |card| {
-                card.child(
-                    text(
-                        SharedString::from(format!("stopped-service-recovery-{id}")),
-                        "已停止发送新请求。已有笔记和历史配置保留；需要再次使用时请添加服务。",
-                    )
-                    .text_size(TEXT_AUX)
-                    .text_color(color(MUTED)),
                 )
             })
     }
@@ -1844,10 +1869,24 @@ impl Desktop {
             .min_h_0()
             .gap_3()
             .child(
-                text("service-editor-inline-title", title)
-                    .text_size(TEXT_TITLE)
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .flex_shrink_0(),
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .flex_shrink_0()
+                    .child(
+                        (if purpose == ServicePurpose::Speech {
+                            icons::microphone()
+                        } else {
+                            icons::science()
+                        })
+                        .size(px(20.))
+                        .text_color(color(ACCENT_STRONG)),
+                    )
+                    .child(
+                        text("service-editor-inline-title", title)
+                            .text_size(TEXT_TITLE)
+                            .font_weight(FontWeight::SEMIBOLD),
+                    ),
             )
             .child(self.service_editor_content(true, window, cx))
     }
@@ -1891,26 +1930,27 @@ impl Desktop {
             .filter(|version| {
                 !self
                     .preferences
-                    .service_stopped_in_snapshot(&version.service_id)
+                    .service_retired_in_snapshot(&version.service_id)
             })
             .map(|version| version.id.clone());
-        let mut latest = BTreeMap::<String, ServiceVersion>::new();
-        for version in self
+        let latest: BTreeMap<String, ServiceVersion> = self
             .preferences
-            .versions()
-            .filter(|v| v.config.protocol.purpose() == purpose)
-        {
-            if latest
-                .get(&version.service_id)
-                .is_none_or(|old| old.number < version.number)
-            {
-                latest.insert(version.service_id.clone(), version.clone());
-            }
-        }
+            .latest_versions()
+            .into_iter()
+            .filter(|(_, v)| {
+                v.config.protocol.purpose() == purpose
+                    && !self.preferences.service_retired_in_snapshot(&v.service_id)
+            })
+            .collect();
         let mut view = v_flex().w_full().min_w_0().gap_2();
         let current_version = current
             .as_deref()
             .and_then(|id| self.preferences.version(id))
+            .filter(|version| {
+                !self
+                    .preferences
+                    .service_retired_in_snapshot(&version.service_id)
+            })
             .cloned();
         let old_current = current_version
             .as_ref()
@@ -1938,12 +1978,7 @@ impl Desktop {
                 .map(|version| version.config.name.clone())
                 .unwrap_or_else(|| "选择服务".into());
             let detail = current_version.as_ref().map(|version| {
-                let state = if self
-                    .preferences
-                    .service_stopped_in_snapshot(&version.service_id)
-                {
-                    " · 已停用".to_owned()
-                } else if old_current.is_some() {
+                let state = if old_current.is_some() {
                     format!(" · 当前使用旧配置 v{}", version.number)
                 } else {
                     String::new()
@@ -1953,10 +1988,7 @@ impl Desktop {
             let menu_choices = choices
                 .into_iter()
                 .map(|version| {
-                    let stopped = self
-                        .preferences
-                        .service_stopped_in_snapshot(&version.service_id);
-                    let mut state = if let Some(old) = old_current
+                    let state = if let Some(old) = old_current
                         .as_ref()
                         .filter(|old| old.service_id == version.service_id)
                     {
@@ -1996,13 +2028,7 @@ impl Desktop {
                     } else {
                         String::new()
                     };
-                    if stopped {
-                        if !state.is_empty() {
-                            state.push_str(" · ");
-                        }
-                        state.push_str("已停用");
-                    }
-                    (version, stopped, state)
+                    (version, state)
                 })
                 .collect::<Vec<_>>();
             let entity = cx.entity().downgrade();
@@ -2052,7 +2078,7 @@ impl Desktop {
                         menu.min_w(width.min(px(360.)))
                             .max_w(width)
                             .scrollable(true),
-                        |menu, (version, stopped, state)| {
+                        |menu, (version, state)| {
                             let id = version.id.clone();
                             let name = version.config.name.clone();
                             let detail =
@@ -2076,7 +2102,6 @@ impl Desktop {
                                         })
                                 })
                                 .checked(current.as_ref() == Some(&id))
-                                .disabled(*stopped)
                                 .on_click(move |_, _, cx| {
                                     let _ = entity.update(cx, |this, cx| {
                                         let selectable =
@@ -2084,9 +2109,7 @@ impl Desktop {
                                                 version.config.protocol.purpose() == purpose
                                                     && !this
                                                         .preferences
-                                                        .service_stopped_in_snapshot(
-                                                            &version.service_id,
-                                                        )
+                                                        .is_service_retired(&version.service_id)
                                             });
                                         if selectable {
                                             this.bind_service(
@@ -2179,6 +2202,11 @@ impl Desktop {
             settings_row(
                 ("default-service-label", purpose as usize),
                 if purpose == ServicePurpose::Speech {
+                    icons::microphone()
+                } else {
+                    icons::science()
+                },
+                if purpose == ServicePurpose::Speech {
                     "语音服务"
                 } else {
                     "AI 服务"
@@ -2260,7 +2288,11 @@ impl Desktop {
         };
         let draft = self
             .selected_task_service(purpose)
-            .filter(|version| !self.preferences.is_service_stopped(&version.service_id))
+            .filter(|version| {
+                !self
+                    .preferences
+                    .service_retired_in_snapshot(&version.service_id)
+            })
             .map(|v| ServiceDraft::from_version(&v))
             .unwrap_or_else(|| ServiceDraft::new(purpose));
         self.open_service_draft(draft, Some(target), None, window, cx);
@@ -2286,7 +2318,11 @@ impl Desktop {
             .ai_service
             .as_deref()
             .and_then(|id| self.preferences.version(id))
-            .filter(|version| !self.preferences.is_service_stopped(&version.service_id))
+            .filter(|version| {
+                !self
+                    .preferences
+                    .service_retired_in_snapshot(&version.service_id)
+            })
             .map(ServiceDraft::from_version)
             .unwrap_or_else(|| ServiceDraft::new(ServicePurpose::Ai));
         self.open_service_draft(draft, None, Some((task_id, components)), window, cx);
@@ -2323,6 +2359,7 @@ impl Desktop {
             {
                 self.settings_tab = 1;
                 self.navigate(Page::Settings, cx);
+                self.prepare_settings_view(window, cx);
                 self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
                 self.settings_ui.inputs[&EditField::Name]
                     .update(cx, |input, cx| input.focus(window, cx));
@@ -2333,6 +2370,7 @@ impl Desktop {
             if !self.close_service_editor(window, cx) {
                 self.settings_tab = 1;
                 self.navigate(Page::Settings, cx);
+                self.prepare_settings_view(window, cx);
                 self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
                 return false;
             }
@@ -2379,7 +2417,7 @@ impl Desktop {
             .and_then(|id| self.preferences.version(id))
             .is_none_or(|version| {
                 self.preferences
-                    .service_stopped_in_snapshot(&version.service_id)
+                    .service_retired_in_snapshot(&version.service_id)
             });
         self.settings_ui.editor = Some(ServiceEditor {
             draft,
@@ -2404,6 +2442,7 @@ impl Desktop {
         if inline {
             self.settings_tab = 1;
             self.navigate(Page::Settings, cx);
+            self.prepare_settings_view(window, cx);
             self.scrolls[Page::Settings as usize].set_offset(point(px(0.), px(0.)));
             self.settings_ui.inputs[&EditField::Name]
                 .update(cx, |input, cx| input.focus(window, cx));
@@ -2503,7 +2542,9 @@ impl Desktop {
                 "设置 AI 服务"
             })
             .gap_4()
-            .px_1();
+            .px_1()
+            // 滚动容器为末行字段的边框/焦点外绘留出空间（system.md：clipped container 需预留 outward paint）
+            .pb_3();
         view = view.child(
             text(
                 "service-editor-scope",
@@ -2526,14 +2567,14 @@ impl Desktop {
         );
         view = view
             .child(
-                settings_detail_group("service-connection-heading", "连接信息")
+                settings_detail_group("service-connection-heading", icons::cloud(), "连接信息")
                     .child(self.setting_field(EditField::Name, "服务名称", cx)),
             )
             .when(protocol.purpose() == ServicePurpose::Speech, |view| {
                 view.child(
                 v_flex()
                     .gap_2()
-                    .child(setting_label("service-protocol-heading", "接口类型"))
+                    .child(setting_label("service-protocol-heading", icons::cloud(), "接口类型"))
                     .child(
                         self.setting_choices("service-protocol", "服务接口类型")
                             .options(
@@ -2586,7 +2627,7 @@ impl Desktop {
         view = view.child(
             v_flex()
                 .gap_2()
-                .child(setting_label("service-auth-heading", "认证方式"))
+                .child(setting_label("service-auth-heading", icons::shield(), "认证方式"))
                 .child(
                     div().w_full().max_w(rems(560. / 14.)).min_w_0().child(
                         self.setting_choices("service-auth-mode", "服务认证方式")
@@ -2672,30 +2713,22 @@ impl Desktop {
                     .text_color(color(MUTED)),
                 );
             }
-            view = view.child(
-                control("toggle-service-key")
-                    .icon(if editor.show_key {
-                        icons::eye_off()
-                    } else {
-                        icons::eye()
-                    })
-                    .ghost()
-                    .label(if editor.show_key {
-                        "隐藏输入的密钥"
-                    } else {
-                        "显示输入的密钥"
-                    })
-                    .self_start()
-                    .on_click(cx.listener(|this, _, window, cx| {
+            view = view.child(preference(
+                None,
+                "显示输入的密钥",
+                "开启后输入的密钥明文可见。",
+                Switch::new("toggle-service-key")
+                    .checked(editor.show_key)
+                    .on_click(cx.listener(|this, value, window, cx| {
                         if let Some(editor) = &mut this.settings_ui.editor {
-                            editor.show_key = !editor.show_key;
+                            editor.show_key = *value;
                             let masked = !editor.show_key;
                             this.settings_ui.inputs[&EditField::Key]
                                 .update(cx, |input, cx| input.set_masked(masked, window, cx));
                         }
                         cx.notify();
                     })),
-            );
+            ));
         }
         if let Some(source) = &editor.draft.credential_source {
             view = view.child(
@@ -2716,6 +2749,7 @@ impl Desktop {
                     .gap_2()
                     .child(setting_label(
                         ("setting-field-label", EditField::Model as usize),
+                        icons::storage(),
                         "模型 ID",
                     ))
                     .child(crate::model_discovery::model_field_with_error(
@@ -2732,6 +2766,7 @@ impl Desktop {
         if editor.target.is_some() {
             view = view.child(
                 self.setting_preference(
+                    icons::check_circle(),
                     "同时设为默认服务",
                     "后续转换自动使用",
                     Switch::new("service-also-default")
@@ -2746,7 +2781,7 @@ impl Desktop {
                 ),
             );
         }
-        let mut testing = settings_detail_group("service-test-heading", "检查服务")
+        let mut testing = settings_detail_group("service-test-heading", icons::science(), "检查服务")
             .flex_shrink_0()
             .pt_2();
         if protocol == ServiceProtocol::AiChat {
@@ -2907,9 +2942,7 @@ impl Desktop {
                     "service-test-result-{}-{:?}",
                     evidence.tested_at, evidence.outcome
                 )),
-                result,
-                cx,
-            ));
+                result));
         }
         view = view.child(testing);
         if let Some(status) = &editor.status
@@ -3039,7 +3072,7 @@ impl Desktop {
                 )
             })
             .child(
-                text(
+                theme::supporting_info(
                     "service-test-notice",
                     if test_outcome_unknown && editor.repair_task.is_some() {
                         format!("上次测试结果未确认。重试测试会发送新测试请求；点击「{repair_submit_label}」会重新发送失败部分，服务可能计费。")
@@ -3051,8 +3084,7 @@ impl Desktop {
                         service_test::TEST_NOTICE.to_owned()
                     },
                 )
-                .text_size(TEXT_AUX)
-                .text_color(color(MUTED)),
+                .text_size(TEXT_AUX),
             )
             .child(actions);
         v_flex()
@@ -3078,7 +3110,7 @@ impl Desktop {
                     .min_h_0()
                     .min_w_0()
                     .child(view)
-                    .child(Scrollbar::vertical(&editor.scroll).mode(ScrollbarMode::Scrolling)),
+                    .child(crate::backend::vertical_scrollbar(&editor.scroll)),
             )
             .child(footer)
             .into_any_element()
@@ -3114,8 +3146,15 @@ impl Desktop {
         let ticket = editor.models.begin(&request);
         let editor_id = draft.id;
         let vault = self.preferences.vault();
+        // discover() performs synchronous keychain reads and bounded HTTP; it must not run
+        // on a GPUI executor task (see spawn_blocking_io).
+        let result_rx = crate::spawn_blocking_io(move || {
+            smol::block_on(crate::model_discovery::discover(request, vault))
+        });
         cx.spawn(async move |this, cx| {
-            let result = crate::model_discovery::discover(request, vault).await;
+            let Ok(result) = result_rx.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 let current = this.live_service_model_draft(cx).and_then(|draft| {
                     crate::model_discovery::RequestKey::from_draft(
@@ -3334,11 +3373,14 @@ impl Desktop {
         editor.evidence = None;
         editor.status = Some(format!("正在测试{}…", kind.label()));
         let vault = self.preferences.vault();
-        let task = cx
-            .background_executor()
-            .spawn(service_test::test_service(config, kind, vault, cancel));
+        // 服务测试含同步 Keychain 读取与受限 HTTP；见 crate::spawn_blocking_io 的说明
+        let task = crate::spawn_blocking_io(move || {
+            smol::block_on(service_test::test_service(config, kind, vault, cancel))
+        });
         cx.spawn(async move |this, cx| {
-            let evidence = task.await;
+            let Ok(evidence) = task.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 let persisted = this.preferences.record_test(evidence.clone()).is_ok();
                 let key_unchanged = this.setting_value(EditField::Key, cx).is_empty();
@@ -3637,7 +3679,7 @@ impl Desktop {
                 })
         });
     }
-    fn confirm_stop_service(
+    fn confirm_delete_service(
         &mut self,
         service_id: String,
         window: &mut Window,
@@ -3677,45 +3719,48 @@ impl Desktop {
             let weak = weak.clone();
             let id = service_id.clone();
             dialog
-                .title("停止使用此服务")
+                .title("删除此服务")
                 .child(text(
-                    "stop-service-consequence",
-                    "将不再通过此服务发送新请求。已经发出的请求无法撤回，收到的结果仍会保存。",
+                    "delete-service-consequence",
+                    "将删除此服务配置。已经发出的请求无法撤回，收到的结果和已有笔记仍会保存。需要时可以重新添加。",
                 ))
                 .when(affected > 0, |dialog| {
                     dialog.child(text(
-                        "stop-service-affected",
+                        "delete-service-affected",
                         format!("有 {affected} 个未完成任务引用此服务；相关后续请求会停止派发。"),
                     ))
                 })
                 .button_props(
                     gpui_component::dialog::DialogButtonProps::default()
-                        .ok_text("停止使用")
+                        .ok_text("删除服务")
                         .cancel_text("保留服务")
                         .show_cancel(true),
                 )
                 .on_ok(move |_, _, cx| {
-                    weak.update(cx, |this, cx| match this.preferences.stop_service(&id) {
+                    weak.update(cx, |this, cx| match this.preferences.delete_service(&id) {
                         Ok(()) => {
                             this.refresh_dispatch_controls(cx);
                             this.set_settings_feedback(
                                 PreferenceGroup::Services,
-                                "已停止使用此服务".into(),
+                                "已删除此服务".into(),
                                 false,
                             );
                             cx.notify();
                             true
                         }
                         Err(error) => {
-                            let stopped = this.preferences.is_service_stopped(&id);
+                            // The retire marker is written before the group is persisted,
+                            // so a mid-failure can leave dispatch blocked without a visible
+                            // deletion; say so instead of claiming nothing happened.
+                            let blocked = this.preferences.is_service_retired(&id);
                             this.set_settings_feedback(
                                 PreferenceGroup::Services,
                                 format!(
                                     "{}：{error:#}",
-                                    if stopped {
-                                        "已停止派发，停用记录尚未完整保存"
+                                    if blocked {
+                                        "已停止派发，删除记录尚未完整保存"
                                     } else {
-                                        "尚未停止使用此服务"
+                                        "尚未删除此服务"
                                     }
                                 ),
                                 true,
@@ -3816,18 +3861,6 @@ impl Desktop {
         next.subtitle_languages_draft = None;
         self.commit_generation(next, cx);
     }
-    /// The workbench box's language capsule commits through the same validated
-    /// path as the settings form.
-    pub(crate) fn choose_preferred_subtitle_languages(
-        &mut self,
-        languages: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        let mut next = self.generation_edit_base();
-        next.preferred_subtitle_languages = languages;
-        next.subtitle_languages_draft = None;
-        self.commit_generation(next, cx);
-    }
     fn set_settings_feedback(&mut self, group: PreferenceGroup, message: String, error: bool) {
         if group == PreferenceGroup::Generation && error {
             self.settings_ui
@@ -3905,9 +3938,7 @@ impl Desktop {
                             .min_w_0()
                             .text_size(TEXT_BODY)
                             .text_color(color(if error { DANGER } else { MUTED })),
-                    ),
-                cx,
-            ));
+                    )));
             let has_pending = match group {
                 PreferenceGroup::Generation => self.settings_ui.pending_generation.is_some(),
                 PreferenceGroup::Application => self.settings_ui.pending_application.is_some(),
@@ -3989,8 +4020,8 @@ impl Desktop {
                     .icon(icons::refresh())
                     .label("保留原文件并重置此组")
                     .self_start()
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.restore_settings_group(group, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.restore_settings_group(group, window, cx);
                     })),
             );
         }
@@ -4002,24 +4033,25 @@ impl Desktop {
                 .w_full()
                 .min_w_0()
                 .gap_3()
+                .items_start()
                 .flex_wrap()
                 .child(
                     v_flex()
+                        .min_w_0()
                         .gap_2()
                         .child(semantic_label(
                             "storage-locations-heading",
                             "保存位置",
                             icons::folder_open(),
                         ))
-                        .child(
-                            text("storage-policy", "更改默认位置只影响后续生成的笔记。")
-                                .text_size(TEXT_AUX)
-                                .text_color(color(MUTED)),
-                        )
-                        .flex_1()
-                        .min_w(rems(240. / 14.)),
+                        .child(theme::supporting_info(
+                            "storage-policy",
+                            "更改默认位置只影响后续生成的笔记。",
+                        ))
+                        .flex_1(),
                 )
                 .child(
+                    // 与笔记库同一模式：页标题行尾的有标签刷新动作（review2-settings#4）
                     quiet("refresh-storage-locations")
                         .icon(icons::refresh())
                         .label("刷新")
@@ -4184,10 +4216,11 @@ impl Desktop {
         group("appearance-motion", "界面偏好")
             .child(settings_row(
                 "app-font-scale-label",
+                icons::zoom_in(),
                 "界面文字大小",
                 "",
                 self.setting_choices("app-font-scale", "应用文字大小")
-                    .options([1.0_f32, 1.25, 1.5, 2.0].into_iter().map(|scale| {
+                    .options(crate::preferences::FONT_SCALES.into_iter().map(|scale| {
                         (
                             (scale * 100.).round().to_string(),
                             format!("{}%", (scale * 100.) as u32),
@@ -4215,6 +4248,7 @@ impl Desktop {
             ))
             .child(
                 self.setting_preference(
+                    icons::pause(),
                     "减少动态效果",
                     "关闭过渡与循环动画。",
                     Switch::new("app-reduce-motion")
@@ -4228,12 +4262,6 @@ impl Desktop {
             )
     }
     fn application_settings_page(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let legacy = &self.settings_ui.legacy;
-        let show_legacy = legacy.problem.is_some()
-            || (!self.preferences.legacy_imported() && legacy.importable)
-            || self.settings_ui.legacy_status.is_some()
-            || self.settings_ui.legacy_preserved.is_some()
-            || self.settings_ui.legacy_action_detail.is_some();
         v_flex()
             .w_full()
             .min_w_0()
@@ -4241,6 +4269,7 @@ impl Desktop {
             .child(self.environment_page(window, cx))
             .child(settings_row(
                 "restart-onboarding-label",
+                icons::book_open(),
                 "用户引导",
                 "选择默认引擎、配置 AI 服务和准备模型",
                 outline_pill("restart-onboarding")
@@ -4250,12 +4279,6 @@ impl Desktop {
                         this.start_onboarding(window, cx);
                     })),
             ))
-            .when(show_legacy, |view| {
-                view.child(
-                    group("legacy-settings-heading", "旧版设置")
-                        .child(self.legacy_migration_panel(cx)),
-                )
-            })
             .child(group("about-heading", "关于").child(self.about_page(cx)))
             .into_any_element()
     }
@@ -4281,170 +4304,8 @@ impl Desktop {
             }
         }
     }
-    fn refresh_legacy_inspection(&mut self) {
-        self.settings_ui.legacy =
-            crate::legacy_settings::Inspection::inspect(course2md::settings::config_path());
-        self.config_error = self.settings_ui.legacy.problem.is_some();
-    }
-    fn repair_legacy_configuration(&mut self, use_backup: bool, cx: &mut Context<Self>) {
-        let path = self.settings_ui.legacy.path.clone();
-        let result = if use_backup {
-            crate::legacy_settings::restore_backup(&path)
-        } else {
-            crate::legacy_settings::reset_preserving_original(&path)
-        };
-        self.settings_ui.legacy_action_detail = None;
-        match result {
-            Ok(original) => {
-                self.settings_ui.legacy_preserved = Some(original);
-                self.settings_ui.legacy_status = Some(
-                    if use_backup {
-                        "已恢复旧配置备份。可明确导入；当前设置继续使用。"
-                    } else {
-                        "已保留损坏原文件并重建旧配置。当前设置与笔记保持原样。"
-                    }
-                    .into(),
-                );
-            }
-            Err(error) => {
-                self.settings_ui.legacy_status =
-                    Some(crate::legacy_settings::failure_message(&error).into());
-                self.settings_ui.legacy_action_detail = Some(format!("{error:#}"));
-            }
-        }
-        self.refresh_legacy_inspection();
-        cx.notify();
-    }
-    fn legacy_migration_panel(&self, cx: &mut Context<Self>) -> Div {
-        let legacy = &self.settings_ui.legacy;
-        let mut view = v_flex().gap_2();
-        if let Some(problem) = &legacy.problem {
-            view = view
-                .child(text("legacy-settings-problem", problem.message.clone()))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .when(legacy.backup_available, |row| {
-                            row.child(
-                                control("restore-legacy-backup")
-                                    .icon(icons::refresh())
-                                    .label("恢复已验证的旧配置备份")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.repair_legacy_configuration(true, cx)
-                                    })),
-                            )
-                        })
-                        .child(
-                            control("reset-legacy-preserving-original")
-                                .icon(icons::refresh())
-                                .label("保留原文件并重建旧配置")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.repair_legacy_configuration(false, cx)
-                                })),
-                        ),
-                );
-        } else if !self.preferences.legacy_imported() && legacy.importable {
-            view = view.child(text("legacy-settings-found", "发现旧版配置。导入前会备份原文件；已修改的当前设置保持原样。"))
-                .child(control("import-legacy-settings").icon(icons::file_upload()).label("备份并导入旧版设置").self_start()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.settings_ui.legacy_action_detail = None;
-                        match crate::legacy_settings::import_preferences(&this.settings_ui.legacy.path, &mut this.preferences) {
-                            Ok(original) => {
-                                this.settings_ui.legacy_preserved = Some(original);
-                                this.settings_ui.legacy_status = Some("已导入旧版设置；原文件及备份保留，后续以当前设置为准。".into());
-                                this.settings_ui.initialized = false;
-                                this.hydrate_settings_inputs(window, cx);
-                                this.refresh_preference_defaults(cx);
-                            }
-                            Err(error) => {
-                                this.settings_ui.legacy_status = Some("旧版设置尚未完整导入。现有设置与原文件均保留，可查看原因后重试。".into());
-                                this.settings_ui.legacy_action_detail = Some(format!("{error:#}"));
-                            }
-                        }
-                        this.refresh_legacy_inspection();
-                        cx.notify();
-                    })));
-        }
-        if let Some(message) = &self.settings_ui.legacy_status {
-            view = view.child(text("legacy-import-status", message.clone()).text_sm());
-        }
-        if let Some(original) = &self.settings_ui.legacy_preserved {
-            let path = original.clone();
-            view = view
-                .child(
-                    text(
-                        "legacy-original-backup",
-                        format!("原文件备份：{}", original.display()),
-                    )
-                    .text_sm(),
-                )
-                .child(
-                    control("reveal-legacy-original")
-                        .icon(icons::folder_open())
-                        .label("显示原文件备份")
-                        .self_start()
-                        .on_click(move |_, _, cx| cx.reveal_path(&path)),
-                );
-        }
-        if legacy.problem.is_some() || self.settings_ui.legacy_action_detail.is_some() {
-            let original = legacy.path.clone();
-            view = view.child(
-                h_flex()
-                    .gap_2()
-                    .flex_wrap()
-                    .child(
-                        control("recheck-legacy-settings")
-                            .icon(icons::refresh())
-                            .label("重新检查旧配置")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.refresh_legacy_inspection();
-                                this.settings_ui.legacy_action_detail = None;
-                                this.settings_ui.legacy_status = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        control("reveal-legacy-settings")
-                            .icon(icons::folder_open())
-                            .label("显示旧配置文件")
-                            .on_click(move |_, _, cx| cx.reveal_path(&original)),
-                    )
-                    .child(
-                        control("legacy-settings-details")
-                            .icon(icons::info())
-                            .label(if self.settings_ui.legacy_details_open {
-                                "收起旧配置详情"
-                            } else {
-                                "查看旧配置详情"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.settings_ui.legacy_details_open =
-                                    !this.settings_ui.legacy_details_open;
-                                cx.notify();
-                            })),
-                    ),
-            );
-            if self.settings_ui.legacy_details_open {
-                let details = [
-                    legacy
-                        .problem
-                        .as_ref()
-                        .map(|problem| problem.detail.as_str()),
-                    legacy.backup_detail.as_deref(),
-                    self.settings_ui.legacy_action_detail.as_deref(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join("\n");
-                view = view.child(text("legacy-settings-detail-text", details).text_sm());
-            }
-        }
-        view
-    }
     fn environment_page(&self, window: &mut Window, cx: &mut Context<Self>) -> Div {
-        let mut card = v_flex().w_full().min_w_0().gap_3();
+        let mut card = setting_surface();
         if let Some(e) = &self.environment {
             let provider = self
                 .preferences
@@ -4469,35 +4330,24 @@ impl Desktop {
             .into_iter()
             .enumerate()
             {
-                card = card.child(
-                    h_flex()
-                        .w_full()
-                        .min_w_0()
-                        .min_h(CONTROL_HEIGHT)
-                        .items_center()
-                        .gap_3()
-                        .child(
-                            setting_label(("diagnostic-capability", index), label)
-                                .flex_1()
-                                .min_w_0(),
-                        )
-                        .child(
-                            badge(if optional {
-                                BadgeKind::Neutral
-                            } else if ready {
-                                BadgeKind::Success
-                            } else {
-                                BadgeKind::Warning
-                            })
-                            .child(if optional {
-                                "当前未使用"
-                            } else if ready {
-                                "可用"
-                            } else {
-                                "待修复"
-                            }),
-                        ),
-                );
+                card = card.child(settings_status_row(
+                    ("diagnostic-capability", index),
+                    label,
+                    badge(if optional {
+                        BadgeKind::Neutral
+                    } else if ready {
+                        BadgeKind::Success
+                    } else {
+                        BadgeKind::Warning
+                    })
+                    .child(if optional {
+                        "当前未使用"
+                    } else if ready {
+                        "可用"
+                    } else {
+                        "待修复"
+                    }),
+                ));
             }
             if !e.engine {
                 card = card
@@ -4538,18 +4388,37 @@ impl Desktop {
         }
         let open = self.settings_ui.diagnostics_details_open;
         card = card.child(
-            h_flex().gap_2().flex_wrap().child(
-                control("refresh-environment")
-                    .icon(icons::refresh())
-                    .label("重新检查环境")
-                    .loading(self.environment.is_none())
-                    .disabled(self.environment.is_none())
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_environment(cx))),
-            ),
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .gap_2()
+                .flex_wrap()
+                .child(
+                    control("refresh-environment")
+                        .icon(icons::refresh())
+                        .label("重新检查环境")
+                        .loading(self.environment.is_none())
+                        .disabled(self.environment.is_none())
+                        .on_click(cx.listener(|this, _, _, cx| this.refresh_environment(cx))),
+                )
+                .child(
+                    quiet("toggle-diagnostics-details")
+                        .icon(icons::info())
+                        .label(if open {
+                            "收起诊断详情"
+                        } else {
+                            "查看诊断详情"
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.settings_ui.diagnostics_details_open =
+                                !this.settings_ui.diagnostics_details_open;
+                            cx.notify();
+                        })),
+                ),
         );
         let mut details = v_flex().w_full().min_w_0().gap_6().pt_3();
         if let Some(e) = &self.environment {
-            let mut programs = settings_detail_group("diagnostic-programs-heading", "所需程序");
+            let mut programs = settings_detail_group("diagnostic-programs-heading", icons::computer(), "所需程序");
             let needs_llama = matches!(
                 self.preferences
                     .generation()
@@ -4620,22 +4489,6 @@ impl Desktop {
         details = details.child(self.model_hardware_details(cx));
         group("diagnostics-heading", "运行检查")
             .child(card)
-            .child(self.model_diagnostics_panel(window, cx))
-            .child(
-                quiet("toggle-diagnostics-details")
-                    .icon(icons::info())
-                    .label(if open {
-                        "收起诊断详情"
-                    } else {
-                        "查看诊断详情"
-                    })
-                    .self_start()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.settings_ui.diagnostics_details_open =
-                            !this.settings_ui.diagnostics_details_open;
-                        cx.notify();
-                    })),
-            )
             .child(crate::motion::disclosure(
                 "diagnostics-detail-content",
                 open,
@@ -4643,6 +4496,7 @@ impl Desktop {
                 window,
                 cx,
             ))
+            .child(self.model_diagnostics_panel(window, cx))
     }
     // Wrappers only while the other interface modules are being integrated.
     /// Service editor drafts are deliberately excluded: an existing published service
@@ -4720,14 +4574,20 @@ impl Desktop {
     pub fn restore_ordinary_preferences(
         &mut self,
         group: PreferenceGroup,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
         if group == PreferenceGroup::Services {
             return false;
         }
-        self.restore_settings_group(group, cx)
+        self.restore_settings_group(group, window, cx)
     }
-    fn restore_settings_group(&mut self, group: PreferenceGroup, cx: &mut Context<Self>) -> bool {
+    fn restore_settings_group(
+        &mut self,
+        group: PreferenceGroup,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let previous = self
             .ordinary_preferences_submit_issue()
             .map(|issue| issue.message);
@@ -4739,6 +4599,8 @@ impl Desktop {
                     PreferenceGroup::Services => {}
                 }
                 self.settings_ui.initialized = false;
+                // 事件路径立刻重新水合，不等下一次进入设置（渲染不做这件事）
+                self.hydrate_settings_inputs(window, cx);
                 self.set_settings_feedback(group, "原文件已保留，此组设置已重置".into(), false);
                 if group == PreferenceGroup::Application {
                     self.desktop_settings = self.preferences.application().desktop.clone();

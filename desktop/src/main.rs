@@ -5,6 +5,7 @@ mod account_ui;
 mod activity;
 mod appearance_ui;
 mod backend;
+mod bounded_http;
 mod course_library;
 mod credentials;
 mod focus_scroll;
@@ -13,7 +14,6 @@ mod focus_scroll;
 #[allow(dead_code)]
 mod icons;
 mod import_ui;
-mod legacy_settings;
 mod library_ui;
 mod model_discovery;
 mod motion;
@@ -45,7 +45,7 @@ use gpui_component::{
     *,
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -86,6 +86,60 @@ const PROVIDERS: [(&str, &str); 6] = [
     ("npu", "Intel NPU"),
     ("api", "云端 API"),
 ];
+
+/// 识别引擎的规范展示名：全桌面唯一来源（选择与描述场景共用）。
+/// 与 PROVIDERS 表的 id 一一对应；None 表示「自动」。
+/// Runs blocking IO on a dedicated OS thread and delivers the result through a channel.
+///
+/// GPUI's background executor dispatches to GCD global queues, and macOS may run those
+/// blocks on the main thread via queue override; `cx.spawn` always polls on the main
+/// thread. Blocking syscalls — keychain reads that can wait on an authorization dialog,
+/// synchronous HTTP — therefore must never run inside executor tasks.
+pub(crate) fn spawn_blocking_io<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> smol::channel::Receiver<T> {
+    let (tx, rx) = smol::channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(work());
+    });
+    rx
+}
+
+pub(crate) fn provider_label(provider: Option<course2md::config::AsrProvider>) -> &'static str {
+    use course2md::config::AsrProvider;
+    match provider {
+        None => "自动",
+        Some(AsrProvider::Coreml) => "Apple 原生",
+        Some(AsrProvider::Gpu) => "GPU",
+        Some(AsrProvider::Cpu) => "CPU",
+        Some(AsrProvider::Npu) => "Intel NPU",
+        Some(AsrProvider::Api) => "云端 API",
+    }
+}
+
+/// PROVIDERS 下标 → AsrProvider：索引与枚举映射的唯一实现（与 PROVIDERS 顺序同源）。
+pub(crate) fn asr_provider_from_index(index: usize) -> Option<course2md::config::AsrProvider> {
+    use course2md::config::AsrProvider;
+    match PROVIDERS.get(index)?.0 {
+        "coreml" => Some(AsrProvider::Coreml),
+        "gpu" => Some(AsrProvider::Gpu),
+        "cpu" => Some(AsrProvider::Cpu),
+        "npu" => Some(AsrProvider::Npu),
+        "api" => Some(AsrProvider::Api),
+        _ => None,
+    }
+}
+
+/// 云端 API 在 PROVIDERS 表中的下标：PROVIDERS[..CLOUD_PROVIDER_INDEX] 即本机引擎集合。
+/// 此前以裸数字 5 散落在 import_ui/task_ui/workspace，是「5 即云端」的无文档契约。
+pub(crate) const CLOUD_PROVIDER_INDEX: usize = 5;
+
+impl ConversionOptions {
+    /// 当前是否使用云端识别服务（provider == CLOUD_PROVIDER_INDEX）。
+    pub(crate) fn uses_cloud_provider(&self) -> bool {
+        self.provider == CLOUD_PROVIDER_INDEX
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 struct ConversionOptions {
@@ -196,7 +250,6 @@ struct Desktop {
     library_root: PathBuf,
     library_error: Option<String>,
     library_issues: Vec<String>,
-    library_materials: Vec<PathBuf>,
     library_indexes: BTreeMap<PathBuf, organize::Library>,
     library_view_cache: course_library::LibraryViewCache,
     library_generation: u64,
@@ -218,18 +271,18 @@ struct Desktop {
     show_options: bool,
     show_export_options: bool,
     show_logs: bool,
-    show_engine_details: bool,
     environment: Option<backend::Environment>,
     scrolls: [ScrollHandle; 5],
     inputs: BTreeMap<Field, Entity<InputState>>,
     config: course2md::settings::ConfigFile,
-    config_error: bool,
     task_options: ConversionOptions,
     settings_options: ConversionOptions,
     job: Option<Job>,
     kind: Kind,
     cancelling: bool,
     closing: bool,
+    /// A queued task's credentials are being resolved off the UI thread before it can start.
+    start_pending: bool,
     task_status: String,
     task_error: Option<String>,
     progress: BTreeMap<String, activity::Activity>,
@@ -252,6 +305,22 @@ struct Desktop {
     reader_scroll: ScrollHandle,
     reader_saved_offset: f32,
     reader_position_saved_at: Option<Instant>,
+    // Virtualized long pages: the task queue and the course library each keep
+    // a persistent list state plus the identity keys and focus containers of
+    // the items the state currently describes.
+    queue_list: ListState,
+    queue_keys: Vec<String>,
+    queue_focus: Vec<FocusHandle>,
+    queue_rem: f32,
+    library_list: ListState,
+    library_keys: Vec<String>,
+    library_focus: Vec<FocusHandle>,
+    library_rem: f32,
+    // Entrance animations already played for logical content that a
+    // virtualized list may unmount and remount while scrolling.
+    entered: HashSet<String>,
+    // Disclosure open state that outlives a virtualized row's unmount.
+    task_panels_open: HashSet<String>,
     event_repaint_pending: bool,
     exporting: bool,
     message: Option<String>,
@@ -269,6 +338,48 @@ actions!(
 const EVENT_REPAINT_INTERVAL: Duration = Duration::from_millis(250);
 
 impl Desktop {
+    /// Splice a virtualized page list to a new item identity sequence, keeping
+    /// the measured heights and scroll anchor of the unchanged prefix/suffix.
+    fn reconcile_list_items(
+        state: &ListState,
+        keys: &mut Vec<String>,
+        focus: &mut Vec<FocusHandle>,
+        new_keys: Vec<String>,
+        cx: &mut App,
+    ) {
+        if *keys == new_keys {
+            return;
+        }
+        let prefix = keys
+            .iter()
+            .zip(new_keys.iter())
+            .take_while(|(old, new)| old == new)
+            .count();
+        let suffix = keys
+            .iter()
+            .rev()
+            .zip(new_keys.iter().rev())
+            .take_while(|(old, new)| old == new)
+            .count()
+            .min(keys.len() - prefix)
+            .min(new_keys.len() - prefix);
+        let old_end = keys.len() - suffix;
+        let new_mid = new_keys.len() - prefix - suffix;
+        let handles: Vec<FocusHandle> = (0..new_mid).map(|_| cx.focus_handle()).collect();
+        state.splice_focusable(prefix..old_end, handles.iter().cloned().map(Some));
+        keys.splice(
+            prefix..old_end,
+            new_keys[prefix..prefix + new_mid].iter().cloned(),
+        );
+        focus.splice(prefix..old_end, handles);
+    }
+
+    /// Entrance motion plays once per logical mount. A virtualized list
+    /// remounts rows as they re-enter the viewport, which must not replay it.
+    fn enter_once(&mut self, id: String) -> bool {
+        self.entered.insert(id)
+    }
+
     fn request_close(&mut self, cx: &mut Context<Self>) -> bool {
         if !self.flush_settings_for_exit(cx) || !self.save_current_draft(cx) {
             return false;
@@ -305,13 +416,13 @@ impl Desktop {
     }
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let configuration_directory = course2md::config::config_dir();
-        let legacy = legacy_settings::Inspection::inspect(course2md::settings::config_path());
-        let config_error = legacy.problem.is_some();
         let message = None;
-        let output = legacy_settings::startup_output(&configuration_directory, &legacy);
+        // Fresh installs bootstrap managed local storage so the welcome screen does not
+        // synchronously access a protected Documents folder before the user chooses a location.
+        let output = configuration_directory.join("desktop-local-library");
         let preferences = preferences::Store::open(
             configuration_directory.join("desktop-preferences"),
-            credentials::system_vault(),
+            credentials::system_vault(configuration_directory.join("desktop-credentials.json")),
         );
         let mut config = preferences.defaults_config();
         config.defaults.out = Some(output.clone());
@@ -383,7 +494,10 @@ impl Desktop {
                         this.source_validation = None;
                     }
                     if field == Field::Search {
-                        this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
+                        this.library_list.scroll_to(ListOffset {
+                            item_ix: 0,
+                            offset_in_item: px(0.),
+                        });
                     }
                     cx.notify();
                 })
@@ -487,7 +601,6 @@ impl Desktop {
             library_root: output,
             library_error: None,
             library_issues: Vec::new(),
-            library_materials: Vec::new(),
             library_indexes: BTreeMap::new(),
             library_view_cache: Default::default(),
             library_generation: 0,
@@ -508,7 +621,6 @@ impl Desktop {
             show_options: false,
             show_export_options: false,
             show_logs: false,
-            show_engine_details: false,
             environment: None,
             scrolls: std::array::from_fn(|_| ScrollHandle::new()),
             inputs,
@@ -518,13 +630,13 @@ impl Desktop {
             settings_status: String::new(),
             last_tick: Instant::now(),
             config,
-            config_error,
             task_options: options.clone(),
             settings_options: options,
             job: None,
             kind: Kind::Convert,
             cancelling: false,
             closing: false,
+            start_pending: false,
             task_error: None,
             task_status: String::new(),
             progress: BTreeMap::new(),
@@ -542,6 +654,16 @@ impl Desktop {
             reader_scroll: ScrollHandle::new(),
             reader_saved_offset: f32::NAN,
             reader_position_saved_at: None,
+            queue_list: ListState::new(0, ListAlignment::Top, px(1000.)),
+            queue_keys: Vec::new(),
+            queue_focus: Vec::new(),
+            queue_rem: f32::NAN,
+            library_list: ListState::new(0, ListAlignment::Top, px(1000.)),
+            library_keys: Vec::new(),
+            library_focus: Vec::new(),
+            library_rem: f32::NAN,
+            entered: HashSet::new(),
+            task_panels_open: HashSet::new(),
             event_repaint_pending: false,
             exporting: false,
             message,
@@ -566,11 +688,13 @@ impl Desktop {
     }
     fn refresh_environment(&mut self, cx: &mut Context<Self>) {
         self.environment = None;
-        let task = cx
-            .background_executor()
-            .spawn(async { backend::Environment::detect() });
+        // 环境探测会同步启动子进程（Metal 枚举可超过十秒），必须离开 executor；
+        // 见 spawn_blocking_io 的说明
+        let task = spawn_blocking_io(backend::Environment::detect);
         cx.spawn(async move |this, cx| {
-            let environment = task.await;
+            let Ok(environment) = task.recv().await else {
+                return;
+            };
             let _ = this.update(cx, |this, cx| {
                 this.environment = Some(environment);
                 this.refresh_model_diagnostics(cx);
@@ -675,9 +799,6 @@ impl Desktop {
         self.opening_course = None;
         if self.page == Page::New {
             self.save_current_draft(cx);
-        }
-        if self.page != page {
-            self.show_engine_details = false;
         }
         self.page = page;
         self.message = None;
@@ -976,9 +1097,9 @@ impl Desktop {
         } else {
             self.start_next_task(cx);
         }
-        let ticking =
-            save || immediate || self.job.is_some() || self.event_repaint_pending;
-        let interval = if save || self.event_repaint_pending {
+        let ticking = save || immediate || self.job.is_some() || self.event_repaint_pending;
+        // 模型下载与任务同一合帧节奏（此前 1s，设置页进度条明显滞后）
+        let interval = if save || self.event_repaint_pending || self.kind == Kind::Models {
             EVENT_REPAINT_INTERVAL
         } else {
             Duration::from_secs(1)
@@ -998,49 +1119,11 @@ impl Desktop {
         self.storage_ui
             .begin_location_checks(generation, &locations);
         self.loading = true;
-        let missing_outcomes = self
-            .workspace
-            .as_ref()
-            .map(|workspace| {
-                workspace
-                    .state
-                    .tasks
-                    .iter()
-                    .filter(|task| task.outcomes.is_none())
-                    .filter_map(|task| {
-                        Some((
-                            task.id.clone(),
-                            task.plan.source_id.clone(),
-                            task.plan.library_id.clone(),
-                            task.artifact.clone()?,
-                        ))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
         let task = storage_ui::scan_locations(locations, move |location| {
             let scan = backend::scan_library(&location.root);
             let organization = organize::Library::load(&location.root);
             let cache = course_library::LibraryViewCache::inspect(location, scan.as_ref().ok());
-            let outcomes = missing_outcomes
-                .iter()
-                .filter(|(_, _, library_id, _)| library_id == &location.id)
-                .filter_map(|(id, source, library, path)| {
-                    let manifest =
-                        course2md::artifact::read_manifest(&path.join("manifest.json")).ok()?;
-                    if manifest.task_id != *id || manifest.source_id != *source {
-                        return None;
-                    }
-                    Some((
-                        id.clone(),
-                        source.clone(),
-                        library.clone(),
-                        path.clone(),
-                        serde_json::to_value(manifest.outcomes).ok()?,
-                    ))
-                })
-                .collect::<Vec<_>>();
-            (scan, organization, cache, outcomes)
+            (scan, organization, cache)
         });
         cx.spawn(async move |this, cx| {
             let results = task.await;
@@ -1063,29 +1146,14 @@ impl Desktop {
                 this.loading = false;
                 this.courses.clear();
                 this.library_issues.clear();
-                this.library_materials.clear();
                 this.library_indexes.clear();
                 this.library_view_cache = Default::default();
-                for (location, _, (scan, organization, cache, outcomes)) in results {
+                for (location, _, (scan, organization, cache)) in results {
                     this.library_view_cache.merge(cache);
-                    if let Some(workspace) = &mut this.workspace {
-                        for (id, source, library, path, outcomes) in outcomes {
-                            if let Some(task) = workspace.state.tasks.iter_mut().find(|task| {
-                                task.id == id
-                                    && task.plan.source_id == source
-                                    && task.plan.library_id == library
-                                    && task.artifact.as_ref() == Some(&path)
-                                    && task.outcomes.is_none()
-                            }) {
-                                task.outcomes = Some(outcomes);
-                            }
-                        }
-                    }
                     match scan {
                         Ok(scan) => {
                             this.courses.extend(scan.courses);
                             this.library_issues.extend(scan.issues);
-                            this.library_materials.extend(scan.materials);
                         }
                         Err(error) => this
                             .library_issues
@@ -1199,11 +1267,12 @@ impl Desktop {
         } else {
             origin
         };
-        let task = cx
-            .background_executor()
-            .spawn(async move { backend::read_preview(course) });
+        let task = spawn_blocking_io(move || backend::read_preview(course));
         cx.spawn(async move |this, cx| {
-            let result = task.await;
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("读取笔记的工作线程意外结束")));
             let _ = this.update(cx, |this, cx| {
                 if this.read_generation != generation || this.page != origin {
                     return;
@@ -1229,6 +1298,14 @@ impl Desktop {
                 }
                 match result {
                     Ok(preview) => {
+                        // 与 navigate() 相同的离页义务：离开工作台先存草稿；
+                        // 主动打开另一篇笔记时取消无关的转换跟随，后台完成不得抢占当前位置
+                        if this.page == Page::New {
+                            this.save_current_draft(cx);
+                        }
+                        if follow.is_none() {
+                            this.following_conversion = None;
+                        }
                         // The old note remains scrollable during the read. Its
                         // current anchor, after all ownership guards pass, is the
                         // one that belongs in the repaired version.
@@ -1267,8 +1344,11 @@ impl Desktop {
                         );
                         if reader_origin.is_none() {
                             this.result_tab = 0;
+                            this.sync_reader_tab_stops();
                         }
                         this.preview = Some(preview);
+                        // 事件路径触发阅读页数据加载（渲染不再负责）
+                        this.ensure_reader_data(cx);
                         this.apply_course_title_aliases();
                         this.restore_reading_position(cx);
                         this.page = Page::Result;
@@ -1436,6 +1516,10 @@ impl Drop for Desktop {
         if let Some(cancel) = &self.preview_cancel {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        // 与 request_close 一致：字幕读取也要停
+        if let Some(cancel) = &self.subtitle_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
 }
 
@@ -1548,14 +1632,24 @@ fn main() {
                     }
                 });
                 window.on_window_should_close(cx, move |_, cx| {
-                    let saved = weak
-                        .update(cx, |this, cx| {
-                            this.save_reading_position(cx);
-                            this.flush_settings_for_exit(cx) && this.save_current_draft(cx)
-                        })
-                        .unwrap_or(true);
-                    if saved {
-                        cx.hide();
+                    #[cfg(target_os = "windows")]
+                    if weak
+                        .update(cx, |this, cx| this.request_close(cx))
+                        .unwrap_or(true)
+                    {
+                        cx.quit();
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let saved = weak
+                            .update(cx, |this, cx| {
+                                this.save_reading_position(cx);
+                                this.flush_settings_for_exit(cx) && this.save_current_draft(cx)
+                            })
+                            .unwrap_or(true);
+                        if saved {
+                            cx.hide();
+                        }
                     }
                     false
                 });
@@ -1591,4 +1685,71 @@ fn main() {
         ]);
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod list_reconcile_tests {
+    use super::Desktop;
+    use gpui::{App, FocusHandle, ListAlignment, ListOffset, ListState, TestAppContext, px};
+
+    #[gpui::test]
+    fn list_splice_keeps_the_scroll_anchor_on_unchanged_content(cx: &mut TestAppContext) {
+        cx.update(splice_keeps_anchor);
+    }
+
+    fn splice_keeps_anchor(cx: &mut App) {
+        let state = ListState::new(4, ListAlignment::Top, px(100.));
+        let mut keys = vec!["a".to_owned(), "b".into(), "c".into(), "d".into()];
+        let mut focus: Vec<FocusHandle> = (0..4).map(|_| cx.focus_handle()).collect();
+        state.scroll_to(ListOffset {
+            item_ix: 3,
+            offset_in_item: px(7.),
+        });
+        // Two rows arrive after the first row: the anchor item keeps its place.
+        Desktop::reconcile_list_items(
+            &state,
+            &mut keys,
+            &mut focus,
+            vec![
+                "a".into(),
+                "x".into(),
+                "y".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+            ],
+            cx,
+        );
+        assert_eq!(state.item_count(), 6);
+        assert_eq!(state.logical_scroll_top().item_ix, 5);
+        assert_eq!(state.logical_scroll_top().offset_in_item, px(7.));
+        assert_eq!(keys, ["a", "x", "y", "b", "c", "d"]);
+        assert_eq!(focus.len(), 6);
+        // An identical frame is a no-op.
+        Desktop::reconcile_list_items(
+            &state,
+            &mut keys,
+            &mut focus,
+            vec![
+                "a".into(),
+                "x".into(),
+                "y".into(),
+                "b".into(),
+                "c".into(),
+                "d".into(),
+            ],
+            cx,
+        );
+        assert_eq!(state.logical_scroll_top().item_ix, 5);
+        // Removing the rows above the anchor shifts it back with its content.
+        Desktop::reconcile_list_items(
+            &state,
+            &mut keys,
+            &mut focus,
+            vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            cx,
+        );
+        assert_eq!(state.item_count(), 4);
+        assert_eq!(state.logical_scroll_top().item_ix, 3);
+    }
 }

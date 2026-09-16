@@ -8,7 +8,7 @@ use crate::models::normalize_apple_model as normalize;
 use crate::timeline::TranscriptEvent;
 use anyhow::{Context, Result};
 use std::ffi::{CStr, CString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 mod ffi {
@@ -91,6 +91,11 @@ pub fn vad(wav: &Path, min_speech: f64, min_silence: f64) -> Result<Vec<(f64, f6
     if rc != 0 {
         anyhow::bail!("语音检测失败 / Speech detection failed: {}", last_error());
     }
+    // FFI 契约防御：rc==0 且 n>0 时指针必须非空
+    anyhow::ensure!(
+        n <= 0 || (!starts.is_null() && !ends.is_null()),
+        "语音检测返回了空结果指针 / Speech detection returned null result pointers"
+    );
     let mut out = Vec::with_capacity(n as usize);
     if n > 0 {
         unsafe {
@@ -114,19 +119,30 @@ pub struct CoremlAsr {
 /// Tauri sidecar 场景：codesign 把 Contents/MacOS/ 下所有文件都当代码签名，
 /// 数据文件 metallib 只能放 Contents/Resources/（资源密封区）——
 /// 由 GUI 后端在 spawn sidecar 时把 CWD 设为该目录，命中最后一条兜底路径。
-fn ensure_metallib() -> Result<()> {
-    let exe = std::env::current_exe()?;
+/// doctor 与 ensure_metallib 共用同一搜索清单，结论不再互相矛盾。
+pub fn find_metallib() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
     let dir = exe.parent().unwrap_or(std::path::Path::new("."));
     let resources = dir.join("Resources");
     let bundle_resources = dir.join("../Resources");
     let cwd = std::env::current_dir().unwrap_or_else(|_| ".".into());
     for base in [dir, &resources, &bundle_resources, &cwd] {
         for name in ["mlx.metallib", "default.metallib"] {
-            if base.join(name).is_file() {
-                return Ok(());
+            let path = base.join(name);
+            if path.is_file() {
+                return Some(path);
             }
         }
     }
+    None
+}
+
+fn ensure_metallib() -> Result<()> {
+    if find_metallib().is_some() {
+        return Ok(());
+    }
+    let exe = std::env::current_exe()?;
+    let dir = exe.parent().unwrap_or(std::path::Path::new("."));
     anyhow::bail!(
         "缺少 MLX Metal 库（{0}），CoreML 推理不可用。\n\
          从源码构建：把 native/apple-asr/.build/out/Products/Release/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib \
@@ -138,18 +154,10 @@ fn ensure_metallib() -> Result<()> {
 }
 
 /// 解析 coreml 后端用的模型：显式参数（调用方已合并 CLI 与 config.toml
-/// defaults.asr_model）> 旧 marker 文件（一次性迁移到 config.toml 并删除）
-/// > （交互式终端则询问并写 config.toml）> qwen3-1.7b。
+/// defaults.asr_model）> （交互式终端则询问并写 config.toml）> qwen3-1.7b。
 pub fn resolve_model(explicit: Option<&str>) -> Result<String> {
     if let Some(m) = explicit {
         return normalize(m);
-    }
-    let marker = crate::config::config_dir().join("asr_model");
-    if let Ok(s) = std::fs::read_to_string(&marker)
-        && let Ok(m) = normalize(s.trim())
-    {
-        migrate_marker(&marker, &m);
-        return Ok(m);
     }
     let chosen = prompt_model_choice()?;
     use std::io::IsTerminal as _;
@@ -175,25 +183,6 @@ fn persist_model_choice(model: &str) {
         tracing::warn!(
             "无法保存模型选择，下次仍会询问 / Could not save model choice; you will be asked again next time: {e:#}"
         );
-    }
-}
-
-/// 旧 marker 文件（~/.config/course2md/asr_model）→ config.toml defaults.asr_model，
-/// 写盘成功后才删除 marker（失败保留，下次再迁移）。
-fn migrate_marker(marker: &Path, model: &str) {
-    match (|| -> Result<()> {
-        let mut cfg = crate::settings::load()?;
-        cfg.defaults.asr_model = Some(model.to_string());
-        crate::settings::save(&cfg)?;
-        Ok(())
-    })() {
-        Ok(()) => {
-            let _ = std::fs::remove_file(marker);
-            tracing::info!("已将模型选择从 asr_model marker 迁移到 config.toml / Migrated the model selection from the asr_model marker to config.toml");
-        }
-        Err(e) => tracing::warn!(
-            "无法更新旧模型配置，已保留原设置 / Could not update legacy model settings; original settings kept: {e:#}"
-        ),
     }
 }
 

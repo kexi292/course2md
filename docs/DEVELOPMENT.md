@@ -2,6 +2,23 @@
 
 面向本仓库贡献者的基本要求。桌面端构建细节见 [desktop/README.md](../desktop/README.md)，打包与发布渠道见 [PACKAGING.md](PACKAGING.md)。
 
+## 分支模型
+
+| 分支 | 用途 | 远程关系 |
+| --- | --- | --- |
+| `main` | fork 的基线，只接收审查后的集成结果 | `origin/main` |
+| `sync/upstream-main` | 原作者代码镜像，只允许快进同步 | `upstream/main` |
+| `feature/windows-desktop-setup` | 当前功能开发与上游改动的集成分支 | `origin/feature/windows-desktop-setup` |
+
+上游的新界面、动效、滚动条和行为改动先进入 `sync/upstream-main`，审查后合并或 cherry-pick 到 `feature/windows-desktop-setup`。不要直接在上游跟踪分支开发，也不要假设上游提交会自动出现在功能分支。
+
+```sh
+git switch sync/upstream-main
+git pull --ff-only
+git switch feature/windows-desktop-setup
+git merge --no-ff sync/upstream-main
+```
+
 ## 构建与验证
 
 CI（`.github/workflows/ci.yml`）在 Linux、macOS、Windows 上运行，合入前本地应通过同等检查：
@@ -13,7 +30,7 @@ cargo test --features integration --test scene_synthetic
 cargo build --release
 ```
 
-桌面端另行执行（构建前先运行 `python3 desktop/scripts/sources.py` 准备 GPUI 依赖）：
+桌面端另行执行（构建前先运行 `uv run python desktop/scripts/sources.py` 准备 GPUI 依赖）：
 
 ```sh
 cargo test --manifest-path desktop/Cargo.toml
