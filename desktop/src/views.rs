@@ -585,4 +585,3 @@ impl Render for Desktop {
             .into_any_element()
     }
 }
-
