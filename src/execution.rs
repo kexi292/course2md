@@ -141,7 +141,7 @@ impl Request {
                 !components.is_empty()
                     && components.iter().all(|c| matches!(
                         c.as_str(),
-                        "screenshots" | "proofreading" | "summary" | "exports"
+                        "screenshots" | "proofreading" | "translation" | "summary" | "exports"
                     )),
                 "补做内容无效 / Invalid requested components"
             );
@@ -191,6 +191,7 @@ impl Request {
     pub fn binding(&self, cfg: &PipelineConfig) -> Result<serde_json::Value> {
         let mut config = cfg.clone();
         config.llm.api_key.clear();
+        config.translation.api_key.clear();
         config.asr_api.api_key.clear();
         // Storage moves are resolved locations, not a change in the processing plan.
         config.out_dir = PathBuf::new();

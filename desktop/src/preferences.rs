@@ -136,6 +136,7 @@ pub struct GenerationPreferences {
     pub options: Defaults,
     pub ai_proofread: bool,
     pub ai_summary: bool,
+    pub note_language: course2md::llm::NoteLanguage,
     pub vision: bool,
     pub prompt: Option<String>,
     /// Durable editor text is not an active processing rule until explicitly applied.
@@ -160,6 +161,7 @@ impl Default for GenerationPreferences {
             },
             ai_proofread: false,
             ai_summary: false,
+            note_language: course2md::llm::NoteLanguage::Source,
             vision: false,
             prompt: None,
             prompt_draft: None,
@@ -211,6 +213,9 @@ impl GenerationPreferences {
         config.defaults.resume = Some(true);
         config.llm.enabled = self.ai_proofread;
         config.llm.summarize = self.ai_summary;
+        config.llm.note_language = self.note_language;
+        config.translation.enabled =
+            self.note_language == course2md::llm::NoteLanguage::ZhHans;
         config.llm.vision = self.effective_vision();
         config.llm.prompt = self.prompt.clone();
         config.llm.concurrency = self.ai_concurrency;
@@ -473,6 +478,7 @@ pub struct ServiceVersion {
 pub struct ServiceRefs {
     pub asr: Option<ServiceVersionId>,
     pub llm: Option<ServiceVersionId>,
+    pub translation: Option<ServiceVersionId>,
 }
 
 impl ServiceRefs {
@@ -482,8 +488,15 @@ impl ServiceRefs {
                 && config.defaults.transcript_source != Some(TranscriptSource::Subtitle))
             .then(|| self.asr.clone())
             .flatten(),
-            llm: (config.llm.enabled || config.llm.summarize)
+            llm: config
+                .llm
+                .needs_service()
                 .then(|| self.llm.clone())
+                .flatten(),
+            translation: config
+                .translation
+                .enabled
+                .then(|| self.translation.clone())
                 .flatten(),
         }
     }
@@ -549,6 +562,7 @@ impl Drop for ResolvedConfig {
         use zeroize::Zeroize;
         self.0.asr_api.api_key.zeroize();
         self.0.llm.api_key.zeroize();
+        self.0.translation.api_key.zeroize();
     }
 }
 
@@ -636,6 +650,7 @@ impl Validate for ServicesState {
         for (reference, purpose) in [
             (&self.defaults.asr, ServicePurpose::Speech),
             (&self.defaults.llm, ServicePurpose::Ai),
+            (&self.defaults.translation, ServicePurpose::Ai),
         ] {
             if let Some(reference) = reference {
                 let version = self
@@ -891,6 +906,14 @@ impl Store {
         {
             next.defaults.llm = None;
         }
+        if next
+            .defaults
+            .translation
+            .as_ref()
+            .is_some_and(|id| !next.versions.contains_key(id))
+        {
+            next.defaults.translation = None;
+        }
         if self.persist(PreferenceGroup::Services, &next).is_ok() {
             self.services = next;
         }
@@ -1142,6 +1165,21 @@ impl Store {
         Ok(())
     }
 
+    pub fn set_default_translation_service(&mut self, reference: Option<&str>) -> Result<()> {
+        if let Some(reference) = reference {
+            let version = self.check_dispatch(reference)?;
+            ensure!(
+                version.config.protocol.purpose() == ServicePurpose::Ai,
+                "所选服务不支持翻译"
+            );
+        }
+        let mut next = self.services.clone();
+        next.defaults.translation = reference.map(str::to_owned);
+        self.persist(PreferenceGroup::Services, &next)?;
+        self.services = next;
+        Ok(())
+    }
+
     /// Delete the service configuration. Already dispatched requests are still
     /// received and saved. A marker keeps later restores from sending new ones.
     pub fn delete_service(&mut self, service_id: &str) -> Result<()> {
@@ -1183,6 +1221,14 @@ impl Store {
             .is_some_and(|id| !next.versions.contains_key(id))
         {
             next.defaults.llm = None;
+        }
+        if next
+            .defaults
+            .translation
+            .as_ref()
+            .is_some_and(|id| !next.versions.contains_key(id))
+        {
+            next.defaults.translation = None;
         }
         self.persist(PreferenceGroup::Services, &next)?;
         self.services = next;
@@ -1273,17 +1319,29 @@ impl Store {
                 _ => AsrApiMode::Chat,
             };
         }
-        if base.llm.enabled || base.llm.summarize {
+        if base.llm.needs_service() {
             let id = required
                 .llm
                 .as_deref()
                 .ok_or_else(|| anyhow!("请为这次笔记设置 AI 服务"))?;
             let version = check(id)?;
             if version.config.protocol.purpose() != ServicePurpose::Ai {
-                bail!("所选服务不支持 AI 校对或摘要");
+                bail!("所选服务不支持 AI 文字处理或摘要");
             }
             config.llm.base_url = version.config.endpoint.clone();
             config.llm.model = version.config.model.clone();
+        }
+        if base.translation.enabled {
+            let id = required
+                .translation
+                .as_deref()
+                .ok_or_else(|| anyhow!("请为这次笔记设置翻译服务"))?;
+            let version = check(id)?;
+            if version.config.protocol.purpose() != ServicePurpose::Ai {
+                bail!("所选服务不支持翻译");
+            }
+            config.translation.base_url = version.config.endpoint.clone();
+            config.translation.model = version.config.model.clone();
         }
         Ok(config)
     }
@@ -1315,10 +1373,15 @@ impl Store {
     ) -> Result<Vec<CredentialRef>> {
         let required = references.required_for(base);
         let mut needed = Vec::new();
-        for id in [required.asr, required.llm].into_iter().flatten() {
+        for id in [required.asr, required.llm, required.translation]
+            .into_iter()
+            .flatten()
+        {
             let version = self.check_dispatch(&id)?;
             if let Some(reference) = &version.config.credential {
-                needed.push(reference.clone());
+                if !needed.contains(reference) {
+                    needed.push(reference.clone());
+                }
             }
         }
         Ok(needed)
@@ -1332,7 +1395,11 @@ impl Store {
     ) -> Result<ResolvedConfig> {
         let mut config = ResolvedConfig(self.config_for_refs(base, references)?);
         let required = references.required_for(base);
-        for (id, is_asr) in [(required.asr, true), (required.llm, false)] {
+        for (id, target) in [
+            (required.asr, 0),
+            (required.llm, 1),
+            (required.translation, 2),
+        ] {
             if let Some(id) = id {
                 let version = self.check_dispatch(&id)?;
                 if let Some(reference) = &version.config.credential {
@@ -1340,10 +1407,10 @@ impl Store {
                         .get(reference)
                         .cloned()
                         .context("服务凭据尚未就绪，请重新打开服务设置保存一次")?;
-                    if is_asr {
-                        config.0.asr_api.api_key = secret;
-                    } else {
-                        config.0.llm.api_key = secret;
+                    match target {
+                        0 => config.0.asr_api.api_key = secret,
+                        1 => config.0.llm.api_key = secret,
+                        _ => config.0.translation.api_key = secret,
                     }
                 }
             }
@@ -1633,6 +1700,7 @@ pub fn strip_secrets(config: &mut ConfigFile) {
     use zeroize::Zeroize;
     config.asr_api.api_key.zeroize();
     config.llm.api_key.zeroize();
+    config.translation.api_key.zeroize();
 }
 
 fn clear_service_fields(config: &mut ConfigFile) {
@@ -1641,6 +1709,8 @@ fn clear_service_fields(config: &mut ConfigFile) {
     config.asr_api.model.clear();
     config.llm.base_url.clear();
     config.llm.model.clear();
+    config.translation.base_url.clear();
+    config.translation.model.clear();
 }
 
 /// Accept the chosen protocol's full endpoint or a base URL. A known conflicting full
@@ -1816,6 +1886,7 @@ mod tests {
         let old_refs = ServiceRefs {
             llm: Some(old.id),
             asr: None,
+            translation: None,
         };
         let runtime = store
             .resolve_for_execution(&config, &old_refs)
@@ -1970,10 +2041,14 @@ mod tests {
         let version = store
             .publish_service(&draft.id, BindingScope::Defaults)
             .unwrap();
+        store
+            .set_default_translation_service(Some(&version.id))
+            .unwrap();
         store.delete_service(&version.service_id).unwrap();
         let reopened = Store::open(directory.path(), store.vault());
         assert!(reopened.version(&version.id).is_none());
         assert!(reopened.default_refs().llm.is_none());
+        assert!(reopened.default_refs().translation.is_none());
         assert!(reopened.check_dispatch(&version.id).is_err());
         assert!(
             reopened
@@ -2069,10 +2144,16 @@ mod tests {
         let mut config = ConfigFile::default();
         config.defaults.out = Some(PathBuf::from("/test-library"));
         config.llm.api_key = "test-only-old-global-key".into();
+        config.translation.api_key = "test-only-translation-key".into();
+        config.translation.base_url = "https://old.example.test/v1".into();
+        config.translation.model = "old-translation-model".into();
         preferences.apply_to(&mut config);
         assert!(!config.llm.enabled && config.llm.summarize && !config.llm.vision);
         assert_eq!(config.defaults.out, Some(PathBuf::from("/test-library")));
         assert!(config.llm.api_key.is_empty());
+        assert!(config.translation.api_key.is_empty());
+        assert!(config.translation.base_url.is_empty());
+        assert!(config.translation.model.is_empty());
     }
 
     #[test]
@@ -2324,6 +2405,52 @@ mod tests {
         assert_eq!(app.font_scale, 1.25);
         assert!(app.desktop.reduce_motion);
         assert_eq!(app.appearance, crate::palettes::ThemePreferences::default());
+    }
+
+    #[test]
+    fn translation_service_is_resolved_and_snapshotted_independently() {
+        let (_directory, mut store) = isolated();
+        let translation_draft = complete_draft(&mut store, "cheap-translation-model");
+        let translation = store
+            .publish_service(&translation_draft.id, BindingScope::Defaults)
+            .unwrap();
+        store
+            .set_default_translation_service(Some(&translation.id))
+            .unwrap();
+        let summary_draft = complete_draft(&mut store, "summary-model");
+        let summary = store
+            .publish_service(&summary_draft.id, BindingScope::Defaults)
+            .unwrap();
+
+        let captured = store.default_refs();
+        assert_eq!(captured.llm.as_deref(), Some(summary.id.as_str()));
+        assert_eq!(
+            captured.translation.as_deref(),
+            Some(translation.id.as_str())
+        );
+        let mut config = ConfigFile::default();
+        config.llm.summarize = true;
+        config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
+        config.translation.enabled = true;
+        let runtime = store
+            .resolve_for_execution(&config, &captured)
+            .unwrap()
+            .into_config();
+        assert_eq!(runtime.llm.model, "summary-model");
+        assert_eq!(runtime.translation.model, "cheap-translation-model");
+
+        let replacement_draft = complete_draft(&mut store, "new-translation-model");
+        let replacement = store
+            .publish_service(&replacement_draft.id, BindingScope::CurrentTask)
+            .unwrap();
+        store
+            .set_default_translation_service(Some(&replacement.id))
+            .unwrap();
+        assert_eq!(
+            captured.translation.as_deref(),
+            Some(translation.id.as_str()),
+            "submitted references must not follow later default changes"
+        );
     }
 
     #[test]

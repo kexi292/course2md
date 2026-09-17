@@ -3485,6 +3485,9 @@ impl Desktop {
                         notes::ProcessingStage::Proofreading if !requires_repair => {
                             Some("proofreading".to_owned())
                         }
+                        notes::ProcessingStage::Translation if !requires_repair => {
+                            Some("translation".to_owned())
+                        }
                         notes::ProcessingStage::Summary if !requires_repair => {
                             Some("summary".to_owned())
                         }
@@ -3498,7 +3501,8 @@ impl Desktop {
                     } else {
                         match components[0].as_str() {
                             "screenshots" => "补生成截图",
-                            "proofreading" => "重试 AI 校对",
+                            "proofreading" => "重试 AI 正文处理",
+                            "translation" => "重试翻译",
                             _ => "补生成摘要",
                         }
                     };
@@ -3521,7 +3525,9 @@ impl Desktop {
                     && preview.processing_issues.iter().any(|issue| {
                         matches!(
                             issue.stage,
-                            notes::ProcessingStage::Proofreading | notes::ProcessingStage::Summary
+                            notes::ProcessingStage::Proofreading
+                                | notes::ProcessingStage::Translation
+                                | notes::ProcessingStage::Summary
                         )
                     })
                 {
@@ -5344,6 +5350,7 @@ mod tests {
                         end: *time + 10.,
                         text: format!("第 {revision} 版，{time} 秒的正文"),
                         raw: None,
+                        translation: None,
                     }],
                 }
             })
@@ -5417,6 +5424,7 @@ mod tests {
                 config: Default::default(),
                 asr_service: None,
                 ai_service: None,
+                translation_service: None,
             },
             state: workspace::TaskState::Complete,
             intent: workspace::Intent::Run,

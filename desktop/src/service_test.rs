@@ -427,14 +427,14 @@ fn verify_sample(kind: TestKind, content: &str) -> Result<(), (TestOutcome, Stri
             } else {
                 &[0]
             };
-            let mut ids = pairs.iter().map(|(id, _)| *id).collect::<Vec<_>>();
+            let mut ids = pairs.iter().map(|(id, _, _)| *id).collect::<Vec<_>>();
             ids.sort_unstable();
-            if ids != expected || pairs.iter().any(|(_, text)| text.trim().is_empty()) {
+            if ids != expected || pairs.iter().any(|(_, text, _)| text.trim().is_empty()) {
                 return Err(contract(
                     "返回段落 ID 必须与内置输入一一对应，且每段包含有效文字",
                 ));
             }
-            let first = words(&pairs.iter().find(|(id, _)| *id == 0).unwrap().1);
+            let first = words(&pairs.iter().find(|(id, _, _)| *id == 0).unwrap().1);
             if kind == TestKind::Vision {
                 if !first.split_whitespace().any(|word| word == "blue")
                     || first.split_whitespace().any(|word| word == "red")
@@ -444,7 +444,7 @@ fn verify_sample(kind: TestKind, content: &str) -> Result<(), (TestOutcome, Stri
                     ));
                 }
             } else {
-                let second = words(&pairs.iter().find(|(id, _)| *id == 1).unwrap().1);
+                let second = words(&pairs.iter().find(|(id, _, _)| *id == 1).unwrap().1);
                 if !(first.contains("has three books") || first.contains("has 3 books"))
                     || !second.contains("water")
                     || !second.contains("celsius")

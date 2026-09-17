@@ -43,8 +43,16 @@ const SUMMARY_END: &str = "<!-- /course2md:summary -->";
 
 const SYSTEM_PROMPT: &str = "你是视频内容总结助手。根据提供的带时间戳字幕为视频生成结构化总结。\
 严格要求：1) 只依据字幕内容，严禁编造字幕中不存在的事实、数字、人名或观点；\
-2) 对不确定的信息宁可省略也不要猜测；3) 使用视频原语言输出；\
+2) 对不确定的信息宁可省略也不要猜测；3) {language}；\
 4) 只输出一个合法 JSON 对象，不要代码围栏、不要任何多余文字。";
+
+fn system_prompt(s: &LlmSettings) -> String {
+    let language = match s.note_language {
+        llm::NoteLanguage::Source => "使用视频原语言输出",
+        llm::NoteLanguage::ZhHans => "使用简体中文输出",
+    };
+    SYSTEM_PROMPT.replace("{language}", language)
+}
 
 fn build_transcript(events: &[TranscriptEvent]) -> String {
     let mut out = String::new();
@@ -160,7 +168,7 @@ fn summarize_text(
     let content = chat_once(
         agent,
         s,
-        SYSTEM_PROMPT,
+        &system_prompt(s),
         &user_prompt(transcript),
         description,
     )?;
@@ -309,7 +317,7 @@ pub async fn summarize(
         chat_once(
             &agent,
             &s2,
-            SYSTEM_PROMPT,
+            &system_prompt(&s2),
             &format!(
                 "以下是各分段的总结（时间已按原视频绝对秒数标注）：\n\n{input}\n\n\
 请合并为整个视频的最终总结，输出 JSON：{{\"tldr\": \"不超过150字的一句话概述\", \
