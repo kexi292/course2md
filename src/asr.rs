@@ -777,8 +777,8 @@ fn find_llama_server() -> Result<PathBuf> {
         .context("未找到 llama-server / llama-server not found. 安装 llama.cpp 并加入 PATH / Install llama.cpp and add it to PATH.")
 }
 
-/// `llama-server --help` 探测超时：进程启动很快，5s 足够；超时按不支持处理
-const HELP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Windows cold starts can include antivirus scans and GPU runtime initialization.
+const HELP_PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// llama-server 对 offload 相关新 flag 的支持情况（issue #12）。
 /// --no-mmproj-offload / --no-op-offload / --device 都是新版 llama.cpp 才有的；
