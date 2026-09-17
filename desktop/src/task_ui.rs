@@ -286,6 +286,7 @@ fn task_stage_progress(
 fn ai_stage_outcome(name: &str, outcomes: Option<&serde_json::Value>) -> Option<StageStatus> {
     let component = match name {
         "llm" => "proofreading",
+        "translation" => "translation",
         "summary" | "summarize" => "summary",
         _ => return None,
     };
@@ -393,7 +394,7 @@ fn task_service_repair_reason(task: &TaskRecord) -> Option<&'static str> {
         return None;
     }
     let outcomes = &task.outcomes;
-    let failures: Vec<_> = ["proofreading", "summary"]
+    let failures: Vec<_> = ["proofreading", "translation", "summary"]
         .into_iter()
         .filter_map(|component| outcomes.get(component))
         .filter(|outcome| {
@@ -411,7 +412,9 @@ fn task_service_repair_reason(task: &TaskRecord) -> Option<&'static str> {
         .filter_map(|outcome| outcome.get("message").and_then(|message| message.as_str()))
         .chain(task.blocked.iter().filter_map(|request| {
             let purpose = request.purpose.as_deref().unwrap_or_default();
-            (purpose.contains("proof") || purpose.contains("summary"))
+            (purpose.contains("proof")
+                || purpose.contains("translation")
+                || purpose.contains("summary"))
                 .then_some(request.message.as_str())
         }))
         .chain(task.error.as_deref())
@@ -1127,6 +1130,7 @@ impl Desktop {
         let refs = ServiceRefs {
             asr: draft.asr_service.clone().or(defaults.asr),
             llm: draft.ai_service.clone().or(defaults.llm),
+            translation: defaults.translation,
         };
         let config = match validation {
             PlanValidation::Preview => self.preferences.config_for_preview(&config, &refs)?,
@@ -1156,6 +1160,7 @@ impl Desktop {
             config,
             asr_service: refs.asr,
             ai_service: refs.llm,
+            translation_service: refs.translation,
         })
     }
 
@@ -1299,6 +1304,7 @@ impl Desktop {
         let refs = ServiceRefs {
             asr: task.plan.asr_service.clone(),
             llm: task.plan.ai_service.clone(),
+            translation: task.plan.translation_service.clone(),
         };
         let config = self
             .preferences
@@ -1318,7 +1324,11 @@ impl Desktop {
         } else {
             None
         };
-        let service_versions = [("asr", refs.asr), ("llm", refs.llm)]
+        let service_versions = [
+            ("asr", refs.asr),
+            ("llm", refs.llm),
+            ("translation", refs.translation),
+        ]
             .into_iter()
             .filter_map(|(purpose, reference)| reference.map(|r| (purpose.to_owned(), r)))
             .collect();
@@ -1382,7 +1392,11 @@ impl Desktop {
                 authorizations.push(id);
             }
         }
-        let stopped: Vec<_> = [&task.plan.asr_service, &task.plan.ai_service]
+        let stopped: Vec<_> = [
+            &task.plan.asr_service,
+            &task.plan.ai_service,
+            &task.plan.translation_service,
+        ]
             .into_iter()
             .flatten()
             .filter(|id| {
@@ -1432,6 +1446,7 @@ impl Desktop {
         let refs = ServiceRefs {
             asr: task.plan.asr_service.clone(),
             llm: task.plan.ai_service.clone(),
+            translation: task.plan.translation_service.clone(),
         };
         let needed = match self
             .preferences
@@ -1694,6 +1709,8 @@ impl Desktop {
                 .map(|purpose| {
                     if purpose.contains("summary") {
                         "summary".to_owned()
+                    } else if purpose.contains("translation") {
+                        "translation".to_owned()
                     } else {
                         "proofreading".to_owned()
                     }
@@ -1769,7 +1786,7 @@ impl Desktop {
                 return;
             }
         }
-        let components = self
+        let mut components = self
             .workspace
             .as_ref()
             .and_then(|workspace| workspace.state.task(&id))
@@ -1778,12 +1795,17 @@ impl Desktop {
                 task_component_failures(task, path)
                     .into_iter()
                     .map(|(component, _, _)| component)
-                    .filter(|component| matches!(component.as_str(), "proofreading" | "summary"))
+                    .filter(|component| {
+                        matches!(component.as_str(), "proofreading" | "translation" | "summary")
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        if components.iter().any(|component| component == "translation") {
+            components.retain(|component| component == "translation");
+        }
         if components.is_empty() {
-            self.message = Some("这份笔记没有需要修复的校对或摘要".into());
+            self.message = Some("这份笔记没有需要修复的正文处理或摘要".into());
             cx.notify();
             return;
         }
@@ -1808,14 +1830,24 @@ impl Desktop {
                 .and_then(|workspace| workspace.state.task(&id))
                 .context("原任务记录暂时不可用")?;
             let mut base = task.plan.config.clone();
+            let translation_service = task.plan.translation_service.clone();
             base.defaults.transcript_source = Some(course2md::config::TranscriptSource::Subtitle);
-            base.llm.enabled = components.iter().any(|part| part == "proofreading");
+            base.llm.enabled &= components.iter().any(|part| part == "proofreading");
             base.llm.summarize = components.iter().any(|part| part == "summary");
+            base.translation.enabled = components.iter().any(|part| part == "translation")
+                || (base.llm.enabled
+                    && base.llm.note_language == course2md::llm::NoteLanguage::ZhHans);
+            let translation_only = components.iter().all(|part| part == "translation");
             let config = self.preferences.config_for_refs(
                 &base,
                 &ServiceRefs {
                     asr: None,
-                    llm: Some(ai_service.clone()),
+                    llm: (!translation_only).then(|| ai_service.clone()),
+                    translation: if translation_only {
+                        Some(ai_service.clone())
+                    } else {
+                        translation_service
+                    },
                 },
             )?;
             self.workspace
@@ -2640,7 +2672,7 @@ impl Desktop {
                     task_component_failures(task, path)
                         .iter()
                         .any(|(component, _, _)| {
-                            matches!(component.as_str(), "proofreading" | "summary")
+                            matches!(component.as_str(), "proofreading" | "translation" | "summary")
                         });
                 if repairable && uncertain.is_empty() && task.handled_by.is_none() {
                     let repair_id = id.clone();
@@ -2657,6 +2689,8 @@ impl Desktop {
                     let unknown_component = uncertain.iter().any(|request| {
                         let purpose = request.purpose.as_deref().unwrap_or_default();
                         (component == "proofreading" && purpose.contains("proof"))
+                            || (component == "translation"
+                                && purpose.contains("translation"))
                             || (component == "summary" && purpose.contains("summary"))
                     });
                     if unknown_component {
@@ -2664,7 +2698,10 @@ impl Desktop {
                     }
                     let reason =
                         activity::component_failure_message(&label, outcome.message.as_deref());
-                    let ai_component = matches!(component.as_str(), "proofreading" | "summary");
+                    let ai_component = matches!(
+                        component.as_str(),
+                        "proofreading" | "translation" | "summary"
+                    );
                     if !(requires_repair && ai_component) {
                         details = details.child(
                             accessible_text(
@@ -3108,6 +3145,25 @@ impl Desktop {
                     )),
             ));
         }
+        if task.plan.config.llm.note_language == course2md::llm::NoteLanguage::ZhHans
+            && let Some(version) = task
+                .plan
+                .translation_service
+                .as_ref()
+                .and_then(|id| self.preferences.version(id))
+        {
+            facts = facts.child(detail_row(
+                SharedString::from(format!("task-translation-destination-{}", task.id)),
+                "翻译",
+                icons::web()
+                    .size(rems(20. / 14.))
+                    .text_color(color(GRAY)),
+                div()
+                    .text_size(TEXT_BODY)
+                    .whitespace_normal()
+                    .child(format!("文字发送到「{}」", version.config.name)),
+            ));
+        }
         facts
     }
 
@@ -3325,7 +3381,11 @@ impl Desktop {
             );
         }
         for (component, _, reason) in partial_failures.iter().filter(|(component, _, _)| {
-            !requires_repair || !matches!(component.as_str(), "proofreading" | "summary")
+            !requires_repair
+                || !matches!(
+                    component.as_str(),
+                    "proofreading" | "translation" | "summary"
+                )
         }) {
             card = card.child(
                 accessible_text(
@@ -3366,7 +3426,9 @@ impl Desktop {
             }
             if partial_failures
                 .iter()
-                .any(|(component, _, _)| matches!(component.as_str(), "proofreading" | "summary"))
+                .any(|(component, _, _)| {
+                    matches!(component.as_str(), "proofreading" | "translation" | "summary")
+                })
             {
                 let repair_id = id.clone();
                 actions = actions.child(
@@ -3379,7 +3441,12 @@ impl Desktop {
                 );
             }
             for (component, label, _) in &partial_failures {
-                if requires_repair && matches!(component.as_str(), "proofreading" | "summary") {
+                if requires_repair
+                    && matches!(
+                        component.as_str(),
+                        "proofreading" | "translation" | "summary"
+                    )
+                {
                     continue;
                 }
                 let component = component.clone();
@@ -3545,7 +3612,13 @@ fn task_status_label(task: &TaskRecord) -> String {
         let description = if !purpose.is_empty()
             && purpose.iter().all(|purpose| purpose.contains("proof"))
         {
-            "AI 校对结果未确认"
+            "AI 正文处理结果未确认"
+        } else if !purpose.is_empty()
+            && purpose
+                .iter()
+                .all(|purpose| purpose.contains("translation"))
+        {
+            "翻译结果未确认"
         } else if !purpose.is_empty() && purpose.iter().all(|purpose| purpose.contains("summary")) {
             "摘要结果未确认"
         } else if purpose
@@ -3574,8 +3647,10 @@ fn request_scope(request: &workspace::BlockedRequest) -> String {
         request.description.clone()
     } else {
         let purpose = request.purpose.as_deref().unwrap_or_default();
-        let name = if purpose.contains("proof") {
-            "AI 校对"
+        let name = if purpose.contains("translation") {
+            "翻译"
+        } else if purpose.contains("proof") {
+            "AI 正文处理"
         } else if purpose.contains("summary") {
             "生成摘要"
         } else if purpose.contains("transcription") {
@@ -3653,6 +3728,7 @@ mod tests {
                 config: Default::default(),
                 asr_service: None,
                 ai_service: None,
+                translation_service: None,
             },
             state: crate::workspace::TaskState::Paused,
             intent: crate::workspace::Intent::Run,
@@ -4099,6 +4175,7 @@ mod tests {
                         config: Default::default(),
                         asr_service: None,
                         ai_service: None,
+                        translation_service: None,
                     },
                     None,
                 )
@@ -4211,6 +4288,7 @@ mod tests {
                 config: Default::default(),
                 asr_service: None,
                 ai_service: None,
+                translation_service: None,
             },
             state: TaskState::Partial,
             intent: Intent::Run,
@@ -4319,6 +4397,7 @@ pub(crate) fn task_component_failures(
     for (key, label) in [
         ("screenshots", "截图"),
         ("proofreading", "校对"),
+        ("translation", "翻译"),
         ("summary", "摘要"),
     ] {
         if let Some(outcome) = value

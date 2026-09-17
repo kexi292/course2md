@@ -93,6 +93,7 @@ pub struct ConfigFile {
     pub desktop: DesktopSettings,
     pub defaults: Defaults,
     pub llm: crate::llm::LlmSettings,
+    pub translation: crate::llm::TranslationSettings,
     pub asr_api: AsrApi,
 }
 
@@ -234,6 +235,15 @@ enabled = false
 #concurrency = 8
 # 在笔记中加入 AI 总结，需要 enabled = true / Add AI summaries; requires enabled = true
 #summarize = false
+# 笔记核心语言：source 跟随原文；zh-hans 保留原文并附简体中文 / Core note language
+#note_language = "source"
+
+[translation]
+# 独立翻译服务；桌面端可从已保存的 AI 服务中选择 / Dedicated translation service
+#base_url = "https://api.example.com/v1"
+#api_key = ""
+#model = "inexpensive-translation-model"
+#concurrency = 8
 "#;
 
 /// 打印生效配置（CLI 覆盖合并前，来自文件的值）。
@@ -347,4 +357,14 @@ pub fn print_effective(cfg: &ConfigFile) {
     println!("  vision         : {}", cfg.llm.vision);
     println!("  concurrency    : {}", cfg.llm.concurrency);
     println!("  summarize      : {}", cfg.llm.summarize);
+    println!("  note_language  : {}", cfg.llm.note_language.label());
+    println!("[translation]");
+    println!(
+        "  model          : {}",
+        if cfg.translation.model.is_empty() {
+            "-"
+        } else {
+            &cfg.translation.model
+        }
+    );
 }

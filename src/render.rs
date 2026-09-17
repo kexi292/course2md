@@ -108,6 +108,9 @@ pub fn render_markdown(meta: &VideoMeta, sections: &[Section]) -> String {
         }
         for ev in &s.speech {
             write!(md, "{}\n\n", ev.text).unwrap();
+            if let Some(translation) = &ev.translation {
+                write!(md, "{translation}\n\n").unwrap();
+            }
         }
     }
     md
@@ -164,11 +167,19 @@ pub fn render_html(meta: &VideoMeta, sections: &[Section]) -> String {
         }
         for ev in &s.speech {
             writeln!(body, "<p>{}</p>", esc(&ev.text)).unwrap();
+            if let Some(translation) = &ev.translation {
+                writeln!(
+                    body,
+                    "<p class=\"translation\" lang=\"zh-Hans\">{}</p>",
+                    esc(translation)
+                )
+                .unwrap();
+            }
         }
         body.push_str("</section>\n");
     }
     format!(
-        "<!DOCTYPE html>\n<html lang=\"zh\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>{title}</title>\n<style>\n:root {{ color-scheme: light dark; }}\nbody {{ max-width: 920px; margin: 0 auto; padding: 1rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.7; }}\nheader h1 {{ font-size: 1.5rem; }}\nheader p {{ color: #888; }}\nsection {{ margin: 2rem 0; }}\nsection h2 {{ font-size: 1rem; font-weight: 600; }}\nsection h2 a {{ color: #0969da; text-decoration: none; }}\nimg {{ max-width: 100%; border: 1px solid #8884; border-radius: 6px; }}\np {{ margin: .4rem 0; }}\np.mute {{ color: #888; }}\n</style>\n</head>\n<body>\n{body}</body>\n</html>\n",
+        "<!DOCTYPE html>\n<html lang=\"zh\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n<title>{title}</title>\n<style>\n:root {{ color-scheme: light dark; }}\nbody {{ max-width: 920px; margin: 0 auto; padding: 1rem; font-family: system-ui, -apple-system, sans-serif; line-height: 1.7; }}\nheader h1 {{ font-size: 1.5rem; }}\nheader p {{ color: #888; }}\nsection {{ margin: 2rem 0; }}\nsection h2 {{ font-size: 1rem; font-weight: 600; }}\nsection h2 a {{ color: #0969da; text-decoration: none; }}\nimg {{ max-width: 100%; border: 1px solid #8884; border-radius: 6px; }}\np {{ margin: .4rem 0; }}\np.translation {{ color: color-mix(in srgb, currentColor 78%, transparent); margin-bottom: 1rem; }}\np.mute {{ color: #888; }}\n</style>\n</head>\n<body>\n{body}</body>\n</html>\n",
         title = esc(&meta.title),
     )
 }
@@ -290,16 +301,20 @@ mod tests {
                 end: 12.5,
                 text: "你好".into(),
                 raw: None,
+                translation: Some("Hello".into()),
             }],
         }];
         let md = render_markdown(&m, &s);
         assert!(md.contains("你好") && md.contains("frames/slide_0001.jpg"));
+        assert!(md.find("你好").unwrap() < md.find("Hello").unwrap());
         let html = render_html(&m, &s);
         assert!(html.contains("&lt;课&gt;"));
         assert!(
             html.contains("<p>你好</p>"),
             "正文直接成段，不再用「」对话包裹"
         );
+        assert!(html.find("<p>你好</p>").unwrap() < html.find("Hello").unwrap());
+        assert!(html.contains("lang=\"zh-Hans\""));
         assert!(!html.contains("「你好」"));
     }
 }

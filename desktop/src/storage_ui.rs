@@ -1697,6 +1697,7 @@ mod tests {
                 end: 1.,
                 text: "Relocation must preserve this body.".into(),
                 raw: None,
+                translation: None,
             }],
         }];
         let meta = course2md::fetch::VideoMeta {
@@ -1754,6 +1755,7 @@ mod tests {
             config: course2md::settings::ConfigFile::default(),
             asr_service: Some("fixed-service-version".into()),
             ai_service: None,
+            translation_service: None,
         };
         let (task_id, _) = workspace.state.enqueue(plan, None).unwrap();
         let task = workspace.state.task_mut(&task_id).unwrap();
@@ -2099,6 +2101,7 @@ mod tests {
             config,
             asr_service: Some("fixed-asr-version".into()),
             ai_service: Some("fixed-ai-version".into()),
+            translation_service: None,
         };
         let (task_id, _) = workspace.state.enqueue(plan, None).unwrap();
         let old_task_work = workspace.state.task(&task_id).unwrap().work_dir.clone();

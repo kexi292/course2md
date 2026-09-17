@@ -65,6 +65,7 @@ pub fn stage(name: &str, status: &str) {
             "audio" => "提取音频 / Extracting audio",
             "transcribe" | "asr" => "识别语音 / Transcribing speech",
             "llm" => "润色文字 / Proofreading transcript",
+            "translation" => "翻译正文 / Translating transcript",
             "summary" | "summarize" => "生成总结 / Generating summary",
             "render" => "生成笔记 / Writing notes",
             name if name.starts_with("model/") => "下载识别模型 / Downloading speech model",

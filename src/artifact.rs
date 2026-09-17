@@ -63,6 +63,8 @@ pub struct Outcomes {
     pub transcript: Outcome,
     pub screenshots: Outcome,
     pub proofreading: Outcome,
+    #[serde(default = "Outcome::not_requested")]
+    pub translation: Outcome,
     pub summary: Outcome,
     pub exports: BTreeMap<String, Outcome>,
 }
@@ -72,6 +74,7 @@ impl Default for Outcomes {
             transcript: Outcome::not_requested(),
             screenshots: Outcome::not_requested(),
             proofreading: Outcome::not_requested(),
+            translation: Outcome::not_requested(),
             summary: Outcome::not_requested(),
             exports: BTreeMap::new(),
         }
@@ -83,6 +86,7 @@ impl Outcomes {
             &self.transcript,
             &self.screenshots,
             &self.proofreading,
+            &self.translation,
             &self.summary,
         ]
         .into_iter()
@@ -557,6 +561,7 @@ mod tests {
                 end: 1.,
                 text: "Preserved body".into(),
                 raw: None,
+                translation: None,
             }],
         }];
         publish(
@@ -666,6 +671,7 @@ mod tests {
                 end: 1.,
                 text: "Readable text".into(),
                 raw: None,
+                translation: None,
             }],
         }];
         let first = publish(

@@ -208,6 +208,7 @@ pub fn public_config(config: &ConfigFile) -> ConfigFile {
     let mut config = config.clone();
     config.asr_api.api_key.clear();
     config.llm.api_key.clear();
+    config.translation.api_key.clear();
     config
 }
 
@@ -226,6 +227,8 @@ pub struct TaskPlan {
     pub config: ConfigFile,
     pub asr_service: Option<String>,
     pub ai_service: Option<String>,
+    #[serde(default)]
+    pub translation_service: Option<String>,
 }
 
 impl TaskPlan {
@@ -238,6 +241,7 @@ impl TaskPlan {
             || self.subtitle != other.subtitle
             || self.asr_service != other.asr_service
             || self.ai_service != other.ai_service
+            || self.translation_service != other.translation_service
         {
             return false;
         }
@@ -839,7 +843,7 @@ impl State {
         id: &str,
         mut components: Vec<String>,
         resend: Vec<String>,
-        ai_service: Option<(String, ConfigFile)>,
+        replacement_service: Option<(String, ConfigFile)>,
     ) -> Result<String> {
         let mut original = self.task(id).context("任务不存在")?.clone();
         if let Some(next) = &original.handled_by {
@@ -878,7 +882,7 @@ impl State {
             } else {
                 matches!(
                     component.as_str(),
-                    "screenshots" | "proofreading" | "summary"
+                    "screenshots" | "proofreading" | "translation" | "summary"
                 ) && value.get(component).is_some_and(failed_outcome)
             };
             ensure!(
@@ -924,21 +928,38 @@ impl State {
             );
         }
         let mut plan = original.plan;
-        if let Some((service, config)) = ai_service {
+        let translation_repair = components.iter().all(|part| part == "translation");
+        if let Some((service, config)) = replacement_service {
             ensure!(
-                components
-                    .iter()
-                    .all(|part| matches!(part.as_str(), "proofreading" | "summary")),
-                "服务修复只能用于未完成的校对或摘要"
+                translation_repair
+                    || components
+                        .iter()
+                        .all(|part| matches!(part.as_str(), "proofreading" | "summary")),
+                "服务修复只能用于未完成的正文处理或摘要"
             );
-            plan.ai_service = Some(service);
-            plan.config.llm = config.llm;
+            if translation_repair {
+                plan.translation_service = Some(service);
+                plan.config.translation = config.translation;
+            } else {
+                plan.ai_service = Some(service);
+                plan.config.llm = config.llm;
+            }
+        }
+        if components.iter().any(|part| part == "proofreading")
+            && plan.config.llm.note_language == course2md::llm::NoteLanguage::ZhHans
+            && !components.iter().any(|part| part == "translation")
+        {
+            components.push("translation".into());
+            components.sort();
         }
         let only_exports = components.iter().all(|component| component == "exports");
         plan.config.llm.enabled = components
             .iter()
             .any(|component| component == "proofreading");
         plan.config.llm.summarize = components.iter().any(|component| component == "summary");
+        plan.config.translation.enabled = components
+            .iter()
+            .any(|component| component == "translation");
         plan.config.llm.vision &= plan.config.llm.enabled;
         plan.options.llm = plan.config.llm.enabled;
         plan.options.summarize = plan.config.llm.summarize;
@@ -1782,6 +1803,7 @@ mod tests {
             config: ConfigFile::default(),
             asr_service: None,
             ai_service: None,
+            translation_service: None,
         }
     }
     #[test]
@@ -1809,6 +1831,7 @@ mod tests {
         let mut task = plan(&ws.state.default_library);
         task.config.asr_api.api_key = "asr-secret-do-not-store".into();
         task.config.llm.api_key = "ai-secret-do-not-store".into();
+        task.config.translation.api_key = "translation-secret-do-not-store".into();
         let id = ws.transaction(|state| state.enqueue(task, None)).unwrap().0;
         ws.transaction(|s| {
             s.draft_mut().unwrap().change_source("B.mp4".into());
@@ -2420,6 +2443,7 @@ mod tests {
                 end: 20.,
                 text: "Preserved readable notes.".into(),
                 raw: None,
+                translation: None,
             }],
         }];
         smol::block_on(artifact::publish(
@@ -2798,6 +2822,65 @@ mod tests {
     }
 
     #[test]
+    fn bilingual_retries_keep_translation_separate_from_proofreading() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let mut snapshot = plan(&ws.state.default_library);
+        snapshot.config.llm.enabled = true;
+        snapshot.config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
+        snapshot.translation_service = Some("translation-v1".into());
+        let id = ws.state.enqueue(snapshot, None).unwrap().0;
+        let version = publish_note(&ws.state, &id, true);
+        let outcomes = course2md::artifact::read_manifest(&version.join("manifest.json"))
+            .unwrap()
+            .outcomes;
+        let original = ws.state.task_mut(&id).unwrap();
+        original.state = TaskState::Partial;
+        original.artifact = Some(version);
+        original.outcomes = serde_json::to_value(outcomes).unwrap();
+
+        let proof = ws
+            .state
+            .reprocess(&id, vec!["proofreading".into()], vec![])
+            .unwrap();
+        let task = ws.state.task(&proof).unwrap();
+        assert!(task.plan.config.llm.enabled);
+        assert_eq!(task.plan.translation_service.as_deref(), Some("translation-v1"));
+        assert!(matches!(
+            &task.plan.operation,
+            course2md::execution::Operation::Reprocess { components, .. }
+                if components == &["proofreading", "translation"]
+        ));
+
+        let mut translation_outcomes = course2md::artifact::Outcomes::default();
+        translation_outcomes.transcript = course2md::artifact::Outcome::succeeded();
+        translation_outcomes.translation =
+            course2md::artifact::Outcome::failed("翻译未完成");
+        let mut translation_snapshot = plan(&ws.state.default_library);
+        translation_snapshot.config.llm.enabled = true;
+        translation_snapshot.config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
+        translation_snapshot.translation_service = Some("translation-v1".into());
+        let translation_id = ws.state.enqueue(translation_snapshot, None).unwrap().0;
+        let translation_version =
+            publish_note_with_outcomes(&ws.state, &translation_id, translation_outcomes.clone());
+        let original = ws.state.task_mut(&translation_id).unwrap();
+        original.state = TaskState::Partial;
+        original.artifact = Some(translation_version);
+        original.outcomes = serde_json::to_value(translation_outcomes).unwrap();
+        let retry = ws
+            .state
+            .reprocess(&translation_id, vec!["translation".into()], vec![])
+            .unwrap();
+        let task = ws.state.task(&retry).unwrap();
+        assert!(!task.plan.config.llm.enabled);
+        assert!(matches!(
+            &task.plan.operation,
+            course2md::execution::Operation::Reprocess { components, .. }
+                if components == &["translation"]
+        ));
+    }
+
+    #[test]
     fn damaged_primary_and_backup_are_preserved_before_paused_mirror_rebuild() {
         let dir = tempfile::tempdir().unwrap();
         let mut ws = test_workspace(dir.path());
@@ -2984,9 +3067,10 @@ mod tests {
         let refs = crate::preferences::ServiceRefs {
             asr: Some("stopped-asr".into()),
             llm: Some("stopped-ai".into()),
+            translation: Some("stopped-translation".into()),
         };
         let needed = refs.required_for(&child.plan.config);
-        assert!(needed.asr.is_none() && needed.llm.is_none());
+        assert!(needed.asr.is_none() && needed.llm.is_none() && needed.translation.is_none());
     }
 
     #[test]

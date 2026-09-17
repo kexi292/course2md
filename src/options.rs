@@ -52,6 +52,9 @@ pub fn resolve(
         .or_else(|| d.out.clone())
         .map(config::expand_tilde)
         .unwrap_or_else(|| config::DEFAULT_OUT_DIR.into());
+    let llm_settings = resolve_llm(opts, file);
+    let mut translation = file.translation.clone();
+    translation.enabled = llm_settings.note_language == llm::NoteLanguage::ZhHans;
     Ok(config::PipelineConfig {
         url: source,
         // out_dir 此处只是初值；pipeline 里会改写为 {out_root}/{platform}/{title}/{id}/
@@ -109,7 +112,8 @@ pub fn resolve(
         keep_video: !opts.no_keep_video && (opts.keep_video || d.keep_video.unwrap_or(false)),
         no_download: opts.no_download || d.no_download.unwrap_or(false),
         resume: config::resolve_resume(opts.resume, opts.no_resume, d.resume),
-        llm: resolve_llm(opts, file),
+        llm: llm_settings,
+        translation,
         asr_api: resolve_asr_api(opts, file),
         asr_model: opts.asr_model.clone().or_else(|| d.asr_model.clone()),
         gpu_layers: config::resolve_gpu_layers(opts.gpu_layers, d.gpu_layers),

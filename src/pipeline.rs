@@ -84,6 +84,7 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
     let course_dir = cfg.out_root.join(&platform).join(&course_id);
     let mut identity_config = cfg.clone();
     identity_config.llm.api_key.clear();
+    identity_config.translation.api_key.clear();
     identity_config.asr_api.api_key.clear();
     let binding =
         serde_json::json!({"source_id": source_id, "config": identity_config, "title": meta.title});
@@ -240,7 +241,12 @@ async fn reprocess(
         base.source_id == request.source_id && base.course_id == request.course_id,
         "补做任务与原笔记来源不一致 / Reprocessing source does not match the base note"
     );
-    let has = |name: &str| components.iter().any(|component| component == name);
+    let translate_after_proofreading = cfg.llm.note_language == crate::llm::NoteLanguage::ZhHans
+        && components.iter().any(|component| component == "proofreading");
+    let has = |name: &str| {
+        components.iter().any(|component| component == name)
+            || (name == "translation" && translate_after_proofreading)
+    };
     let mut document: artifact::Document =
         serde_json::from_slice(&std::fs::read(base_dir.join(&base.document))?)?;
     if components.iter().all(|component| component == "exports") {
@@ -289,6 +295,9 @@ async fn reprocess(
     if has("proofreading") || has("summary") {
         crate::llm::validate(&cfg.llm)?;
     }
+    if has("translation") {
+        crate::llm::validate(&cfg.translation.as_llm())?;
+    }
     if let Some(prior) = prior_work {
         let identity: serde_json::Value =
             serde_json::from_slice(&std::fs::read(prior.join("task-identity.json"))?)?;
@@ -306,8 +315,14 @@ async fn reprocess(
         std::fs::create_dir_all(&ledger_dir)?;
         for mut receipt in crate::dispatch::receipts(prior)? {
             let needed = (has("proofreading") && receipt.purpose == "proofreading")
+                || (has("translation") && receipt.purpose == "translation")
                 || (has("summary") && receipt.purpose == "summary");
-            let matching_service = request.service_versions.get("llm").map_or(
+            let service = if receipt.purpose == "translation" {
+                "translation"
+            } else {
+                "llm"
+            };
+            let matching_service = request.service_versions.get(service).map_or(
                 receipt.service_version.starts_with("snapshot:"),
                 |version| version == &receipt.service_version,
             );
@@ -447,13 +462,29 @@ async fn reprocess(
                 if let Some(raw) = &event.raw {
                     event.text = raw.clone();
                 }
+                event.translation = None;
             }
         }
         let (sections, report) =
-            polish_with_rollback(std::mem::take(&mut document.sections), cfg).await?;
+            polish_with_rollback(std::mem::take(&mut document.sections), cfg, false).await?;
         document.sections = sections;
         outcomes.proofreading = Outcome::from_report(&report);
         progress::stage("llm", "done");
+    }
+    if has("translation") {
+        progress::stage("translation", "start");
+        for event in document
+            .sections
+            .iter_mut()
+            .flat_map(|section| &mut section.speech)
+        {
+            event.translation = None;
+        }
+        let (sections, report) =
+            polish_with_rollback(std::mem::take(&mut document.sections), cfg, true).await?;
+        document.sections = sections;
+        outcomes.translation = Outcome::from_report(&report);
+        progress::stage("translation", "done");
     }
     if has("summary") {
         document.summary =
@@ -613,8 +644,11 @@ async fn run_prepared(
         emit_done(target, &manifest, &document.sections, started);
         return Ok(());
     }
-    if cfg.llm.enabled || cfg.llm.summarize {
+    if cfg.llm.needs_service() {
         crate::llm::validate(&cfg.llm)?;
+    }
+    if cfg.translation.enabled {
+        crate::llm::validate(&cfg.translation.as_llm())?;
     }
     // Subtitle evidence and cloud static validation precede any full media download.
     progress::stage("subtitle", "start");
@@ -790,10 +824,17 @@ async fn run_prepared(
     crate::dispatch::check_control()?;
     if cfg.llm.enabled {
         progress::stage("llm", "start");
-        let (polished, report) = polish_with_rollback(sections, cfg).await?;
+        let (polished, report) = polish_with_rollback(sections, cfg, false).await?;
         sections = polished;
         outcomes.proofreading = Outcome::from_report(&report);
         progress::stage("llm", "done");
+    }
+    if cfg.translation.enabled {
+        progress::stage("translation", "start");
+        let (translated, report) = polish_with_rollback(sections, cfg, true).await?;
+        sections = translated;
+        outcomes.translation = Outcome::from_report(&report);
+        progress::stage("translation", "done");
     }
     crate::dispatch::check_control()?;
     let summary = if cfg.llm.summarize {
@@ -835,7 +876,7 @@ async fn run_prepared(
             },
             target.version_dir().display()
         );
-        if !cfg.llm.enabled && !cfg.llm.disable_hint {
+        if !cfg.llm.needs_service() && !cfg.llm.disable_hint {
             eprintln!(
                 "提示：可运行 course2md llm setup 开启 AI 润色与总结；--no-llm-hint 可关闭此提示。 / Tip: run course2md llm setup to enable AI proofreading and summaries; use --no-llm-hint to hide this tip."
             );
@@ -967,16 +1008,23 @@ fn done_stats(sections: &[timeline::Section]) -> (usize, usize) {
 async fn polish_with_rollback(
     mut sections: Vec<timeline::Section>,
     cfg: &PipelineConfig,
+    translation: bool,
 ) -> Result<(Vec<timeline::Section>, crate::llm::PolishReport)> {
     let original = sections.clone();
-    let llm = cfg.llm.clone();
+    let llm = if translation {
+        cfg.translation.as_llm()
+    } else {
+        let mut llm = cfg.llm.clone();
+        llm.note_language = crate::llm::NoteLanguage::Source;
+        llm
+    };
     let root = cfg.out_dir.clone();
     let (mut sections, mut report) = tokio::task::spawn_blocking(move || {
         crate::llm::polish_sections_report(&mut sections, &root, &llm)
             .map(|report| (sections, report))
     })
     .await
-    .context("AI 校对工作进程中断 / Proofreading worker interrupted")??;
+    .context("AI 正文处理工作进程中断 / Text processing worker interrupted")??;
     if !artifact::has_readable_body(&sections) {
         sections = original;
         report.succeeded = 0;
@@ -998,7 +1046,7 @@ impl Outcome {
                 Status::Failed
             },
             message: (report.failed > 0).then(|| {
-                "校对未全部完成，原文已保留 / Proofreading incomplete; original text retained"
+                "正文处理未全部完成，原文已保留 / Text processing incomplete; original text retained"
                     .into()
             }),
             completed: Some(report.succeeded),
@@ -1217,6 +1265,7 @@ mod tests {
             no_download: true,
             resume: false,
             llm: Default::default(),
+            translation: Default::default(),
             asr_api: Default::default(),
             asr_model: None,
             gpu_layers: c::DEFAULT_GPU_LAYERS,

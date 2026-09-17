@@ -17,10 +17,27 @@ use std::time::Duration;
 
 pub const DEFAULT_PROMPT: &str = "你是视频逐字稿校对器。输入的每一项是一段已按自然停顿组织的连续讲解。\
 修正明显的语音识别错误（错别字、同音字、专有名词拼写），删除不影响原意的冗余口头填充，\
-并修复不自然的断句和标点，使文字自然、书面化。不得概括、扩写、翻译、增删实质内容或改变原意；\
+并修复不自然的断句和标点，使文字自然、书面化。不得概括、扩写、翻译 text 字段、增删实质内容或改变原意；\
 保持原语言。若某条内容仅由语气词、口头禅或无实义片段构成（如单独的\"啊\"、\"对吧\"），\
 该条的 text 返回空字符串 \"\"（系统会删除该条）；有实质内容的条目不得删除。\
 输出与输入逐条对应的 JSON 对象 {\"segments\":[{\"id\":序号,\"text\":\"校对后的文本\"}]}，不要输出任何其他内容。";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoteLanguage {
+    #[default]
+    Source,
+    ZhHans,
+}
+
+impl NoteLanguage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Source => "跟随原文",
+            Self::ZhHans => "简体中文",
+        }
+    }
+}
 
 /// 每次请求合并的语音段数。
 const BATCH: usize = 20;
@@ -41,6 +58,8 @@ pub struct LlmSettings {
     pub vision: bool,
     /// 独立生成视频总结并写入笔记（不依赖校对 enabled）
     pub summarize: bool,
+    /// 笔记核心语言；非原文时保留原文并逐段追加译文。
+    pub note_language: NoteLanguage,
     /// 润色并发数（chunk 间相互独立；自建网关/代理可调高）
     pub concurrency: usize,
 }
@@ -56,7 +75,49 @@ impl Default for LlmSettings {
             disable_hint: false,
             vision: false,
             summarize: false,
+            note_language: NoteLanguage::Source,
             concurrency: DEFAULT_CONCURRENCY,
+        }
+    }
+}
+
+impl LlmSettings {
+    pub fn needs_service(&self) -> bool {
+        self.enabled || self.summarize
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct TranslationSettings {
+    pub enabled: bool,
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub concurrency: usize,
+}
+
+impl Default for TranslationSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: String::new(),
+            api_key: String::new(),
+            model: String::new(),
+            concurrency: DEFAULT_CONCURRENCY,
+        }
+    }
+}
+
+impl TranslationSettings {
+    pub fn as_llm(&self) -> LlmSettings {
+        LlmSettings {
+            base_url: self.base_url.clone(),
+            api_key: self.api_key.clone(),
+            model: self.model.clone(),
+            note_language: NoteLanguage::ZhHans,
+            concurrency: self.concurrency,
+            ..LlmSettings::default()
         }
     }
 }
@@ -161,8 +222,15 @@ pub fn polish_sections_report(
         .iter()
         .map(|sec| sec.speech.chunks(BATCH).len())
         .sum();
-    let pb = crate::progress::Bar::new("llm", total as u64)
-        .with_template("{spinner:.green} llm {pos}/{len} [{bar:32.cyan/blue}] {msg}");
+    let stage = if s.note_language == NoteLanguage::ZhHans {
+        "translation"
+    } else {
+        "llm"
+    };
+    let template = format!(
+        "{{spinner:.green}} {stage} {{pos}}/{{len}} [{{bar:32.cyan/blue}}] {{msg}}"
+    );
+    let pb = crate::progress::Bar::new(stage, total as u64).with_template(&template);
     let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let workers = s.concurrency.clamp(1, MAX_CONCURRENCY);
     // 整个任务共享一个 agent（连接池复用 TCP+TLS），不再每请求新建
@@ -291,14 +359,19 @@ fn polish_chunk(
         .enumerate()
         .map(|(i, e)| (i, e.text.as_str()))
         .collect();
+    let action = if s.note_language == NoteLanguage::ZhHans {
+        "翻译"
+    } else {
+        "校对"
+    };
     let description = format!(
-        "校对 {0}–{1} 的文字 / Proofread transcript {0}–{1}",
+        "{action} {0}–{1} 的文字 / Process transcript {0}–{1}",
         crate::render::fmt_ts(chunk.first().unwrap().start),
         crate::render::fmt_ts(chunk.last().unwrap().end)
     );
     match chat(agent, s, &items, image_b64, &description) {
         Ok(polished) => {
-            let mismatched = apply_polish(chunk, &polished);
+            let mismatched = apply_polish(chunk, &polished, s.note_language);
             if mismatched {
                 warn_once(
                     warned,
@@ -313,7 +386,7 @@ fn polish_chunk(
             warn_once(
                 warned,
                 &format!(
-                    "校对未完成，已保留原文 / Proofreading incomplete; original text retained: {error:#}"
+                    "正文处理未完成，已保留原文 / Text processing incomplete; original text retained: {error:#}"
                 ),
             );
             0
@@ -323,19 +396,27 @@ fn polish_chunk(
 
 /// 润色结果的 id 集恰好覆盖 0..expected（无缺失/重复/越界）的判定。
 /// request_chat_once 的响应校验与 apply_polish 的应用前校验共用同一逻辑。
-fn segment_ids_match(polished: &[(usize, String)], expected: usize) -> bool {
-    let ids: std::collections::HashSet<usize> = polished.iter().map(|(id, _)| *id).collect();
+/// Outer option distinguishes a missing field from an explicit JSON null.
+pub type ProcessedSegment = (usize, String, Option<Option<String>>);
+
+fn segment_ids_match(polished: &[ProcessedSegment], expected: usize) -> bool {
+    let ids: std::collections::HashSet<usize> =
+        polished.iter().map(|(id, _, _)| *id).collect();
     polished.len() == expected && ids.len() == expected && (0..expected).all(|id| ids.contains(&id))
 }
 
 /// 把 (id, 新文本) 应用到一批事件上；空字符串 = 删除该条（由调用方 retain）。
 /// 返回 true = 返回集与输入不匹配（重排/缺项/重复），该批保留原文。
-fn apply_polish(chunk: &mut [TranscriptEvent], polished: &[(usize, String)]) -> bool {
+fn apply_polish(
+    chunk: &mut [TranscriptEvent],
+    polished: &[ProcessedSegment],
+    note_language: NoteLanguage,
+) -> bool {
     if !segment_ids_match(polished, chunk.len()) {
         return true;
     }
     let mut by_id: Vec<Option<&str>> = vec![None; chunk.len()];
-    for (id, text) in polished {
+    for (id, text, _) in polished {
         by_id[*id] = Some(text.as_str());
     }
     for (ev, new) in chunk.iter_mut().zip(by_id) {
@@ -344,6 +425,19 @@ fn apply_polish(chunk: &mut [TranscriptEvent], polished: &[(usize, String)]) -> 
             ev.raw.get_or_insert_with(|| ev.text.clone());
             ev.text = new.to_string();
         }
+    }
+    for (id, _, translation) in polished {
+        let source = chunk[*id].text.trim().to_owned();
+        chunk[*id].translation = match note_language {
+            NoteLanguage::Source => None,
+            NoteLanguage::ZhHans => translation
+                .as_ref()
+                .and_then(Option::as_deref)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .filter(|text| *text != source.as_str())
+                .map(str::to_owned),
+        };
     }
     false
 }
@@ -366,11 +460,18 @@ fn chat(
     items: &[(usize, &str)],
     image_b64: Option<&str>,
     description: &str,
-) -> Result<Vec<(usize, String)>> {
+) -> Result<Vec<ProcessedSegment>> {
     let body = build_chat_body(s, items, image_b64)?;
-    let content = send_chat_described(agent, s, &body, "proofreading", description)
+    let purpose = if s.note_language == NoteLanguage::ZhHans {
+        "translation"
+    } else {
+        "proofreading"
+    };
+    let content = send_chat_described(agent, s, &body, purpose, description)
         .map_err(|failure| failure.err)?;
-    parse_segments(&content).context("校对响应结构无效 / Invalid proofreading response structure")
+    let segments = parse_segments(&content)
+        .context("校对响应结构无效 / Invalid proofreading response structure")?;
+    Ok(segments)
 }
 
 /// 构造 /chat/completions 请求体（独立出来便于单测覆盖视觉路径）。
@@ -388,10 +489,19 @@ fn build_chat_body(
     } else {
         ""
     };
-    let system = format!(
-        "{} 输出为 JSON 对象 {{\"segments\":[{{\"id\":序号,\"text\":润色后的文本}}]}}，id 必须与输入一一对应；纯语气词条目的 text 为空字符串。{vision_note}",
-        effective_prompt(s)
-    );
+    let task = if s.enabled {
+        format!(
+            "{} 纯语气词条目的 text 为空字符串。",
+            effective_prompt(s)
+        )
+    } else {
+        "保持每条 text 的原文、标点和内容，不要校对、概括或删减。".into()
+    };
+    let output: String = match s.note_language {
+        NoteLanguage::Source => "输出为 JSON 对象 {\"segments\":[{\"id\":序号,\"text\":处理后的原语言文本}]}。".into(),
+        NoteLanguage::ZhHans => "text 保留原语言；若 text 不是简体中文，translation 返回忠实、自然的简体中文译文；若已经是简体中文，translation 返回 null。不要翻译或描述截图。输出为 JSON 对象 {\"segments\":[{\"id\":序号,\"text\":原文,\"translation\":译文或null}]}。".into(),
+    };
+    let system = format!("{task}{output} id 必须与输入一一对应。{vision_note}");
     let mut content = vec![serde_json::json!({
         "type": "text",
         "text": serde_json::to_string(&payload)?,
@@ -410,10 +520,11 @@ fn build_chat_body(
     ))
 }
 
-/// 从模型输出提取润色结果。约定契约为顶层对象 {"segments":[{"id":n,"text":"..."}]}
+/// 从模型输出提取文字处理结果。约定契约为顶层对象
+/// {"segments":[{"id":n,"text":"...","translation":"..."|null}]}
 /// （与 response_format=json_object 一致，issue #11）；兼容模型无视指令仍返回
 /// 顶层数组的情况。两者都容忍代码围栏、前后杂文与尾逗号。
-pub fn parse_segments(content: &str) -> Option<Vec<(usize, String)>> {
+pub fn parse_segments(content: &str) -> Option<Vec<ProcessedSegment>> {
     // 1) 契约路径：{"segments":[...]}
     if let Some(obj) = extract_json_object(content)
         && let Some(arr) = obj.get("segments").and_then(|v| v.as_array())
@@ -446,7 +557,7 @@ fn extract_json_object(content: &str) -> Option<serde_json::Value> {
 }
 
 /// 从模型输出提取 [{"id":n,"text":"..."}]（容忍代码围栏、前后杂文、尾逗号与个别坏项）。
-pub fn parse_id_text_pairs(content: &str) -> Option<Vec<(usize, String)>> {
+pub fn parse_id_text_pairs(content: &str) -> Option<Vec<ProcessedSegment>> {
     let start = content.find('[')?;
     let end = content.rfind(']')?;
     if end <= start {
@@ -472,14 +583,26 @@ pub fn parse_id_text_pairs(content: &str) -> Option<Vec<(usize, String)>> {
     lenient_scan(slice)
 }
 
-fn parse_items(v: &[serde_json::Value]) -> Option<Vec<(usize, String)>> {
+fn parse_items(v: &[serde_json::Value]) -> Option<Vec<ProcessedSegment>> {
     let mut out = vec![];
     for item in v {
         let id = item.get("id")?.as_u64()? as usize;
         let text = item.get("text")?.as_str()?.to_string();
-        out.push((id, text));
+        let translation = translation_value(item).ok()?;
+        out.push((id, text, translation));
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+fn translation_value(
+    item: &serde_json::Value,
+) -> std::result::Result<Option<Option<String>>, ()> {
+    match item.get("translation") {
+        None => Ok(None),
+        Some(serde_json::Value::Null) => Ok(Some(None)),
+        Some(serde_json::Value::String(text)) => Ok(Some(Some(text.clone()))),
+        Some(_) => Err(()),
+    }
 }
 
 pub(crate) fn clean_trailing_commas(s: &str) -> String {
@@ -512,9 +635,9 @@ pub(crate) fn clean_trailing_commas(s: &str) -> String {
 
 /// 逐个扫描顶层 {...} 对象，坏项跳过；能取到至少一项即返回。
 /// 按对象顺序遍历（此前实现从 "id" 向后找 {，方向反了，会漏掉首对象）。
-fn lenient_scan(s: &str) -> Option<Vec<(usize, String)>> {
+fn lenient_scan(s: &str) -> Option<Vec<ProcessedSegment>> {
     let bytes = s.as_bytes();
-    let mut out: Vec<(usize, String)> = vec![];
+    let mut out: Vec<ProcessedSegment> = vec![];
     let mut i = 0usize;
     let mut guard = 0usize;
     while i < s.len() {
@@ -562,7 +685,9 @@ fn lenient_scan(s: &str) -> Option<Vec<(usize, String)>> {
                     .map(|t| t.to_string()),
             )
         {
-            out.push((id, text));
+            if let Ok(translation) = translation_value(&v) {
+                out.push((id, text, translation));
+            }
         }
         i = end;
     }
@@ -656,11 +781,21 @@ fn request_chat_once(
         anyhow::ensure!(value.get("error").is_none_or(serde_json::Value::is_null), "AI 服务返回错误内容 / AI service returned an error");
         let content = value["choices"][0]["message"]["content"].as_str().filter(|s| !s.trim().is_empty()).context("AI 服务响应缺少正文 / AI response is missing message.content")?;
         if purpose == "summary" { anyhow::ensure!(crate::summarize::parse_summary(content).is_some(), "服务返回的摘要结构无效 / Invalid summary structure"); }
-        if purpose == "proofreading" {
+        if matches!(purpose, "proofreading" | "translation") {
             let parsed = parse_segments(content).context("服务返回的校对结构无效 / Invalid proofreading structure")?;
             let input = body["messages"][1]["content"][0]["text"].as_str().context("校对输入结构无效 / Invalid proofreading input structure")?;
             let expected = serde_json::from_str::<Vec<serde_json::Value>>(input)?.len();
             anyhow::ensure!(segment_ids_match(&parsed, expected), "校对结果与原文段落不对应，已保留原文 / Proofread segments do not match the input");
+            if purpose == "translation" {
+                anyhow::ensure!(
+                    parsed.iter().all(|(_, _, translation)| translation.is_some()),
+                    "翻译结果缺少译文字段，已保留原文 / Translation fields are missing; original text retained"
+                );
+                let source = serde_json::from_str::<Vec<serde_json::Value>>(input)?;
+                anyhow::ensure!(parsed.iter().all(|(id, text, _)| {
+                    source.get(*id).and_then(|item| item["text"].as_str()) == Some(text)
+                }), "翻译服务改写了原文，结果未采用 / Translation service changed source text; result discarded");
+            }
         }
         Ok(())
     }).map_err(|failure| ChatFailure { retryable: failure.retryable, err: anyhow::Error::new(failure) })
@@ -892,6 +1027,7 @@ pub fn print_status(cfg: &crate::settings::ConfigFile) {
         state(s.vision)
     );
     println!("  自动总结 / Automatic summary: {}", state(s.summarize));
+    println!("  笔记核心语言 / Core note language: {}", s.note_language.label());
     println!("  并发请求 / Concurrent requests: {}", s.concurrency);
     println!("  使用提示 / Usage hint: {}", state(!s.disable_hint));
     if !s.enabled {
@@ -954,6 +1090,7 @@ mod tests {
             disable_hint: false,
             vision: false,
             summarize: false,
+            note_language: NoteLanguage::Source,
             concurrency: 8,
         }
     }
@@ -966,17 +1103,23 @@ mod tests {
                 end: 1.0,
                 text: "今天讲编译原理".into(),
                 raw: None,
+                translation: None,
             },
             TranscriptEvent {
                 start: 1.0,
                 end: 2.0,
                 text: "啊".into(),
                 raw: None,
+                translation: None,
             },
         ];
         let bad = apply_polish(
             &mut chunk,
-            &[(0, "今天讲编译原理".into()), (1, String::new())],
+            &[
+                (0, "今天讲编译原理".into(), None),
+                (1, String::new(), None),
+            ],
+            NoteLanguage::Source,
         );
         assert!(!bad);
         assert_eq!(chunk[1].text, "", "纯语气词被置空");
@@ -993,12 +1136,14 @@ mod tests {
             end: 1.0,
             text: "a".into(),
             raw: None,
+            translation: None,
         }];
         assert!(apply_polish(
             &mut chunk,
-            &[(0, "x".into()), (1, "y".into())]
+            &[(0, "x".into(), None), (1, "y".into(), None)],
+            NoteLanguage::Source,
         ));
-        assert!(apply_polish(&mut chunk, &[]));
+        assert!(apply_polish(&mut chunk, &[], NoteLanguage::Source));
         assert_eq!(chunk[0].text, "a", "不匹配时保留原文");
     }
 
@@ -1007,7 +1152,7 @@ mod tests {
         // 尾逗号（推理模型常见输出）
         let got = parse_id_text_pairs("[{\"id\":0,\"text\":\"a\",},{\"id\":1,\"text\":\"b\",},]")
             .unwrap();
-        assert_eq!(got, vec![(0, "a".into()), (1, "b".into())]);
+        assert_eq!(got, vec![(0, "a".into(), None), (1, "b".into(), None)]);
         // 个别坏项：跳过而不丢弃整批
         let got = parse_id_text_pairs(
             "[{\"id\":0,\"text\":\"a\"},{\"id\":\"oops\"},{\"id\":2,\"text\":\"c\"}]",
@@ -1015,9 +1160,64 @@ mod tests {
         .unwrap();
         assert_eq!(
             got,
-            vec![(0, "a".into()), (2, "c".into())],
+            vec![(0, "a".into(), None), (2, "c".into(), None)],
             "坏项应被跳过（随后的拆半重试会覆盖 id=1）"
         );
+    }
+
+    #[test]
+    fn translation_fields_preserve_three_states_and_reject_other_types() {
+        let got = parse_segments(
+            r#"{"segments":[{"id":0,"text":"hello","translation":"你好"},{"id":1,"text":"中文","translation":null}]}"#,
+        )
+        .unwrap();
+        assert_eq!(got[0].2, Some(Some("你好".into())));
+        assert_eq!(got[1].2, Some(None));
+        assert_eq!(
+            parse_segments(r#"{"segments":[{"id":0,"text":"hello"}]}"#)
+                .unwrap()[0]
+                .2,
+            None
+        );
+        assert!(parse_segments(
+            r#"{"segments":[{"id":0,"text":"hello","translation":3}]}"#
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn source_mode_discards_model_translation() {
+        let mut chunk = vec![TranscriptEvent {
+            start: 0.0,
+            end: 1.0,
+            text: "hello".into(),
+            raw: None,
+            translation: None,
+        }];
+        assert!(!apply_polish(
+            &mut chunk,
+            &[(0, "hello".into(), Some(Some("你好".into())))],
+            NoteLanguage::Source,
+        ));
+        assert!(chunk[0].translation.is_none());
+    }
+
+    #[test]
+    fn translation_mode_keeps_source_and_avoids_duplicate_text() {
+        let mut chunk = vec![TranscriptEvent {
+            start: 0.0,
+            end: 1.0,
+            text: "中文".into(),
+            raw: None,
+            translation: None,
+        }];
+        assert!(!apply_polish(
+            &mut chunk,
+            &[(0, "中文".into(), Some(Some("中文".into())))],
+            NoteLanguage::ZhHans,
+        ));
+        assert_eq!(chunk[0].text, "中文");
+        assert!(chunk[0].translation.is_none());
     }
 
     #[test]
@@ -1062,14 +1262,14 @@ mod tests {
         let got =
             parse_segments("{\"segments\":[{\"id\":0,\"text\":\"a\"},{\"id\":1,\"text\":\"b\"}]}")
                 .unwrap();
-        assert_eq!(got, vec![(0, "a".into()), (1, "b".into())]);
+        assert_eq!(got, vec![(0, "a".into(), None), (1, "b".into(), None)]);
         // 容忍围栏 + 尾逗号
         let got =
             parse_segments("```json\n{\"segments\":[{\"id\":0,\"text\":\"a\"},]}\n```").unwrap();
-        assert_eq!(got, vec![(0, "a".into())]);
+        assert_eq!(got, vec![(0, "a".into(), None)]);
         // 兼容路径：模型无视指令仍返回顶层数组
         let got = parse_segments("[{\"id\":0,\"text\":\"a\"}]").unwrap();
-        assert_eq!(got, vec![(0, "a".into())]);
+        assert_eq!(got, vec![(0, "a".into(), None)]);
         assert!(parse_segments("{\"segments\":[]}").is_none());
         assert!(parse_segments("没有 JSON").is_none());
     }
@@ -1080,7 +1280,7 @@ mod tests {
             "```json\n[{\"id\":0,\"text\":\"a\"},{\"id\":1,\"text\":\"b\"}]\n```",
         )
         .unwrap();
-        assert_eq!(got, vec![(0, "a".into()), (1, "b".into())]);
+        assert_eq!(got, vec![(0, "a".into(), None), (1, "b".into(), None)]);
         assert!(parse_id_text_pairs("没有数组").is_none());
         assert!(parse_id_text_pairs("[]").is_none());
     }

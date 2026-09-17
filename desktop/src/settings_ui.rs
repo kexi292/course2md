@@ -1112,7 +1112,12 @@ impl Desktop {
                 })),
         ));
         if provider == "api" {
-            recognition = recognition.child(self.service_picker(ServicePurpose::Speech, false, cx));
+            recognition = recognition.child(self.service_picker(
+                ServicePurpose::Speech,
+                false,
+                false,
+                cx,
+            ));
         } else {
             recognition =
                 recognition
@@ -1171,8 +1176,38 @@ impl Desktop {
                 cx,
             ));
         }
-        let mut ai = group("ai-default-settings", "AI 校对与摘要")
-            .child(self.service_picker(ServicePurpose::Ai, false, cx))
+        let mut note_content = group("note-content-settings", "笔记内容").child(settings_row(
+                "note-language-label",
+                icons::article(),
+                "笔记核心语言",
+                "非简体中文正文会保留原文，并在每段后附简体中文。截图保持原样。",
+                self.setting_choices("default-note-language", "笔记核心语言")
+                    .options([("source", "跟随原文"), ("zh-hans", "简体中文")])
+                    .full_width()
+                    .selected(match value.note_language {
+                        course2md::llm::NoteLanguage::Source => "source",
+                        course2md::llm::NoteLanguage::ZhHans => "zh-hans",
+                    })
+                    .on_change(cx.listener(|this, selected: &SharedString, _, cx| {
+                        let mut next = this.generation_edit_base();
+                        next.note_language = if selected.as_ref() == "zh-hans" {
+                            course2md::llm::NoteLanguage::ZhHans
+                        } else {
+                            course2md::llm::NoteLanguage::Source
+                        };
+                        this.commit_generation(next, cx);
+                    })),
+            ));
+        if value.note_language == course2md::llm::NoteLanguage::ZhHans {
+            note_content = note_content.child(self.service_picker(
+                ServicePurpose::Ai,
+                false,
+                true,
+                cx,
+            ));
+        }
+        let mut ai = group("ai-default-settings", "AI 文字处理与摘要")
+            .child(self.service_picker(ServicePurpose::Ai, false, false, cx))
             .child(
                 self.setting_preference(
                     icons::auto_fix(),
@@ -1314,6 +1349,7 @@ impl Desktop {
             .gap_6()
             .child(languages)
             .child(recognition)
+            .child(note_content)
             .child(ai)
             .child(
                 group("export-default-settings", "导出与离线保存")
@@ -1891,7 +1927,7 @@ impl Desktop {
             .child(self.service_editor_content(true, window, cx))
     }
     pub fn task_service_picker(&self, purpose: ServicePurpose, cx: &mut Context<Self>) -> Div {
-        self.service_picker(purpose, true, cx)
+        self.service_picker(purpose, true, false, cx)
     }
     pub fn selected_task_service(&self, purpose: ServicePurpose) -> Option<ServiceVersion> {
         let fixed = self
@@ -1913,10 +1949,13 @@ impl Desktop {
         &self,
         purpose: ServicePurpose,
         current_task: bool,
+        translation: bool,
         cx: &mut Context<Self>,
     ) -> Div {
         let refs = self.preferences.default_refs();
-        let current = if current_task {
+        let current = if translation {
+            refs.translation
+        } else if current_task {
             self.selected_task_service(purpose).map(|v| v.id)
         } else {
             match purpose {
@@ -1960,6 +1999,11 @@ impl Desktop {
                     .is_some_and(|latest| latest.id != version.id)
             })
             .cloned();
+        let service_index = if translation {
+            4
+        } else {
+            purpose as usize * 2 + current_task as usize
+        };
         let mut choices = Vec::new();
         for version in latest.into_values() {
             if let Some(old) = old_current
@@ -1972,7 +2016,7 @@ impl Desktop {
         }
         let mut controls = h_flex().w_full().min_w_0().items_start().gap_2();
         if !choices.is_empty() {
-            let index = purpose as usize * 2 + current_task as usize;
+            let index = service_index;
             let name = current_version
                 .as_ref()
                 .map(|version| version.config.name.clone())
@@ -2039,7 +2083,9 @@ impl Desktop {
                 .py_2()
                 .accessibility_label(format!(
                     "{}：{}{}",
-                    if purpose == ServicePurpose::Speech {
+                    if translation {
+                        "翻译服务"
+                    } else if purpose == ServicePurpose::Speech {
                         "语音服务"
                     } else {
                         "AI 服务"
@@ -2116,6 +2162,7 @@ impl Desktop {
                                                 purpose,
                                                 Some(id.clone()),
                                                 current_task,
+                                                translation,
                                                 cx,
                                             );
                                         }
@@ -2135,19 +2182,25 @@ impl Desktop {
         controls = controls.child(
             control((
                 "configure-service",
-                purpose as usize * 2 + current_task as usize,
+                service_index,
             ))
             .icon(icons::settings())
             .ghost()
-            .label(match (purpose, editor_version.is_some()) {
+            .label(if translation {
+                "管理 AI 服务"
+            } else {
+                match (purpose, editor_version.is_some()) {
                 (ServicePurpose::Speech, true) => "编辑",
                 (ServicePurpose::Speech, false) => "添加语音服务",
                 (ServicePurpose::Ai, true) => "编辑",
                 (ServicePurpose::Ai, false) => "添加 AI 服务",
+                }
             })
             .self_start()
             .on_click(cx.listener(move |this, _, window, cx| {
-                if current_task {
+                if translation {
+                    this.select_settings_tab(1, window, cx);
+                } else if current_task {
                     this.open_task_service_editor(purpose, window, cx)
                 } else {
                     this.open_settings_service_editor(purpose, editor_version.clone(), window, cx);
@@ -2171,19 +2224,19 @@ impl Desktop {
                     .items_center()
                     .child(
                         text(
-                            ("service-only-this-note", purpose as usize),
+                            ("service-only-this-note", service_index),
                             "仅用于这次笔记",
                         )
                         .text_sm()
                         .text_color(color(MUTED)),
                     )
                     .child(
-                        control(("inherit-default-service", purpose as usize))
+                        control(("inherit-default-service", service_index))
                             .ghost()
                             .icon(icons::refresh())
                             .label("恢复默认")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.bind_service(purpose, None, true, cx);
+                                this.bind_service(purpose, None, true, false, cx);
                             })),
                     ),
             );
@@ -2191,7 +2244,10 @@ impl Desktop {
         if let Some((message, true, _)) = self.settings_ui.feedback.get(&PreferenceGroup::Services)
         {
             view = view.child(
-                text(("task-service-error", purpose as usize), message.clone())
+                text(
+                    ("task-service-error", service_index),
+                    message.clone(),
+                )
                     .text_sm()
                     .text_color(color(DANGER)),
             );
@@ -2200,18 +2256,24 @@ impl Desktop {
             view
         } else {
             settings_row(
-                ("default-service-label", purpose as usize),
-                if purpose == ServicePurpose::Speech {
+                ("default-service-label", service_index),
+                if translation {
+                    icons::web()
+                } else if purpose == ServicePurpose::Speech {
                     icons::microphone()
                 } else {
                     icons::science()
                 },
-                if purpose == ServicePurpose::Speech {
+                if translation {
+                    "翻译服务"
+                } else if purpose == ServicePurpose::Speech {
                     "语音服务"
                 } else {
                     "AI 服务"
                 },
-                if purpose == ServicePurpose::Ai && !self.preferences.generation().needs_ai() {
+                if translation {
+                    "仅用于生成逐段简体中文译文；可以选择低成本模型。"
+                } else if purpose == ServicePurpose::Ai && !self.preferences.generation().needs_ai() {
                     "开启校对或摘要后，文字会发送到所选服务。"
                 } else if purpose == ServicePurpose::Ai {
                     "校对与摘要会把文字发送到所选服务。"
@@ -2227,9 +2289,13 @@ impl Desktop {
         purpose: ServicePurpose,
         id: Option<String>,
         current_task: bool,
+        translation: bool,
         cx: &mut Context<Self>,
     ) -> bool {
-        let result = if current_task {
+        let result = if translation {
+            self.preferences
+                .set_default_translation_service(id.as_deref())
+        } else if current_task {
             self.workspace
                 .as_mut()
                 .ok_or_else(|| anyhow!("当前笔记信息暂时不可用"))
@@ -2313,9 +2379,12 @@ impl Desktop {
             cx.notify();
             return;
         };
-        let draft = task
-            .plan
-            .ai_service
+        let translation = components.iter().all(|component| component == "translation");
+        let draft = (if translation {
+            &task.plan.translation_service
+        } else {
+            &task.plan.ai_service
+        })
             .as_deref()
             .and_then(|id| self.preferences.version(id))
             .filter(|version| {
@@ -3442,7 +3511,7 @@ impl Desktop {
             .filter(|kind| match kind {
                 TestKind::Proofread => components
                     .iter()
-                    .any(|component| component == "proofreading"),
+                    .any(|component| matches!(component.as_str(), "proofreading" | "translation")),
                 TestKind::Vision => {
                     uses_vision
                         && components
@@ -4696,6 +4765,7 @@ impl Desktop {
         next.options = config.defaults;
         next.ai_proofread = config.llm.enabled;
         next.ai_summary = config.llm.summarize;
+        next.note_language = config.llm.note_language;
         next.vision = config.llm.vision;
         self.commit_generation(next, cx);
     }

@@ -218,6 +218,7 @@ pub enum ProcessingStage {
     Transcript,
     Screenshots,
     Proofreading,
+    Translation,
     Summary,
 }
 impl ProcessingStage {
@@ -225,7 +226,8 @@ impl ProcessingStage {
         match self {
             Self::Transcript => "部分文字",
             Self::Screenshots => "截图",
-            Self::Proofreading => "AI 校对",
+            Self::Proofreading => "AI 正文处理",
+            Self::Translation => "翻译",
             Self::Summary => "摘要",
         }
     }
@@ -242,6 +244,10 @@ fn processing_issues(manifest: &course2md::artifact::Manifest) -> Vec<Processing
         (
             ProcessingStage::Proofreading,
             &manifest.outcomes.proofreading,
+        ),
+        (
+            ProcessingStage::Translation,
+            &manifest.outcomes.translation,
         ),
         (ProcessingStage::Summary, &manifest.outcomes.summary),
     ]
@@ -340,10 +346,18 @@ pub fn read_preview(mut course: Course) -> Result<Preview> {
                     let anchor = format!("paragraph-{section_index}-{paragraph_index}");
                     blocks.push(PreviewBlock::Paragraph {
                         text: paragraph.text.clone(),
-                        anchor,
+                        anchor: anchor.clone(),
                     });
                     plain_text.push_str(&paragraph.text);
                     plain_text.push_str("\n\n");
+                    if let Some(translation) = &paragraph.translation {
+                        blocks.push(PreviewBlock::Paragraph {
+                            text: translation.clone(),
+                            anchor: format!("{anchor}-translation"),
+                        });
+                        plain_text.push_str(translation);
+                        plain_text.push_str("\n\n");
+                    }
                 }
             }
         }
@@ -437,6 +451,7 @@ mod tests {
                 end: 20.,
                 text: "真实正文".into(),
                 raw: None,
+                translation: Some("Translated body".into()),
             }],
         }];
         let target = artifact::Target {
@@ -515,6 +530,12 @@ mod tests {
         );
         let preview = read_preview(first.courses[0].clone()).unwrap();
         assert!(preview.plain_text.contains("真实正文"));
+        assert!(preview.plain_text.find("真实正文").unwrap()
+            < preview.plain_text.find("Translated body").unwrap());
+        assert!(preview.blocks.iter().any(|block| matches!(
+            block,
+            PreviewBlock::Paragraph { anchor, .. } if anchor.ends_with("-translation")
+        )));
         assert!(preview.document.is_some());
         assert!(
             preview

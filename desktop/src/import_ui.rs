@@ -1909,9 +1909,10 @@ impl Desktop {
                     ),
                 )),
         );
-        let ai_enabled = self.task_options.llm || self.task_options.summarize;
+        let translation_enabled = self.import_base_config().translation.enabled;
+        let ai_enabled = self.task_options.llm || self.task_options.summarize || translation_enabled;
         let mut ai_options = v_flex().gap_3();
-        {
+        if self.task_options.llm || self.task_options.summarize {
             match self.selected_task_service(ServicePurpose::Ai) {
                 Some(service) => {
                     if self.task_options.llm {
@@ -1947,6 +1948,30 @@ impl Desktop {
                     ai_options = ai_options.child(help("本次校对使用已保存的自定义规则。"));
                 }
             }
+        }
+        if translation_enabled {
+            let translation = self
+                .preferences
+                .default_refs()
+                .translation
+                .and_then(|id| self.preferences.version(&id));
+            ai_options = ai_options.child(match translation {
+                Some(service) => help(format!(
+                    "非简体中文正文将发送到{}，并在原文后附简体中文。",
+                    service_destination(&service.config)
+                )),
+                None => v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded(RADIUS_CARD)
+                    .bg(color(WARNING_BG))
+                    .child(
+                        accessible_text("translation-service-missing", "翻译服务尚未设置。")
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(color(WARNING)),
+                    )
+                    .child(help("选择用于生成逐段简体中文译文的服务")),
+            });
         }
         view = view.child(motion::disclosure(
             "ai-service-options",
@@ -2111,7 +2136,7 @@ impl Desktop {
             .is_some_and(|source| uses_speech(source, self.task_options.source_mode))
     }
 
-    fn missing_import_service(&self) -> Option<ServicePurpose> {
+    fn missing_import_service(&self) -> Option<(ServicePurpose, bool)> {
         let separate_subtitle = self.task_options.source_mode != 2
             && self
                 .workspace
@@ -2122,20 +2147,37 @@ impl Desktop {
             (
                 ServicePurpose::Speech,
                 self.task_options.uses_cloud_provider() && self.import_uses_speech() && !separate_subtitle,
+                false,
             ),
             (
                 ServicePurpose::Ai,
                 self.task_options.llm || self.task_options.summarize,
+                false,
             ),
         ]
         .into_iter()
-        .find_map(|(purpose, required)| {
+        .find_map(|(purpose, required, translation)| {
             (required
                 && self.selected_task_service(purpose).is_none_or(|version| {
                     self.preferences
                         .service_retired_in_snapshot(&version.service_id)
                 }))
-            .then_some(purpose)
+            .then_some((purpose, translation))
+        })
+        .or_else(|| {
+            (self.import_base_config().translation.enabled
+                && self
+                    .preferences
+                    .default_refs()
+                    .translation
+                .and_then(|id| self.preferences.version(&id))
+                .filter(|version| {
+                    !self
+                        .preferences
+                        .service_retired_in_snapshot(&version.service_id)
+                })
+                .is_none())
+                .then_some((ServicePurpose::Ai, true))
         })
     }
 
@@ -2906,16 +2948,27 @@ impl Desktop {
                     false,
                 ));
             }
-        } else if let Some(purpose) = self.missing_import_service() {
+        } else if let Some((purpose, translation)) = self.missing_import_service() {
             actions = actions.child(
                 primary_pill("configure-conversion-service")
                     .icon(icons::settings())
-                    .label(match purpose {
-                        ServicePurpose::Speech => "设置语音服务",
-                        ServicePurpose::Ai => "设置 AI 服务",
+                    .label(if translation {
+                        "设置翻译服务"
+                    } else {
+                        match purpose {
+                            ServicePurpose::Speech => "设置语音服务",
+                            ServicePurpose::Ai => "设置 AI 服务",
+                        }
                     })
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_task_service_editor(purpose, window, cx);
+                        if translation {
+                            this.settings_tab = 0;
+                            this.scrolls[Page::Settings as usize]
+                                .set_offset(point(px(0.), px(0.)));
+                            this.open_settings(window, cx);
+                        } else {
+                            this.open_task_service_editor(purpose, window, cx);
+                        }
                     })),
             );
         }
@@ -3311,6 +3364,7 @@ mod tests {
             config: Default::default(),
             asr_service: None,
             ai_service: None,
+            translation_service: None,
         };
         let (id, _) = state.enqueue(plan.clone(), None).unwrap();
         let draft = state.draft_mut().unwrap();
@@ -3372,6 +3426,7 @@ mod tests {
                 config: Default::default(),
                 asr_service: None,
                 ai_service: None,
+                translation_service: None,
             },
             state: workspace::TaskState::Uncertain,
             intent: workspace::Intent::Pause,

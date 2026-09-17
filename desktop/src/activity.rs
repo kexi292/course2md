@@ -215,6 +215,7 @@ pub fn component_failure_message(label: &str, message: Option<&str>) -> String {
             chinese,
             "摘要尚未完成，已保留正文"
                 | "校对未全部完成，原文已保留"
+                | "正文处理未全部完成，原文已保留"
                 | "部分校对未完成，原始文字已保留"
         )
     {
@@ -267,7 +268,8 @@ pub fn title(stage: &str) -> String {
         "audio" => "提取音频",
         "transcribe" => "语音转写",
         "subtitle" => "读取字幕",
-        "llm" => "AI 校对",
+        "llm" => "AI 正文处理",
+        "translation" => "翻译正文",
         "summary" | "summarize" => "生成摘要",
         "export" | "exports" => "导出文件",
         "render" => "生成笔记",

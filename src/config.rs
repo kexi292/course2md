@@ -184,6 +184,8 @@ pub struct PipelineConfig {
     pub resume: bool,
     /// LLM 字幕润色（已合并 CLI 覆盖后的生效配置）
     pub llm: crate::llm::LlmSettings,
+    /// 独立翻译服务；仅在笔记核心语言不是原文时使用。
+    pub translation: crate::llm::TranslationSettings,
     /// 云端 STT（provider=api；已合并 CLI 覆盖）
     pub asr_api: crate::settings::AsrApi,
     /// 转写来源：字幕优先 / 强制字幕 / 强制 ASR
@@ -747,6 +749,7 @@ mod tests {
             no_download: false,
             resume: false,
             llm: Default::default(),
+            translation: Default::default(),
             asr_api: Default::default(),
             asr_model: None,
             gpu_layers: DEFAULT_GPU_LAYERS,

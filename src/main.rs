@@ -293,6 +293,9 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 ("llm.api_key", &cfg.llm.api_key),
                 ("llm.base_url", &cfg.llm.base_url),
                 ("llm.model", &cfg.llm.model),
+                ("translation.api_key", &cfg.translation.api_key),
+                ("translation.base_url", &cfg.translation.base_url),
+                ("translation.model", &cfg.translation.model),
             ] {
                 if !value.is_empty() {
                     cleared.push(name.to_string());
@@ -301,8 +304,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             cfg.llm.api_key.clear();
             cfg.llm.base_url.clear();
             cfg.llm.model.clear();
+            cfg.translation.api_key.clear();
+            cfg.translation.base_url.clear();
+            cfg.translation.model.clear();
+            cfg.translation.enabled = false;
             cfg.llm.enabled = false;
             cfg.llm.summarize = false;
+            cfg.llm.note_language = llm::NoteLanguage::Source;
             cfg.llm.prompt = None;
             if args.asr {
                 if !cfg.asr_api.api_key.is_empty() {
