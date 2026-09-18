@@ -36,6 +36,30 @@ pub struct Source {
     pub subtitle_read_error: Option<course2md::subtitle::SubtitleReadError>,
 }
 impl Source {
+    pub fn text_language(&self, use_subtitles: bool, external_subtitle: bool) -> Option<&str> {
+        // An attached file has no verified language metadata.
+        if use_subtitles && external_subtitle {
+            return None;
+        }
+        if use_subtitles && let Some(subtitle) = &self.selected_subtitle {
+            return self
+                .subtitles
+                .tracks()
+                .iter()
+                .find(|track| track.id == subtitle.track_id)
+                .and_then(|track| track.language.as_deref())
+                .filter(|language| !language.trim().is_empty())
+                .or_else(|| {
+                    self.online
+                        .then_some(self.original_language.as_deref())
+                        .flatten()
+                });
+        }
+        self.online
+            .then_some(self.original_language.as_deref())
+            .flatten()
+    }
+
     pub fn detail(&self) -> String {
         let seconds = self.duration.max(0.) as u64;
         let mut details = Vec::new();

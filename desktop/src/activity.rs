@@ -188,7 +188,7 @@ pub fn quantity(stage: &str, current: u64, total: u64) -> String {
             bytes(current)
         }
     } else if total > 0 {
-        if stage == "transcribe" {
+        if matches!(stage, "transcribe" | "llm" | "translation") {
             format!("{current} / {total} 段")
         } else {
             format!(
@@ -241,10 +241,11 @@ pub fn stage_order(stage: &str) -> usize {
         "model-load" => 7,
         "transcribe" => 8,
         "llm" => 9,
-        "summary" | "summarize" => 10,
-        "render" => 11,
-        "export" | "exports" => 12,
-        _ => 13,
+        "translation" => 10,
+        "summary" | "summarize" => 11,
+        "render" => 12,
+        "export" | "exports" => 13,
+        _ => 14,
     }
 }
 

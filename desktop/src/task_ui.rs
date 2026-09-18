@@ -245,8 +245,7 @@ struct TaskStage {
     fraction: Option<f32>,
 }
 
-/// AI counters describe dispatched batches, including requests still in flight.
-/// Only the worker's stage result can move these stages into completed history.
+/// Text processing counts confirmed segments; summaries have no segment denominator.
 fn task_stage_progress(
     name: &str,
     done: bool,
@@ -254,7 +253,22 @@ fn task_stage_progress(
     current: u64,
     total: u64,
 ) -> (String, Option<f32>) {
-    if matches!(name, "llm" | "summary" | "summarize") {
+    if matches!(name, "llm" | "translation") {
+        let quantity = activity::quantity(name, current, total);
+        let message = live
+            .map(|stage| stage.message.split(" / ").next().unwrap_or_default())
+            .unwrap_or_default();
+        let detail = if message.is_empty() {
+            quantity
+        } else {
+            format!("{quantity} · {message}")
+        };
+        return (
+            detail,
+            (total > 0).then(|| (current as f32 / total as f32).clamp(0., 1.)),
+        );
+    }
+    if matches!(name, "summary" | "summarize") {
         return (
             if !done && live.is_some() {
                 "等待服务返回结果".into()
@@ -415,7 +429,7 @@ fn task_service_repair_reason(task: &TaskRecord) -> Option<&'static str> {
             (purpose.contains("proof")
                 || purpose.contains("translation")
                 || purpose.contains("summary"))
-                .then_some(request.message.as_str())
+            .then_some(request.message.as_str())
         }))
         .chain(task.error.as_deref())
         .find_map(service_configuration_issue)
@@ -1126,6 +1140,9 @@ impl Desktop {
                 });
             }
         }
+        config.translation.enabled &= !course2md::llm::is_simplified_chinese(
+            source.text_language(draft.options.source_mode != 2, draft.subtitle.is_some()),
+        );
         let defaults = self.preferences.default_refs();
         let refs = ServiceRefs {
             asr: draft.asr_service.clone().or(defaults.asr),
@@ -1329,9 +1346,9 @@ impl Desktop {
             ("llm", refs.llm),
             ("translation", refs.translation),
         ]
-            .into_iter()
-            .filter_map(|(purpose, reference)| reference.map(|r| (purpose.to_owned(), r)))
-            .collect();
+        .into_iter()
+        .filter_map(|(purpose, reference)| reference.map(|r| (purpose.to_owned(), r)))
+        .collect();
         let source = self
             .workspace
             .as_ref()
@@ -1351,6 +1368,7 @@ impl Desktop {
             course_id,
             source,
             source_id: task.plan.source_id.clone(),
+            source_language: task.plan.source_language().map(str::to_owned),
             title: task.plan.title.clone(),
             author: task.plan.source.author.clone(),
             duration: task.plan.source.duration,
@@ -1397,15 +1415,15 @@ impl Desktop {
             &task.plan.ai_service,
             &task.plan.translation_service,
         ]
-            .into_iter()
-            .flatten()
-            .filter(|id| {
-                self.preferences
-                    .version(id)
-                    .is_none_or(|version| self.preferences.is_service_retired(&version.service_id))
-            })
-            .cloned()
-            .collect();
+        .into_iter()
+        .flatten()
+        .filter(|id| {
+            self.preferences
+                .version(id)
+                .is_none_or(|version| self.preferences.is_service_retired(&version.service_id))
+        })
+        .cloned()
+        .collect();
         std::fs::create_dir_all(&task.work_dir)?;
         course2md::checkpoint::atomic_write(
             &task.work_dir.join("control.json"),
@@ -1796,12 +1814,18 @@ impl Desktop {
                     .into_iter()
                     .map(|(component, _, _)| component)
                     .filter(|component| {
-                        matches!(component.as_str(), "proofreading" | "translation" | "summary")
+                        matches!(
+                            component.as_str(),
+                            "proofreading" | "translation" | "summary"
+                        )
                     })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        if components.iter().any(|component| component == "translation") {
+        if components
+            .iter()
+            .any(|component| component == "translation")
+        {
             components.retain(|component| component == "translation");
         }
         if components.is_empty() {
@@ -2672,7 +2696,10 @@ impl Desktop {
                     task_component_failures(task, path)
                         .iter()
                         .any(|(component, _, _)| {
-                            matches!(component.as_str(), "proofreading" | "translation" | "summary")
+                            matches!(
+                                component.as_str(),
+                                "proofreading" | "translation" | "summary"
+                            )
                         });
                 if repairable && uncertain.is_empty() && task.handled_by.is_none() {
                     let repair_id = id.clone();
@@ -2689,8 +2716,7 @@ impl Desktop {
                     let unknown_component = uncertain.iter().any(|request| {
                         let purpose = request.purpose.as_deref().unwrap_or_default();
                         (component == "proofreading" && purpose.contains("proof"))
-                            || (component == "translation"
-                                && purpose.contains("translation"))
+                            || (component == "translation" && purpose.contains("translation"))
                             || (component == "summary" && purpose.contains("summary"))
                     });
                     if unknown_component {
@@ -2840,7 +2866,14 @@ impl Desktop {
                 } else {
                     Some(&task.outcomes)
                 };
-                let status = if let Some(outcome) = ai_stage_outcome(&name, outcomes) {
+                let unresolved = task.blocked.iter().any(|request| {
+                    request.reason == "uncertain"
+                        && request.purpose.as_deref()
+                            == Some(if name == "llm" { "proofreading" } else { &name })
+                });
+                let status = if unresolved {
+                    StageStatus::Uncertain
+                } else if let Some(outcome) = ai_stage_outcome(&name, outcomes) {
                     outcome
                 } else if done {
                     StageStatus::Complete
@@ -3155,9 +3188,7 @@ impl Desktop {
             facts = facts.child(detail_row(
                 SharedString::from(format!("task-translation-destination-{}", task.id)),
                 "翻译",
-                icons::web()
-                    .size(rems(20. / 14.))
-                    .text_color(color(GRAY)),
+                icons::web().size(rems(20. / 14.)).text_color(color(GRAY)),
                 div()
                     .text_size(TEXT_BODY)
                     .whitespace_normal()
@@ -3183,7 +3214,8 @@ impl Desktop {
                         cx,
                     ),
                 )
-                .text_color(color(SUCCESS))))
+                .text_color(color(SUCCESS)),
+            ))
     }
 
     /// The current task and its progress retain one reading position as stages change.
@@ -3335,25 +3367,26 @@ impl Desktop {
             .any(|request| request.reason == "uncertain")
             && task.handled_by.is_none();
         // 部分完成：正文已发布，逐项标明未完成的附加处理并可只补做该项。
-        let partial_failures: Vec<(String, String, String)> = if task.state == TaskState::Partial {
-            task.artifact
-                .as_ref()
-                .map(|path| {
-                    task_component_failures(task, path)
-                        .into_iter()
-                        .map(|(component, label, outcome)| {
-                            let reason = activity::component_failure_message(
-                                &label,
-                                outcome.message.as_deref(),
-                            );
-                            (component, label, reason)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        let partial_failures: Vec<(String, String, String)> =
+            if task.state == TaskState::Partial && !uncertain {
+                task.artifact
+                    .as_ref()
+                    .map(|path| {
+                        task_component_failures(task, path)
+                            .into_iter()
+                            .map(|(component, label, outcome)| {
+                                let reason = activity::component_failure_message(
+                                    &label,
+                                    outcome.message.as_deref(),
+                                );
+                                (component, label, reason)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
         let requires_repair = task_requires_service_repair(task);
         let mut card = v_flex()
             .w_full()
@@ -3424,12 +3457,12 @@ impl Desktop {
                         })),
                 );
             }
-            if partial_failures
-                .iter()
-                .any(|(component, _, _)| {
-                    matches!(component.as_str(), "proofreading" | "translation" | "summary")
-                })
-            {
+            if partial_failures.iter().any(|(component, _, _)| {
+                matches!(
+                    component.as_str(),
+                    "proofreading" | "translation" | "summary"
+                )
+            }) {
                 let repair_id = id.clone();
                 actions = actions.child(
                     outline_pill(SharedString::from(format!("box-repair-ai-{id}")))
@@ -3883,8 +3916,8 @@ mod tests {
     }
 
     #[test]
-    fn ai_dispatch_counts_do_not_claim_received_results() {
-        for name in ["llm", "summary", "summarize"] {
+    fn summary_dispatch_counts_do_not_claim_received_results() {
+        for name in ["summary", "summarize"] {
             let mut activity = crate::activity::Activity::new();
             for (current, total) in [(0, 3), (1, 3), (3, 3), (1, 1)] {
                 activity.update(current, total, None);
@@ -3907,6 +3940,20 @@ mod tests {
             task_stage_progress("scenes/extract", false, Some(&screenshots), 2, 6);
         assert!(detail.contains("2 / 6"));
         assert_eq!(fraction, Some(2. / 6.));
+    }
+
+    #[test]
+    fn text_processing_progress_counts_confirmed_segments() {
+        for name in ["llm", "translation"] {
+            let mut activity = crate::activity::Activity::new();
+            activity.update(20, 21, Some("已复用 20 段 / Reused 20 segments".into()));
+            for done in [false, true] {
+                let (detail, fraction) = task_stage_progress(name, done, Some(&activity), 20, 21);
+                assert!(detail.contains("20 / 21 段"));
+                assert!(detail.contains("已复用 20 段"));
+                assert_eq!(fraction, Some(20. / 21.));
+            }
+        }
     }
 
     #[test]

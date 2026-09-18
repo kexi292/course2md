@@ -232,6 +232,11 @@ pub struct TaskPlan {
 }
 
 impl TaskPlan {
+    pub fn source_language(&self) -> Option<&str> {
+        self.source
+            .text_language(self.options.source_mode != 2, self.subtitle.is_some())
+    }
+
     pub fn same_work(&self, other: &Self) -> bool {
         if self.operation != other.operation {
             return false;
@@ -242,6 +247,7 @@ impl TaskPlan {
             || self.asr_service != other.asr_service
             || self.ai_service != other.ai_service
             || self.translation_service != other.translation_service
+            || self.source_language() != other.source_language()
         {
             return false;
         }
@@ -890,8 +896,8 @@ impl State {
                 "这部分已经完成或没有要求处理，无需补做；可以重新导入视频并生成新版"
             );
         }
+        reconcile_receipts(&mut original)?;
         if !resend.is_empty() {
-            reconcile_receipts(&mut original)?;
             let unknown: BTreeSet<_> = original
                 .blocked
                 .iter()
@@ -947,6 +953,7 @@ impl State {
         }
         if components.iter().any(|part| part == "proofreading")
             && plan.config.llm.note_language == course2md::llm::NoteLanguage::ZhHans
+            && !course2md::llm::is_simplified_chinese(plan.source_language())
             && !components.iter().any(|part| part == "translation")
         {
             components.push("translation".into());
@@ -2845,7 +2852,10 @@ mod tests {
             .unwrap();
         let task = ws.state.task(&proof).unwrap();
         assert!(task.plan.config.llm.enabled);
-        assert_eq!(task.plan.translation_service.as_deref(), Some("translation-v1"));
+        assert_eq!(
+            task.plan.translation_service.as_deref(),
+            Some("translation-v1")
+        );
         assert!(matches!(
             &task.plan.operation,
             course2md::execution::Operation::Reprocess { components, .. }
@@ -2854,12 +2864,13 @@ mod tests {
 
         let mut translation_outcomes = course2md::artifact::Outcomes::default();
         translation_outcomes.transcript = course2md::artifact::Outcome::succeeded();
-        translation_outcomes.translation =
-            course2md::artifact::Outcome::failed("翻译未完成");
+        translation_outcomes.translation = course2md::artifact::Outcome::failed("翻译未完成");
         let mut translation_snapshot = plan(&ws.state.default_library);
         translation_snapshot.config.llm.enabled = true;
         translation_snapshot.config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
         translation_snapshot.translation_service = Some("translation-v1".into());
+        translation_snapshot.source.online = true;
+        translation_snapshot.source.original_language = Some("en".into());
         let translation_id = ws.state.enqueue(translation_snapshot, None).unwrap().0;
         let translation_version =
             publish_note_with_outcomes(&ws.state, &translation_id, translation_outcomes.clone());
@@ -2873,11 +2884,120 @@ mod tests {
             .unwrap();
         let task = ws.state.task(&retry).unwrap();
         assert!(!task.plan.config.llm.enabled);
+        assert_eq!(task.plan.source_language(), Some("en"));
+        assert_eq!(
+            task.plan.translation_service.as_deref(),
+            Some("translation-v1")
+        );
         assert!(matches!(
             &task.plan.operation,
             course2md::execution::Operation::Reprocess { components, .. }
                 if components == &["translation"]
         ));
+    }
+
+    #[test]
+    #[ignore = "creates an isolated workspace for native recovery review"]
+    fn native_translation_recovery_fixture() {
+        let root = tempfile::tempdir().unwrap().keep();
+        let config_dir = root.join("config/course2md");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let mut ws = Workspace::open_at(
+            config_dir.join("desktop-workspace.json"),
+            root.join("library"),
+            Default::default(),
+        )
+        .unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!("[defaults]\nout = {}\n[desktop]\nsetup_completed = true\n", serde_json::to_string(&root.join("library")).unwrap()),
+        )
+        .unwrap();
+        for (name, uncertain) in [("翻译确认失败", false), ("翻译结果待确认", true)] {
+            let mut snapshot = plan(&ws.state.default_library);
+            snapshot.title = name.into();
+            snapshot.source_id = name.into();
+            snapshot.config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
+            let id = ws.state.enqueue(snapshot, None).unwrap().0;
+            let mut outcomes = course2md::artifact::Outcomes::default();
+            outcomes.transcript = course2md::artifact::Outcome::succeeded();
+            outcomes.translation = course2md::artifact::Outcome {
+                status: course2md::artifact::Status::Partial,
+                message: Some(
+                    if uncertain {
+                        "结果尚未确认，原文已保留"
+                    } else {
+                        "服务返回的翻译结构无效，原文已保留"
+                    }
+                    .into(),
+                ),
+                completed: Some(20),
+                total: Some(21),
+            };
+            let version = publish_note_with_outcomes(&ws.state, &id, outcomes.clone());
+            let task = ws.state.task_mut(&id).unwrap();
+            task.state = TaskState::Partial;
+            task.artifact = Some(version);
+            task.outcomes = serde_json::to_value(outcomes).unwrap();
+            let stage = task.stages.entry("translation".into()).or_default();
+            stage.status = "done".into();
+            stage.current = 20;
+            stage.total = 21;
+            if uncertain {
+                write_unknown(task, 1);
+                let path = task.work_dir.join("requests/stable-request.json");
+                let mut receipt: course2md::dispatch::Receipt =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                receipt.purpose = "translation".into();
+                receipt.description = "翻译 03:20 的文字".into();
+                std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+                reconcile_receipts(task).unwrap();
+            }
+            ws.state.selected_task = Some(id);
+        }
+        ws.save().unwrap();
+        println!("NATIVE_FIXTURE={}", root.display());
+    }
+
+    #[test]
+    fn task_language_uses_selected_track_then_online_metadata_and_survives_serialization() {
+        use course2md::subtitle::*;
+        let mut snapshot = plan("test-library");
+        snapshot.source.online = true;
+        snapshot.source.original_language = Some("en".into());
+        snapshot.options.source_mode = 0;
+        snapshot.source.subtitles = SubtitleEvidence::Found {
+            tracks: vec![SubtitleTrack {
+                id: "zh-track".into(),
+                language: Some("zh-Hans".into()),
+                name: None,
+                kind: SubtitleKind::Manual,
+                origin: SubtitleOrigin::Online {
+                    language_key: "zh-Hans".into(),
+                    automatic: false,
+                    inline_text: None,
+                },
+                source_order: 0,
+            }],
+            warning: None,
+        };
+        snapshot.source.selected_subtitle = Some(CachedSubtitle {
+            source_identity: snapshot.source.identity.clone(),
+            track_id: "zh-track".into(),
+            label: "Chinese".into(),
+            path: "captions.json".into(),
+            events: vec![],
+        });
+        let restored: TaskPlan =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored.source_language(), Some("zh-Hans"));
+        snapshot.options.source_mode = 2;
+        assert_eq!(snapshot.source_language(), Some("en"));
+        snapshot.source.online = false;
+        assert_eq!(snapshot.source_language(), None);
+        snapshot.options.source_mode = 0;
+        snapshot.subtitle = Some("unknown.srt".into());
+        assert_eq!(snapshot.source_language(), None);
     }
 
     #[test]
