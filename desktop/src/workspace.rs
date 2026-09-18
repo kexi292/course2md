@@ -232,6 +232,11 @@ pub struct TaskPlan {
 }
 
 impl TaskPlan {
+    pub fn source_language(&self) -> Option<&str> {
+        self.source
+            .text_language(self.options.source_mode != 2, self.subtitle.is_some())
+    }
+
     pub fn same_work(&self, other: &Self) -> bool {
         if self.operation != other.operation {
             return false;
@@ -242,6 +247,7 @@ impl TaskPlan {
             || self.asr_service != other.asr_service
             || self.ai_service != other.ai_service
             || self.translation_service != other.translation_service
+            || self.source_language() != other.source_language()
         {
             return false;
         }
@@ -493,6 +499,29 @@ impl State {
     }
     pub fn draft_mut(&mut self) -> Option<&mut Draft> {
         self.drafts.iter_mut().find(|d| d.id == self.current_draft)
+    }
+
+    pub fn set_input_destination(
+        &mut self,
+        root: &Path,
+        folder: Option<u64>,
+        defaults: ConversionOptions,
+    ) -> Result<()> {
+        let library = self
+            .libraries
+            .iter()
+            .find(|library| library.root == root)
+            .context("课程库已不存在，请重新选择")?
+            .id
+            .clone();
+        let input = self.draft().context("当前输入暂不可用")?;
+        if input.submitted_task.is_some() {
+            self.reset_input(input.online, defaults, None);
+        }
+        let input = self.draft_mut().context("当前输入暂不可用")?;
+        input.library_id = library;
+        input.folder = folder.filter(|id| *id != 0);
+        Ok(())
     }
     pub fn matches_input(&self, id: &str, revision: u64) -> bool {
         self.draft()
@@ -890,8 +919,8 @@ impl State {
                 "这部分已经完成或没有要求处理，无需补做；可以重新导入视频并生成新版"
             );
         }
+        reconcile_receipts(&mut original)?;
         if !resend.is_empty() {
-            reconcile_receipts(&mut original)?;
             let unknown: BTreeSet<_> = original
                 .blocked
                 .iter()
@@ -947,6 +976,7 @@ impl State {
         }
         if components.iter().any(|part| part == "proofreading")
             && plan.config.llm.note_language == course2md::llm::NoteLanguage::ZhHans
+            && !course2md::llm::is_simplified_chinese(plan.source_language())
             && !components.iter().any(|part| part == "translation")
         {
             components.push("translation".into());
@@ -2087,6 +2117,66 @@ mod tests {
     }
 
     #[test]
+    fn folder_import_changes_only_the_unsubmitted_destination_and_persists() {
+        let root = tempfile::tempdir().unwrap();
+        let next_root = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(root.path());
+        let default = ws.state.default_library.clone();
+        let next = ws
+            .register_library(next_root.path().to_owned(), "Other".into(), false)
+            .unwrap();
+        let target = ws.state.library(&next).unwrap().root.clone();
+        let snapshot = plan(&default);
+        let task = ws.state.enqueue(snapshot.clone(), None).unwrap().0;
+        ws.state.draft_mut().unwrap().input = "unfinished.mp4".into();
+        ws.state.draft_mut().unwrap().title = "My title".into();
+        ws.state.draft_mut().unwrap().options.llm = true;
+        let original = ws.state.draft().unwrap().clone();
+        ws.transaction(|state| state.set_input_destination(&target, Some(7), Default::default()))
+            .unwrap();
+        let mut expected = original;
+        expected.library_id = next.clone();
+        expected.folder = Some(7);
+        assert_eq!(ws.state.draft().unwrap(), &expected);
+        assert_eq!(ws.state.default_library, default);
+        assert!(ws.state.task(&task).unwrap().plan == snapshot);
+        let restored =
+            Workspace::open_at(ws.path.clone(), root.path().to_owned(), Default::default())
+                .unwrap();
+        assert_eq!(restored.state.draft().unwrap(), &expected);
+
+        ws.state.draft_mut().unwrap().submitted_task = Some(task.clone());
+        ws.transaction(|state| state.set_input_destination(&target, Some(8), Default::default()))
+            .unwrap();
+        let fresh = ws.state.draft().unwrap();
+        assert_ne!(fresh.id, expected.id);
+        assert!(fresh.input.is_empty() && fresh.submitted_task.is_none());
+        assert_eq!(fresh.library_id, next);
+        assert_eq!(fresh.folder, Some(8));
+        assert_eq!(ws.state.default_library, default);
+        assert!(ws.state.task(&task).unwrap().plan == snapshot);
+    }
+
+    #[test]
+    fn failed_folder_destination_save_keeps_the_input() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(root.path());
+        let target = ws.state.libraries[0].root.clone();
+        let original = ws.state.draft().unwrap().clone();
+        ws.path = root.path().join("blocked-state");
+        std::fs::create_dir(&ws.path).unwrap();
+        assert!(
+            ws.transaction(|state| state.set_input_destination(
+                &target,
+                Some(9),
+                Default::default()
+            ))
+            .is_err()
+        );
+        assert_eq!(ws.state.draft().unwrap(), &original);
+    }
+
+    #[test]
     fn replacing_the_form_keeps_submitted_task_plans() {
         let dir = tempfile::tempdir().unwrap();
         let mut ws = test_workspace(dir.path());
@@ -2845,7 +2935,10 @@ mod tests {
             .unwrap();
         let task = ws.state.task(&proof).unwrap();
         assert!(task.plan.config.llm.enabled);
-        assert_eq!(task.plan.translation_service.as_deref(), Some("translation-v1"));
+        assert_eq!(
+            task.plan.translation_service.as_deref(),
+            Some("translation-v1")
+        );
         assert!(matches!(
             &task.plan.operation,
             course2md::execution::Operation::Reprocess { components, .. }
@@ -2854,12 +2947,13 @@ mod tests {
 
         let mut translation_outcomes = course2md::artifact::Outcomes::default();
         translation_outcomes.transcript = course2md::artifact::Outcome::succeeded();
-        translation_outcomes.translation =
-            course2md::artifact::Outcome::failed("翻译未完成");
+        translation_outcomes.translation = course2md::artifact::Outcome::failed("翻译未完成");
         let mut translation_snapshot = plan(&ws.state.default_library);
         translation_snapshot.config.llm.enabled = true;
         translation_snapshot.config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
         translation_snapshot.translation_service = Some("translation-v1".into());
+        translation_snapshot.source.online = true;
+        translation_snapshot.source.original_language = Some("en".into());
         let translation_id = ws.state.enqueue(translation_snapshot, None).unwrap().0;
         let translation_version =
             publish_note_with_outcomes(&ws.state, &translation_id, translation_outcomes.clone());
@@ -2873,11 +2967,120 @@ mod tests {
             .unwrap();
         let task = ws.state.task(&retry).unwrap();
         assert!(!task.plan.config.llm.enabled);
+        assert_eq!(task.plan.source_language(), Some("en"));
+        assert_eq!(
+            task.plan.translation_service.as_deref(),
+            Some("translation-v1")
+        );
         assert!(matches!(
             &task.plan.operation,
             course2md::execution::Operation::Reprocess { components, .. }
                 if components == &["translation"]
         ));
+    }
+
+    #[test]
+    #[ignore = "creates an isolated workspace for native recovery review"]
+    fn native_translation_recovery_fixture() {
+        let root = tempfile::tempdir().unwrap().keep();
+        let config_dir = root.join("config/course2md");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let mut ws = Workspace::open_at(
+            config_dir.join("desktop-workspace.json"),
+            root.join("library"),
+            Default::default(),
+        )
+        .unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!("[defaults]\nout = {}\n[desktop]\nsetup_completed = true\n", serde_json::to_string(&root.join("library")).unwrap()),
+        )
+        .unwrap();
+        for (name, uncertain) in [("翻译确认失败", false), ("翻译结果待确认", true)] {
+            let mut snapshot = plan(&ws.state.default_library);
+            snapshot.title = name.into();
+            snapshot.source_id = name.into();
+            snapshot.config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
+            let id = ws.state.enqueue(snapshot, None).unwrap().0;
+            let mut outcomes = course2md::artifact::Outcomes::default();
+            outcomes.transcript = course2md::artifact::Outcome::succeeded();
+            outcomes.translation = course2md::artifact::Outcome {
+                status: course2md::artifact::Status::Partial,
+                message: Some(
+                    if uncertain {
+                        "结果尚未确认，原文已保留"
+                    } else {
+                        "服务返回的翻译结构无效，原文已保留"
+                    }
+                    .into(),
+                ),
+                completed: Some(20),
+                total: Some(21),
+            };
+            let version = publish_note_with_outcomes(&ws.state, &id, outcomes.clone());
+            let task = ws.state.task_mut(&id).unwrap();
+            task.state = TaskState::Partial;
+            task.artifact = Some(version);
+            task.outcomes = serde_json::to_value(outcomes).unwrap();
+            let stage = task.stages.entry("translation".into()).or_default();
+            stage.status = "done".into();
+            stage.current = 20;
+            stage.total = 21;
+            if uncertain {
+                write_unknown(task, 1);
+                let path = task.work_dir.join("requests/stable-request.json");
+                let mut receipt: course2md::dispatch::Receipt =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                receipt.purpose = "translation".into();
+                receipt.description = "翻译 03:20 的文字".into();
+                std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+                reconcile_receipts(task).unwrap();
+            }
+            ws.state.selected_task = Some(id);
+        }
+        ws.save().unwrap();
+        println!("NATIVE_FIXTURE={}", root.display());
+    }
+
+    #[test]
+    fn task_language_uses_selected_track_then_online_metadata_and_survives_serialization() {
+        use course2md::subtitle::*;
+        let mut snapshot = plan("test-library");
+        snapshot.source.online = true;
+        snapshot.source.original_language = Some("en".into());
+        snapshot.options.source_mode = 0;
+        snapshot.source.subtitles = SubtitleEvidence::Found {
+            tracks: vec![SubtitleTrack {
+                id: "zh-track".into(),
+                language: Some("zh-Hans".into()),
+                name: None,
+                kind: SubtitleKind::Manual,
+                origin: SubtitleOrigin::Online {
+                    language_key: "zh-Hans".into(),
+                    automatic: false,
+                    inline_text: None,
+                },
+                source_order: 0,
+            }],
+            warning: None,
+        };
+        snapshot.source.selected_subtitle = Some(CachedSubtitle {
+            source_identity: snapshot.source.identity.clone(),
+            track_id: "zh-track".into(),
+            label: "Chinese".into(),
+            path: "captions.json".into(),
+            events: vec![],
+        });
+        let restored: TaskPlan =
+            serde_json::from_slice(&serde_json::to_vec(&snapshot).unwrap()).unwrap();
+        assert_eq!(restored.source_language(), Some("zh-Hans"));
+        snapshot.options.source_mode = 2;
+        assert_eq!(snapshot.source_language(), Some("en"));
+        snapshot.source.online = false;
+        assert_eq!(snapshot.source_language(), None);
+        snapshot.options.source_mode = 0;
+        snapshot.subtitle = Some("unknown.srt".into());
+        assert_eq!(snapshot.source_language(), None);
     }
 
     #[test]

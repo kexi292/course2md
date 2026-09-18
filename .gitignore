@@ -12,3 +12,4 @@ out-bench/
 out-gpu/
 out-smoke/
 native/apple-asr/.build/
+/.test-tmp/

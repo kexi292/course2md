@@ -234,18 +234,23 @@ async fn reprocess(
             .and_then(|path| execution::file_digest(&path))
             .is_ok_and(|digest| digest == markdown.sha256);
         if !unchanged {
-            tracing::info!("原版 Markdown 已有改动；本次补做使用软件保存的正文，原文件保留 / The original Markdown has been modified; this reprocessing uses the software-saved document, and the original file is kept");
+            tracing::info!(
+                "原版 Markdown 已有改动；本次补做使用软件保存的正文，原文件保留 / The original Markdown has been modified; this reprocessing uses the software-saved document, and the original file is kept"
+            );
         }
     }
     anyhow::ensure!(
         base.source_id == request.source_id && base.course_id == request.course_id,
         "补做任务与原笔记来源不一致 / Reprocessing source does not match the base note"
     );
-    let translate_after_proofreading = cfg.llm.note_language == crate::llm::NoteLanguage::ZhHans
-        && components.iter().any(|component| component == "proofreading");
+    let translate_after_proofreading = cfg.translation.enabled
+        && components
+            .iter()
+            .any(|component| component == "proofreading");
     let has = |name: &str| {
-        components.iter().any(|component| component == name)
-            || (name == "translation" && translate_after_proofreading)
+        (name != "translation" || cfg.translation.enabled)
+            && (components.iter().any(|component| component == name)
+                || (name == "translation" && translate_after_proofreading))
     };
     let mut document: artifact::Document =
         serde_json::from_slice(&std::fs::read(base_dir.join(&base.document))?)?;
@@ -325,7 +330,8 @@ async fn reprocess(
             let matching_service = request.service_versions.get(service).map_or(
                 receipt.service_version.starts_with("snapshot:"),
                 |version| version == &receipt.service_version,
-            );
+            ) || (receipt.purpose == "translation"
+                && request.service_versions.get("llm") == Some(&receipt.service_version));
             if needed && matching_service && execution::valid_id(&receipt.stable_id) {
                 let destination = ledger_dir.join(format!("{}.json", receipt.stable_id));
                 if !destination.exists() {
@@ -578,7 +584,8 @@ async fn subtitles(
     let found = if local {
         fetch::sidecar_subtitle(Path::new(&cfg.url))
     } else {
-        let video = probed.context("缺少视频信息，请重新读取 / Missing video info; please probe again")?;
+        let video =
+            probed.context("缺少视频信息，请重新读取 / Missing video info; please probe again")?;
         fetch::fetch_subtitle(&video, &cfg.out_dir)
             .await
             .context("读取视频字幕失败 / Could not read video subtitles")?
@@ -717,8 +724,10 @@ async fn run_prepared(
             let transcript_work = async {
                 let cache_path = cfg.out_dir.join("transcript.json");
                 let cache = if cache_path.is_file() {
-                    let cache: TranscriptCache = serde_json::from_slice(&std::fs::read(&cache_path)?)
-                        .context("已保存的文字损坏，原文件已保留 / Saved transcript is damaged")?;
+                    let cache: TranscriptCache = serde_json::from_slice(&std::fs::read(
+                        &cache_path,
+                    )?)
+                    .context("已保存的文字损坏，原文件已保留 / Saved transcript is damaged")?;
                     execution::validate_events(&cache.events)?;
                     cache
                 } else if let Some((events, source)) = selected {
@@ -748,7 +757,8 @@ async fn run_prepared(
                 r = transcript_work => r,
                 e = crate::dispatch::watch_control() => Err(e),
             }
-        });
+        }
+    );
     let frames = match frames_result {
         Ok(frames) if !frames.is_empty() => {
             outcomes.screenshots = Outcome::succeeded();
@@ -1028,7 +1038,7 @@ async fn polish_with_rollback(
     if !artifact::has_readable_body(&sections) {
         sections = original;
         report.succeeded = 0;
-        report.failed = report.attempted;
+        report.failed = report.attempted.saturating_sub(report.uncertain);
     }
     Ok((sections, report))
 }
@@ -1038,17 +1048,24 @@ impl Outcome {
     /// only callers; the type itself belongs to the version manifest.
     pub fn from_report(report: &crate::llm::PolishReport) -> Self {
         Self {
-            status: if report.failed == 0 {
+            status: if report.failed == 0 && report.uncertain == 0 {
                 Status::Succeeded
             } else if report.succeeded > 0 {
                 Status::Partial
             } else {
                 Status::Failed
             },
-            message: (report.failed > 0).then(|| {
+            message: if report.uncertain > 0 {
+                Some(format!(
+                    "{} 段结果尚未确认，原文已保留；请查看待确认请求后决定是否重新发送 / {} segments are uncertain; review pending requests before authorizing a resend",
+                    report.uncertain, report.uncertain
+                ))
+            } else {
+                (report.failed > 0).then(|| {
                 "正文处理未全部完成，原文已保留 / Text processing incomplete; original text retained"
                     .into()
-            }),
+            })
+            },
             completed: Some(report.succeeded),
             total: Some(report.attempted),
         }
@@ -1139,10 +1156,14 @@ fn write_failure_run_json(
             if let Err(e) =
                 crate::checkpoint::atomic_write(&cfg.out_dir.join("run.json"), s.as_bytes())
             {
-                tracing::warn!("写失败诊断 run.json 失败 / Failed to write failure diagnostics run.json: {e:#}");
+                tracing::warn!(
+                    "写失败诊断 run.json 失败 / Failed to write failure diagnostics run.json: {e:#}"
+                );
             }
         }
-        Err(e) => tracing::warn!("序列化失败诊断 run.json 失败 / Failed to serialize failure diagnostics run.json: {e:#}"),
+        Err(e) => tracing::warn!(
+            "序列化失败诊断 run.json 失败 / Failed to serialize failure diagnostics run.json: {e:#}"
+        ),
     }
 }
 

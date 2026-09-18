@@ -2210,6 +2210,35 @@ impl Desktop {
         crate::provider_label(Some(self.actual_local_provider()))
     }
 
+    pub(super) fn import_into_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.save_current_draft(cx) {
+            return;
+        }
+        let root = self.library_root.clone();
+        let folder = self.folder_filter;
+        let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
+        let Some(workspace) = &mut self.workspace else {
+            return;
+        };
+        let previous = workspace.state.current_draft.clone();
+        match workspace.transaction(|state| state.set_input_destination(&root, folder, defaults)) {
+            Ok(()) => {
+                let replaced = previous != workspace.state.current_draft;
+                if replaced {
+                    self.completed_source = None;
+                    self.invalidate_source();
+                    self.restore_draft(window, cx);
+                } else {
+                    self.target_folder = folder.filter(|id| *id != 0);
+                }
+                self.workspace_error = None;
+                self.import_video_from_action(window, cx);
+            }
+            Err(error) => self.workspace_error = Some(format!("导入位置尚未更新：{error:#}")),
+        }
+        cx.notify();
+    }
+
     fn import_destination(&self, cx: &mut Context<Self>) -> Div {
         let current = self
             .workspace

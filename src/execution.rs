@@ -36,6 +36,8 @@ pub struct Request {
     pub version_id: String,
     pub source: String,
     pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_language: Option<String>,
     pub title: String,
     #[serde(default)]
     pub author: String,
@@ -165,6 +167,8 @@ impl Request {
         self.validate()?;
         let mut cfg =
             crate::options::resolve(self.source.clone(), &Default::default(), &self.config)?;
+        cfg.translation.enabled &=
+            !crate::llm::is_simplified_chinese(self.source_language.as_deref());
         cfg.out_dir = self.work_dir.clone();
         cfg.out_root = self.course_dir.clone();
         // Recovery is a task invariant, not a configurable preference.
@@ -238,7 +242,7 @@ impl Request {
                 serde_json::json!({"kind":"reprocess", "source_id":manifest.source_id, "base_version_id":manifest.version_id,"components":components})
             }
         };
-        Ok(serde_json::json!({
+        let mut binding = serde_json::json!({
             "operation":operation,
             "schema": self.schema, "task_id": self.task_id, "course_id": self.course_id,
             "version_id": self.version_id, "source_id": self.source_id, "title": self.title,
@@ -246,7 +250,11 @@ impl Request {
             "subtitle_digest": subtitle_digest,
             "subtitle_events": self.subtitle_events, "local_digest": local_digest,
             "service_versions": self.service_versions, "allow_unauthenticated_asr":self.allow_unauthenticated_asr,
-        }))
+        });
+        if let Some(language) = &self.source_language {
+            binding["source_language"] = language.clone().into();
+        }
+        Ok(binding)
     }
 }
 
@@ -282,8 +290,8 @@ pub fn digest(bytes: &[u8]) -> String {
 
 pub fn file_digest(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("无法读取 {0} / Cannot read {0}", path.display()))?;
+    let mut file = std::fs::File::open(path)
+        .with_context(|| format!("无法读取 {0} / Cannot read {0}", path.display()))?;
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 128 * 1024];
     loop {
