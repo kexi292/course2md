@@ -474,4 +474,39 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(path).unwrap(), "broken metadata");
     }
+
+    #[test]
+    fn folder_validation_and_write_failure_preserve_the_index() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(FILE);
+        Library::edit(root.path(), |library| {
+            library.rename(None, "Math").map(|_| ())
+        })
+        .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        for name in [
+            " ".to_owned(),
+            "math".into(),
+            "未分类".into(),
+            "长".repeat(61),
+        ] {
+            assert!(
+                Library::edit(root.path(), |library| library
+                    .rename(None, &name)
+                    .map(|_| ()))
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+        // A blocked backup makes the write fail after name validation succeeds.
+        std::fs::remove_file(path.with_extension("json.bak")).unwrap();
+        std::fs::create_dir(path.with_extension("json.bak")).unwrap();
+        assert!(
+            Library::edit(root.path(), |library| library
+                .rename(None, "Physics")
+                .map(|_| ()))
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
 }

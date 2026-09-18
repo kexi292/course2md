@@ -1163,16 +1163,35 @@ impl Desktop {
                     })
                     .when(query.is_empty() && self.folder_filter.is_none(), |empty| {
                         empty.child(
-                            primary_pill("empty-library-add")
-                                .icon(IconName::Plus)
-                                .label("导入视频")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.begin_add(window, cx)
-                                })),
+                            h_flex()
+                                .gap_2()
+                                .flex_wrap()
+                                .justify_center()
+                                .child(
+                                    primary_pill("empty-library-add")
+                                        .icon(IconName::Plus)
+                                        .label("导入视频")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.begin_add(window, cx)
+                                        })),
+                                )
+                                .child(
+                                    outline_pill("empty-library-create-folder")
+                                        .icon(icons::create_new_folder())
+                                        .label("新建文件夹")
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.begin_folder(None, window, cx)
+                                        })),
+                                ),
                         )
                     })
                     .when(query.is_empty() && self.folder_filter.is_some(), |empty| {
                         empty.child(
+                            primary_pill("empty-folder-import")
+                                .icon(IconName::Plus)
+                                .label("导入到此文件夹")
+                                .on_click(cx.listener(|this, _, window, cx| this.import_into_folder(window, cx))),
+                        ).child(
                             outline_pill("empty-folder-all-notes")
                                 .icon(IconName::BookOpen)
                                 .label("浏览全部笔记")
@@ -1405,6 +1424,10 @@ impl Desktop {
 
     pub(super) fn library_controls_visible(&self, cx: &App) -> bool {
         !(self.courses.is_empty()
+            && self
+                .library_indexes
+                .values()
+                .all(|library| library.folders.is_empty())
             && self.folder_filter.is_none()
             && self.value(Field::Search, cx).is_empty()
             && self.library_error.is_none()
@@ -1428,6 +1451,14 @@ impl Desktop {
             .flex_shrink_0()
             .items_center()
             .child(self.folder_filter_control(cx))
+            .child(
+                outline_pill("library-create-folder")
+                    .icon(icons::create_new_folder())
+                    .label("新建文件夹")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.begin_folder(None, window, cx)),
+                    ),
+            )
             .when_some(self.folder_filter.filter(|id| *id != 0), |row, id| {
                 let entity = cx.entity().downgrade();
                 row.child(

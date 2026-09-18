@@ -500,6 +500,29 @@ impl State {
     pub fn draft_mut(&mut self) -> Option<&mut Draft> {
         self.drafts.iter_mut().find(|d| d.id == self.current_draft)
     }
+
+    pub fn set_input_destination(
+        &mut self,
+        root: &Path,
+        folder: Option<u64>,
+        defaults: ConversionOptions,
+    ) -> Result<()> {
+        let library = self
+            .libraries
+            .iter()
+            .find(|library| library.root == root)
+            .context("课程库已不存在，请重新选择")?
+            .id
+            .clone();
+        let input = self.draft().context("当前输入暂不可用")?;
+        if input.submitted_task.is_some() {
+            self.reset_input(input.online, defaults, None);
+        }
+        let input = self.draft_mut().context("当前输入暂不可用")?;
+        input.library_id = library;
+        input.folder = folder.filter(|id| *id != 0);
+        Ok(())
+    }
     pub fn matches_input(&self, id: &str, revision: u64) -> bool {
         self.draft()
             .is_some_and(|input| input.id == id && input.revision == revision)
@@ -2091,6 +2114,66 @@ mod tests {
         ws.state.switch_source_kind(!online, Default::default());
         assert_eq!(ws.state.draft().unwrap().library_id, original_library);
         assert_eq!(ws.state.draft().unwrap().folder, Some(42));
+    }
+
+    #[test]
+    fn folder_import_changes_only_the_unsubmitted_destination_and_persists() {
+        let root = tempfile::tempdir().unwrap();
+        let next_root = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(root.path());
+        let default = ws.state.default_library.clone();
+        let next = ws
+            .register_library(next_root.path().to_owned(), "Other".into(), false)
+            .unwrap();
+        let target = ws.state.library(&next).unwrap().root.clone();
+        let snapshot = plan(&default);
+        let task = ws.state.enqueue(snapshot.clone(), None).unwrap().0;
+        ws.state.draft_mut().unwrap().input = "unfinished.mp4".into();
+        ws.state.draft_mut().unwrap().title = "My title".into();
+        ws.state.draft_mut().unwrap().options.llm = true;
+        let original = ws.state.draft().unwrap().clone();
+        ws.transaction(|state| state.set_input_destination(&target, Some(7), Default::default()))
+            .unwrap();
+        let mut expected = original;
+        expected.library_id = next.clone();
+        expected.folder = Some(7);
+        assert_eq!(ws.state.draft().unwrap(), &expected);
+        assert_eq!(ws.state.default_library, default);
+        assert!(ws.state.task(&task).unwrap().plan == snapshot);
+        let restored =
+            Workspace::open_at(ws.path.clone(), root.path().to_owned(), Default::default())
+                .unwrap();
+        assert_eq!(restored.state.draft().unwrap(), &expected);
+
+        ws.state.draft_mut().unwrap().submitted_task = Some(task.clone());
+        ws.transaction(|state| state.set_input_destination(&target, Some(8), Default::default()))
+            .unwrap();
+        let fresh = ws.state.draft().unwrap();
+        assert_ne!(fresh.id, expected.id);
+        assert!(fresh.input.is_empty() && fresh.submitted_task.is_none());
+        assert_eq!(fresh.library_id, next);
+        assert_eq!(fresh.folder, Some(8));
+        assert_eq!(ws.state.default_library, default);
+        assert!(ws.state.task(&task).unwrap().plan == snapshot);
+    }
+
+    #[test]
+    fn failed_folder_destination_save_keeps_the_input() {
+        let root = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(root.path());
+        let target = ws.state.libraries[0].root.clone();
+        let original = ws.state.draft().unwrap().clone();
+        ws.path = root.path().join("blocked-state");
+        std::fs::create_dir(&ws.path).unwrap();
+        assert!(
+            ws.transaction(|state| state.set_input_destination(
+                &target,
+                Some(9),
+                Default::default()
+            ))
+            .is_err()
+        );
+        assert_eq!(ws.state.draft().unwrap(), &original);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::*;
 use crate::theme::*;
+use anyhow::Context as _;
 use gpui_component::{
     button::*,
     menu::{DropdownMenu, PopupMenu, PopupMenuItem},
@@ -244,20 +245,33 @@ impl Desktop {
     }
 
     pub fn begin_folder(&mut self, id: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.folder_saving {
+            return;
+        }
         if !matches!(self.page, Page::Library | Page::New) {
             self.navigate(Page::Library, cx);
         }
-        let origin = self.current_folder_origin();
-        let library = match organize::Library::load(&origin.root) {
-            Ok(library) => library,
-            Err(error) => {
-                self.folder_error = Some(format!("无法读取这个保存位置的文件夹：{error:#}"));
-                cx.notify();
-                return;
-            }
-        };
+        let mut origin = self.current_folder_origin();
+        self.folder_targets = self
+            .workspace
+            .as_ref()
+            .map(|w| {
+                w.state
+                    .libraries
+                    .iter()
+                    .filter(|library| {
+                        (self.page == Page::Library && id.is_none() && self.folder_filter.is_none())
+                            || library.root == origin.root
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        if let Some(target) = self.folder_targets.first() {
+            origin.root = target.root.clone();
+        }
         let name = id
-            .and_then(|id| library.folders.get(&id))
+            .and_then(|id| self.library_indexes.get(&origin.root)?.folders.get(&id))
             .cloned()
             .unwrap_or_default();
         self.folder_origin = Some(origin);
@@ -279,13 +293,17 @@ impl Desktop {
             title,
         });
         let weak = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let weak = weak.clone();
+            let saving = weak
+                .upgrade()
+                .is_some_and(|desktop| desktop.read(cx).folder_saving);
             dialog
                 .title(title)
                 .w(px(420.))
                 .overlay_closable(false)
                 .close_button(false)
+                .keyboard(!saving)
                 .child(content.clone())
                 .on_close(move |_, _, cx| {
                     let _ = weak.update(cx, |this, cx| {
@@ -304,32 +322,87 @@ impl Desktop {
     }
 
     pub fn save_folder(&mut self, cx: &mut Context<Self>) {
+        if self.folder_saving {
+            return;
+        }
         let Some(id) = self.folder_editor else {
             return;
         };
-        let origin = self
-            .folder_origin
-            .clone()
-            .unwrap_or_else(|| self.current_folder_origin());
+        let Some(origin) = self.folder_origin.clone() else {
+            return;
+        };
+        let Some(handle) = cx.windows().first().copied() else {
+            return;
+        };
         let name = self.value(Field::FolderName, cx);
-        let mut saved = None;
-        match organize::Library::edit(&origin.root, |library| {
-            saved = Some(library.rename(id, &name)?);
-            Ok(())
-        }) {
-            Ok(library) => {
+        self.folder_saving = true;
+        self.folder_error = None;
+        self.preview_workers += 1;
+        let root = origin.root.clone();
+        let task = crate::spawn_blocking_io(move || {
+            let mut saved = None;
+            let library = organize::Library::edit(&root, |library| {
+                saved = Some(library.rename(id, &name)?);
+                Ok(())
+            })?;
+            Ok::<_, anyhow::Error>((library, saved))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("文件夹保存线程意外结束")));
+            let _ = this.update(cx, |this, _| {
+                this.preview_workers = this.preview_workers.saturating_sub(1);
+                this.folder_saving = false;
+            });
+            let _ = cx.update_window(handle, |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    this.finish_folder_save(origin, result, window, cx);
+                })
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_folder_save(
+        &mut self,
+        origin: FolderOrigin,
+        result: anyhow::Result<(organize::Library, Option<u64>)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match result {
+            Ok((library, saved)) => {
                 if self.library_root == origin.root {
                     self.library = library.clone();
                 }
-                self.library_indexes.insert(origin.root.clone(), library);
+                self.library_indexes
+                    .insert(origin.root.clone(), library.clone());
+                self.refresh_library(cx);
                 if let Some(draft_id) = &origin.draft_id {
                     if let Some(workspace) = &mut self.workspace {
                         if let Err(error) = workspace.transaction(|state| {
-                            if let Some(draft) =
-                                state.drafts.iter_mut().find(|draft| &draft.id == draft_id)
-                            {
-                                draft.folder = saved;
-                            }
+                            let draft = state
+                                .drafts
+                                .iter_mut()
+                                .find(|draft| &draft.id == draft_id)
+                                .context("原输入已改变，请在当前输入中重新选择文件夹")?;
+                            anyhow::ensure!(
+                                draft.submitted_task.is_none(),
+                                "原输入已提交，请在新输入中选择文件夹"
+                            );
+                            let location = state
+                                .libraries
+                                .iter()
+                                .find(|library| library.id == draft.library_id)
+                                .context("原课程库已不存在")?;
+                            anyhow::ensure!(
+                                location.root == origin.root,
+                                "输入的课程库已改变，请重新选择文件夹"
+                            );
+                            draft.folder = saved;
                             Ok(())
                         }) {
                             self.folder_error =
@@ -344,17 +417,20 @@ impl Desktop {
                     }
                 } else {
                     self.library_root = origin.root;
+                    self.library = library;
                     self.folder_filter = saved;
+                    self.inputs[&Field::Search]
+                        .update(cx, |state, cx| state.set_value("", window, cx));
+                    self.library_list.scroll_to(ListOffset {
+                        item_ix: 0,
+                        offset_in_item: px(0.),
+                    });
                     self.page = Page::Library;
                 }
                 self.folder_editor = None;
                 self.folder_origin = None;
                 self.folder_error = None;
-                if let Some(handle) = cx.windows().first().copied() {
-                    cx.defer(move |cx| {
-                        let _ = cx.update_window(handle, |_, window, cx| window.close_dialog(cx));
-                    });
-                }
+                window.close_dialog(cx);
             }
             Err(error) => self.folder_error = Some(format!("{error:#}")),
         }
@@ -364,6 +440,62 @@ impl Desktop {
     pub fn folder_editor_view(&self, cx: &mut Context<Self>) -> Div {
         let mut view = v_flex().gap_3();
         if let Some(id) = self.folder_editor {
+            if let Some(origin) = &self.folder_origin {
+                let label = self
+                    .folder_targets
+                    .iter()
+                    .find(|library| library.root == origin.root)
+                    .map(|library| format!("{} · {}", library.name, library.root.display()))
+                    .unwrap_or_else(|| origin.root.display().to_string());
+                view = view.child(
+                    accessible_text("folder-library-label", "所属课程库")
+                        .font_weight(FontWeight::MEDIUM),
+                );
+                if self.folder_targets.len() > 1 && id.is_none() {
+                    let targets = self.folder_targets.clone();
+                    let root = origin.root.clone();
+                    let entity = cx.entity().downgrade();
+                    view =
+                        view.child(
+                            control("folder-library")
+                                .icon(IconName::FolderOpen)
+                                .w_full()
+                                .min_w_0()
+                                .disabled(self.folder_saving)
+                                .tooltip(label.clone())
+                                .child(div().flex_1().min_w_0().text_ellipsis().child(label))
+                                .child(Icon::new(IconName::ChevronDown).size_4())
+                                .dropdown_menu(move |menu, _, _| {
+                                    targets.iter().fold(menu, |menu, target| {
+                                        let target_root = target.root.clone();
+                                        let entity = entity.clone();
+                                        menu.item(
+                                            PopupMenuItem::new(format!(
+                                                "{} · {}",
+                                                target.name,
+                                                target.root.display()
+                                            ))
+                                            .checked(target.root == root)
+                                            .on_click(move |_, _, cx| {
+                                                let _ = entity.update(cx, |this, cx| {
+                                                    if !this.folder_saving
+                                                        && let Some(origin) =
+                                                            &mut this.folder_origin
+                                                    {
+                                                        origin.root = target_root.clone();
+                                                        this.folder_error = None;
+                                                        cx.notify();
+                                                    }
+                                                });
+                                            }),
+                                        )
+                                    })
+                                }),
+                        );
+                } else {
+                    view = view.child(accessible_text("folder-library-value", label).text_color(color(MUTED)));
+                }
+            }
             view = view
                 .child(
                     accessible_text("folder-name-label", "文件夹名称")
@@ -371,6 +503,7 @@ impl Desktop {
                 )
                 .child(
                     text_input(&self.inputs[&Field::FolderName])
+                        .disabled(self.folder_saving)
                         .aria_label("文件夹名称")
                         .when(self.folder_error.is_some(), |v| {
                             v.border_color(color(DANGER))
@@ -394,6 +527,7 @@ impl Desktop {
                                 .min_h(rems(2.6))
                                 .ghost()
                                 .label("取消")
+                                .disabled(self.folder_saving)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.folder_editor = None;
                                     this.folder_origin = None;
@@ -412,6 +546,8 @@ impl Desktop {
                                 .h_auto()
                                 .min_h(rems(2.6))
                                 .primary()
+                                .disabled(self.folder_saving)
+                                .loading(self.folder_saving)
                                 .label(if id.is_some() {
                                     "保存名称"
                                 } else {
