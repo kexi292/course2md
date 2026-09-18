@@ -30,6 +30,21 @@ pub enum NoteLanguage {
     ZhHans,
 }
 
+pub fn is_simplified_chinese(language: Option<&str>) -> bool {
+    let Some(language) = language else {
+        return false;
+    };
+    let language = language.trim().replace('_', "-").to_ascii_lowercase();
+    let parts: Vec<_> = language.split('-').collect();
+    matches!(parts.first(), Some(&"zh" | &"zho" | &"chi" | &"cmn"))
+        && !parts
+            .iter()
+            .any(|part| matches!(*part, "hant" | "tw" | "hk" | "mo"))
+        && parts
+            .iter()
+            .any(|part| matches!(*part, "hans" | "cn" | "sg"))
+}
+
 impl NoteLanguage {
     pub fn label(self) -> &'static str {
         match self {
@@ -192,6 +207,10 @@ pub struct PolishReport {
     pub attempted: usize,
     pub succeeded: usize,
     pub failed: usize,
+    #[serde(default)]
+    pub uncertain: usize,
+    #[serde(default)]
+    pub reused: usize,
 }
 
 /// 对已合并的 Section 做润色（在 merge 之后调用）。
@@ -216,21 +235,17 @@ pub fn polish_sections_report(
             attempted,
             succeeded: 0,
             failed: attempted,
+            ..Default::default()
         });
     }
-    let total: usize = sections
-        .iter()
-        .map(|sec| sec.speech.chunks(BATCH).len())
-        .sum();
     let stage = if s.note_language == NoteLanguage::ZhHans {
         "translation"
     } else {
         "llm"
     };
-    let template = format!(
-        "{{spinner:.green}} {stage} {{pos}}/{{len}} [{{bar:32.cyan/blue}}] {{msg}}"
-    );
-    let pb = crate::progress::Bar::new(stage, total as u64).with_template(&template);
+    let template =
+        format!("{{spinner:.green}} {stage} {{pos}}/{{len}} [{{bar:32.cyan/blue}}] {{msg}}");
+    let pb = crate::progress::Bar::new(stage, attempted as u64).with_template(&template);
     let warned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let workers = s.concurrency.clamp(1, MAX_CONCURRENCY);
     // 整个任务共享一个 agent（连接池复用 TCP+TLS），不再每请求新建
@@ -242,22 +257,71 @@ pub fn polish_sections_report(
     let mut images: Vec<Option<Option<String>>> = Vec::with_capacity(sections.len());
     for sec in sections.iter() {
         crate::dispatch::check_control()?;
-        images.push(
-            if sec.speech.is_empty() {
-                Some(None)
-            } else {
-                section_image_b64(s, frames_root, sec, &warned)
-            },
-        );
+        images.push(if sec.speech.is_empty() {
+            Some(None)
+        } else {
+            section_image_b64(s, frames_root, sec, &warned)
+        });
     }
     // worker 池：共享迭代器抢占式取 chunk，谁先完成谁取下一个
-    let queue = std::sync::Mutex::new(
-        sections
-            .iter_mut()
-            .enumerate()
-            .flat_map(|(si, sec)| sec.speech.chunks_mut(BATCH).map(move |chunk| (si, chunk))),
-    );
-    let succeeded = std::sync::atomic::AtomicUsize::new(0);
+    let purpose = if stage == "translation" {
+        "translation"
+    } else {
+        "proofreading"
+    };
+    let service = if stage == "translation" {
+        "translation"
+    } else {
+        "llm"
+    };
+    let mut pending = Vec::new();
+    let mut reused = 0;
+    for (si, sec) in sections.iter_mut().enumerate() {
+        for chunk in sec.speech.chunks_mut(BATCH) {
+            crate::dispatch::check_control()?;
+            let Some(image) = images[si].as_ref() else {
+                continue;
+            };
+            let items: Vec<_> = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (i, e.text.as_str()))
+                .collect();
+            let body = build_chat_body(s, &items, image.as_deref())?;
+            let mut cached =
+                crate::dispatch::cached_response(service, purpose, &endpoint(&s.base_url), &body)?;
+            if cached.is_none() {
+                let mut relaxed = body.clone();
+                relaxed.as_object_mut().unwrap().remove("response_format");
+                cached = crate::dispatch::cached_response(
+                    service,
+                    purpose,
+                    &endpoint(&s.base_url),
+                    &relaxed,
+                )?;
+            }
+            if let Some(value) = cached {
+                validate_chat_response(&value, &body, purpose)?;
+                let parsed =
+                    parse_segments(value["choices"][0]["message"]["content"].as_str().unwrap())
+                        .unwrap();
+                if !apply_polish(chunk, &parsed, s.note_language) {
+                    reused += chunk.len();
+                }
+            } else {
+                pending.push((si, chunk));
+            }
+        }
+    }
+    pb.set_position(reused as u64);
+    pb.set_message(format!(
+        "已复用 {reused} 段；待处理 {} 段 / Reused {reused} segments; {} pending",
+        attempted - reused,
+        attempted - reused
+    ));
+    let queue = std::sync::Mutex::new(pending.into_iter());
+    let succeeded = std::sync::atomic::AtomicUsize::new(reused);
+    let uncertain = std::sync::atomic::AtomicUsize::new(0);
     let aborted = std::sync::Mutex::new(None::<anyhow::Error>);
     std::thread::scope(|scope| {
         for _ in 0..workers {
@@ -273,14 +337,14 @@ pub fn polish_sections_report(
                     let next = queue.lock().map(|mut it| it.next());
                     match next {
                         Ok(Some((si, chunk))) => {
-                            // 从队列取走即计入进度：截图不可用的节不再让进度条停在不满格
-                            pb.inc(1);
                             let Some(image_b64) = images[si].as_ref() else {
                                 continue; // 截图不可用：整节保留原文（同原实现的提前返回）
                             };
-                            let count =
+                            let (count, unknown) =
                                 polish_chunk(&agent, s, chunk, image_b64.as_deref(), &warned);
                             succeeded.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                            uncertain.fetch_add(unknown, std::sync::atomic::Ordering::Relaxed);
+                            pb.inc(count as u64);
                         }
                         Ok(None) => break,
                         Err(_) => break, // 中毒锁：其余 worker 会同样退出
@@ -297,12 +361,16 @@ pub fn polish_sections_report(
     for sec in sections.iter_mut() {
         sec.speech.retain(|e| !e.text.trim().is_empty());
     }
-    pb.finish();
     let succeeded = succeeded.load(std::sync::atomic::Ordering::Relaxed);
+    let uncertain = uncertain.load(std::sync::atomic::Ordering::Relaxed);
+    pb.set_message(format!("已复用 {reused} 段；本次完成 {} 段；待确认 {uncertain} 段 / Reused {reused}; newly completed {}; uncertain {uncertain} segments", succeeded - reused, succeeded - reused));
+    pb.finish();
     Ok(PolishReport {
         attempted,
         succeeded,
-        failed: attempted.saturating_sub(succeeded),
+        failed: attempted.saturating_sub(succeeded + uncertain),
+        uncertain,
+        reused,
     })
 }
 
@@ -353,7 +421,7 @@ fn polish_chunk(
     chunk: &mut [TranscriptEvent],
     image_b64: Option<&str>,
     warned: &std::sync::atomic::AtomicBool,
-) -> usize {
+) -> (usize, usize) {
     let items: Vec<(usize, &str)> = chunk
         .iter()
         .enumerate()
@@ -377,9 +445,9 @@ fn polish_chunk(
                     warned,
                     "润色结果与原文段落不匹配，保留原文 / Polished segments do not match the input; keeping original text",
                 );
-                0
+                (0, 0)
             } else {
-                chunk.len()
+                (chunk.len(), 0)
             }
         }
         Err(error) => {
@@ -389,7 +457,10 @@ fn polish_chunk(
                     "正文处理未完成，已保留原文 / Text processing incomplete; original text retained: {error:#}"
                 ),
             );
-            0
+            let uncertain = error
+                .downcast_ref::<crate::dispatch::Failure>()
+                .is_some_and(|failure| failure.uncertain);
+            (0, if uncertain { chunk.len() } else { 0 })
         }
     }
 }
@@ -400,8 +471,7 @@ fn polish_chunk(
 pub type ProcessedSegment = (usize, String, Option<Option<String>>);
 
 fn segment_ids_match(polished: &[ProcessedSegment], expected: usize) -> bool {
-    let ids: std::collections::HashSet<usize> =
-        polished.iter().map(|(id, _, _)| *id).collect();
+    let ids: std::collections::HashSet<usize> = polished.iter().map(|(id, _, _)| *id).collect();
     polished.len() == expected && ids.len() == expected && (0..expected).all(|id| ids.contains(&id))
 }
 
@@ -490,10 +560,7 @@ fn build_chat_body(
         ""
     };
     let task = if s.enabled {
-        format!(
-            "{} 纯语气词条目的 text 为空字符串。",
-            effective_prompt(s)
-        )
+        format!("{} 纯语气词条目的 text 为空字符串。", effective_prompt(s))
     } else {
         "保持每条 text 的原文、标点和内容，不要校对、概括或删减。".into()
     };
@@ -594,9 +661,7 @@ fn parse_items(v: &[serde_json::Value]) -> Option<Vec<ProcessedSegment>> {
     if out.is_empty() { None } else { Some(out) }
 }
 
-fn translation_value(
-    item: &serde_json::Value,
-) -> std::result::Result<Option<Option<String>>, ()> {
+fn translation_value(item: &serde_json::Value) -> std::result::Result<Option<Option<String>>, ()> {
     match item.get("translation") {
         None => Ok(None),
         Some(serde_json::Value::Null) => Ok(Some(None)),
@@ -684,10 +749,9 @@ fn lenient_scan(s: &str) -> Option<Vec<ProcessedSegment>> {
                     .and_then(|x| x.as_str())
                     .map(|t| t.to_string()),
             )
+            && let Ok(translation) = translation_value(&v)
         {
-            if let Ok(translation) = translation_value(&v) {
-                out.push((id, text, translation));
-            }
+            out.push((id, text, translation));
         }
         i = end;
     }
@@ -773,32 +837,81 @@ fn request_chat_once(
     description: &str,
 ) -> std::result::Result<serde_json::Value, ChatFailure> {
     let url = endpoint(&s.base_url);
-    crate::dispatch::json_request_described("llm", purpose, description, &url, body, || {
-        let request = agent.post(&url).set("Content-Type", "application/json");
-        let request = if s.api_key.is_empty() { request } else { request.set("Authorization", &format!("Bearer {}", s.api_key)) };
-        crate::dispatch::receive(request.send_json(body))
-    }, |value| {
-        anyhow::ensure!(value.get("error").is_none_or(serde_json::Value::is_null), "AI 服务返回错误内容 / AI service returned an error");
-        let content = value["choices"][0]["message"]["content"].as_str().filter(|s| !s.trim().is_empty()).context("AI 服务响应缺少正文 / AI response is missing message.content")?;
-        if purpose == "summary" { anyhow::ensure!(crate::summarize::parse_summary(content).is_some(), "服务返回的摘要结构无效 / Invalid summary structure"); }
-        if matches!(purpose, "proofreading" | "translation") {
-            let parsed = parse_segments(content).context("服务返回的校对结构无效 / Invalid proofreading structure")?;
-            let input = body["messages"][1]["content"][0]["text"].as_str().context("校对输入结构无效 / Invalid proofreading input structure")?;
-            let expected = serde_json::from_str::<Vec<serde_json::Value>>(input)?.len();
-            anyhow::ensure!(segment_ids_match(&parsed, expected), "校对结果与原文段落不对应，已保留原文 / Proofread segments do not match the input");
-            if purpose == "translation" {
-                anyhow::ensure!(
-                    parsed.iter().all(|(_, _, translation)| translation.is_some()),
-                    "翻译结果缺少译文字段，已保留原文 / Translation fields are missing; original text retained"
-                );
-                let source = serde_json::from_str::<Vec<serde_json::Value>>(input)?;
-                anyhow::ensure!(parsed.iter().all(|(id, text, _)| {
+    let service = if purpose == "translation" {
+        "translation"
+    } else {
+        "llm"
+    };
+    crate::dispatch::json_request_described(
+        service,
+        purpose,
+        description,
+        &url,
+        body,
+        || {
+            let request = agent.post(&url).set("Content-Type", "application/json");
+            let request = if s.api_key.is_empty() {
+                request
+            } else {
+                request.set("Authorization", &format!("Bearer {}", s.api_key))
+            };
+            crate::dispatch::receive(request.send_json(body))
+        },
+        |value| validate_chat_response(value, body, purpose),
+    )
+    .map_err(|failure| ChatFailure {
+        retryable: failure.retryable,
+        err: anyhow::Error::new(failure),
+    })
+}
+
+fn validate_chat_response(
+    value: &serde_json::Value,
+    body: &serde_json::Value,
+    purpose: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        value.get("error").is_none_or(serde_json::Value::is_null),
+        "AI 服务返回错误内容 / AI service returned an error"
+    );
+    let content = value["choices"][0]["message"]["content"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .context("AI 服务响应缺少正文 / AI response is missing message.content")?;
+    if purpose == "summary" {
+        anyhow::ensure!(
+            crate::summarize::parse_summary(content).is_some(),
+            "服务返回的摘要结构无效 / Invalid summary structure"
+        );
+    }
+    if matches!(purpose, "proofreading" | "translation") {
+        let parsed = parse_segments(content)
+            .context("服务返回的校对结构无效 / Invalid proofreading structure")?;
+        let input = body["messages"][1]["content"][0]["text"]
+            .as_str()
+            .context("校对输入结构无效 / Invalid proofreading input structure")?;
+        let expected = serde_json::from_str::<Vec<serde_json::Value>>(input)?.len();
+        anyhow::ensure!(
+            segment_ids_match(&parsed, expected),
+            "校对结果与原文段落不对应，已保留原文 / Proofread segments do not match the input"
+        );
+        if purpose == "translation" {
+            anyhow::ensure!(
+                parsed
+                    .iter()
+                    .all(|(_, _, translation)| translation.is_some()),
+                "翻译结果缺少译文字段，已保留原文 / Translation fields are missing; original text retained"
+            );
+            let source = serde_json::from_str::<Vec<serde_json::Value>>(input)?;
+            anyhow::ensure!(
+                parsed.iter().all(|(id, text, _)| {
                     source.get(*id).and_then(|item| item["text"].as_str()) == Some(text)
-                }), "翻译服务改写了原文，结果未采用 / Translation service changed source text; result discarded");
-            }
+                }),
+                "翻译服务改写了原文，结果未采用 / Translation service changed source text; result discarded"
+            );
         }
-        Ok(())
-    }).map_err(|failure| ChatFailure { retryable: failure.retryable, err: anyhow::Error::new(failure) })
+    }
+    Ok(())
 }
 
 /// 发请求：可重试错误按指数退避重试，总共最多 [`MAX_ATTEMPTS`] 次尝试。
@@ -1027,7 +1140,10 @@ pub fn print_status(cfg: &crate::settings::ConfigFile) {
         state(s.vision)
     );
     println!("  自动总结 / Automatic summary: {}", state(s.summarize));
-    println!("  笔记核心语言 / Core note language: {}", s.note_language.label());
+    println!(
+        "  笔记核心语言 / Core note language: {}",
+        s.note_language.label()
+    );
     println!("  并发请求 / Concurrent requests: {}", s.concurrency);
     println!("  使用提示 / Usage hint: {}", state(!s.disable_hint));
     if !s.enabled {
@@ -1038,6 +1154,48 @@ pub fn print_status(cfg: &crate::settings::ConfigFile) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn translation_response_requires_field_but_accepts_null_and_preserves_source() {
+        let settings = TranslationSettings::default().as_llm();
+        let body = build_chat_body(&settings, &[(0, "中文")], None).unwrap();
+        for (segment, accepted) in [
+            (
+                serde_json::json!({"id":0,"text":"中文","translation":null}),
+                true,
+            ),
+            (
+                serde_json::json!({"id":0,"text":"中文","translation":"Chinese"}),
+                true,
+            ),
+            (serde_json::json!({"id":0,"text":"中文"}), false),
+            (
+                serde_json::json!({"id":0,"text":"中文","translation":3}),
+                false,
+            ),
+            (
+                serde_json::json!({"id":0,"text":"rewritten","translation":null}),
+                false,
+            ),
+        ] {
+            let value = serde_json::json!({"choices":[{"message":{"content":serde_json::json!({"segments":[segment]}).to_string()}}]});
+            assert_eq!(
+                validate_chat_response(&value, &body, "translation").is_ok(),
+                accepted
+            );
+        }
+    }
+
+    #[test]
+    fn only_explicit_simplified_chinese_skips_translation() {
+        for language in ["zh-CN", "zh-Hans", "ZH_hans_CN", "cmn-SG"] {
+            assert!(is_simplified_chinese(Some(language)), "{language}");
+        }
+        for language in ["", "zh", "en", "zh-TW", "zh-Hant", "zh-Hant-CN", "zh-HK"] {
+            assert!(!is_simplified_chinese(Some(language)), "{language}");
+        }
+        assert!(!is_simplified_chinese(None));
+    }
 
     #[test]
     fn validate_rejects_unusable_service_urls() {
@@ -1115,10 +1273,7 @@ mod tests {
         ];
         let bad = apply_polish(
             &mut chunk,
-            &[
-                (0, "今天讲编译原理".into(), None),
-                (1, String::new(), None),
-            ],
+            &[(0, "今天讲编译原理".into(), None), (1, String::new(), None)],
             NoteLanguage::Source,
         );
         assert!(!bad);
@@ -1174,15 +1329,12 @@ mod tests {
         assert_eq!(got[0].2, Some(Some("你好".into())));
         assert_eq!(got[1].2, Some(None));
         assert_eq!(
-            parse_segments(r#"{"segments":[{"id":0,"text":"hello"}]}"#)
-                .unwrap()[0]
-                .2,
+            parse_segments(r#"{"segments":[{"id":0,"text":"hello"}]}"#).unwrap()[0].2,
             None
         );
-        assert!(parse_segments(
-            r#"{"segments":[{"id":0,"text":"hello","translation":3}]}"#
-        )
-        .is_none());
+        assert!(
+            parse_segments(r#"{"segments":[{"id":0,"text":"hello","translation":3}]}"#).is_none()
+        );
     }
 
     #[test]

@@ -30,6 +30,7 @@ fn request(root: &Path, source: &Path) -> Request {
             course2md::execution::file_digest(source).unwrap()
         ),
         title: "我确认的笔记名称".into(),
+        source_language: None,
         author: String::new(),
         duration: 1.,
         subtitle: None,
@@ -503,6 +504,205 @@ impl Drop for MockAi {
 
 fn summary_response() -> serde_json::Value {
     serde_json::json!({"choices":[{"message":{"content":serde_json::json!({"tldr":"这份摘要来自保留的正文。","key_points":["正文内容"],"outline":[{"t":0,"title":"开头","detail":"正文内容"}]}).to_string()}}]})
+}
+
+#[test]
+fn translation_recovery_reuses_completed_segments_and_requires_uncertain_authorization() {
+    use std::sync::atomic::Ordering;
+    assert!(course2md::runtime::which("ffmpeg").is_some());
+    assert!(course2md::runtime::which("ffprobe").is_some());
+    for fault in ["lost", "http", "json", "rewrite"] {
+        let mock = MockAi::respond_with(move |number, body| {
+            let mut segments: Vec<serde_json::Value> =
+                serde_json::from_str(body["messages"][1]["content"][0]["text"].as_str().unwrap())
+                    .unwrap();
+            if number == 1 {
+                match fault {
+                    "lost" => return None,
+                    "http" => return Some((400, serde_json::json!({"error":"bad request"}))),
+                    "json" => {
+                        return Some((
+                            200,
+                            serde_json::json!({"choices":[{"message":{"content":"invalid json"}}]}),
+                        ));
+                    }
+                    "rewrite" => segments[0]["text"] = "changed source".into(),
+                    _ => unreachable!(),
+                }
+            }
+            for segment in &mut segments {
+                segment["translation"] = serde_json::Value::Null;
+            }
+            Some((
+                200,
+                serde_json::json!({"choices":[{"message":{"content":serde_json::json!({"segments":segments}).to_string()}}]}),
+            ))
+        });
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("video.mp4");
+        std::fs::write(&source, b"broken").unwrap();
+        let mut original = request(root.path(), &source);
+        original.duration = 211.;
+        original.subtitle_events = Some(
+            (0..21)
+                .map(|i| TranscriptEvent {
+                    start: (i * 10) as f64,
+                    end: (i * 10 + 1) as f64,
+                    text: format!("This is source segment {i}."),
+                    raw: None,
+                    translation: None,
+                })
+                .collect(),
+        );
+        original.config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
+        original.config.translation.base_url = mock.url.clone();
+        original.config.translation.model = "translation-model".into();
+        original.config.translation.concurrency = 1;
+        original
+            .service_versions
+            .insert("llm".into(), "proof-v1".into());
+        original
+            .service_versions
+            .insert("translation".into(), "translation-v1".into());
+        let output = run(root.path(), &original);
+        let observed = events(&output);
+        assert!(output.status.success(), "{fault}: {observed:#?}");
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+        let base = original.course_dir.join("versions/version-one");
+        let manifest = artifact::read_manifest(&base.join("manifest.json")).unwrap();
+        assert_eq!(manifest.outcomes.translation.completed, Some(20));
+        assert_eq!(manifest.outcomes.translation.total, Some(21));
+        let progress = observed
+            .iter()
+            .rfind(|e| e["type"] == "progress" && e["stage"] == "translation")
+            .unwrap();
+        assert_eq!(progress["current"], 20);
+        assert_eq!(progress["total"], 21);
+        let receipts = course2md::dispatch::receipts(&original.work_dir).unwrap();
+        assert!(
+            receipts
+                .iter()
+                .all(|r| r.service_version == "translation-v1")
+        );
+        let failed = receipts
+            .iter()
+            .find(|r| r.state != course2md::dispatch::State::Completed)
+            .unwrap();
+        assert_eq!(
+            failed.state == course2md::dispatch::State::Uncertain,
+            fault == "lost"
+        );
+        if fault == "lost" {
+            assert!(
+                manifest
+                    .outcomes
+                    .translation
+                    .message
+                    .as_deref()
+                    .unwrap()
+                    .contains("尚未确认")
+            );
+        }
+        let mut retry = original.clone();
+        retry.task_id = "repair".into();
+        retry.version_id = "repair".into();
+        retry.work_dir = root.path().join("repair");
+        retry.control_path = Some(retry.work_dir.join("control.json"));
+        retry.operation = course2md::execution::Operation::Reprocess {
+            base_version_dir: base.clone(),
+            components: vec!["translation".into()],
+            prior_work_dir: Some(original.work_dir.clone()),
+        };
+        if fault == "lost" {
+            let blocked = run(root.path(), &retry);
+            assert!(blocked.status.success(), "{:?}", events(&blocked));
+            assert_eq!(
+                mock.calls.load(Ordering::SeqCst),
+                2,
+                "uncertain request must not resend"
+            );
+            retry.task_id = "authorized".into();
+            retry.version_id = "authorized".into();
+            retry.work_dir = root.path().join("authorized");
+            retry.control_path = Some(retry.work_dir.join("control.json"));
+            std::fs::create_dir_all(&retry.work_dir).unwrap();
+            std::fs::write(
+                retry.control_path.as_ref().unwrap(),
+                serde_json::to_vec(
+                    &serde_json::json!({"intent":"run","resend":[failed.request_id]}),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let output = run(root.path(), &retry);
+        let observed = events(&output);
+        assert!(output.status.success(), "{fault}: {observed:#?}");
+        assert_eq!(
+            mock.calls.load(Ordering::SeqCst),
+            3,
+            "only the failed batch is sent"
+        );
+        let progress: Vec<_> = observed
+            .iter()
+            .filter(|e| e["type"] == "progress" && e["stage"] == "translation")
+            .collect();
+        assert_eq!(
+            progress.first().unwrap()["current"],
+            20,
+            "recovery starts at saved progress"
+        );
+        assert!(progress.iter().all(|event| event["total"] == 21));
+        assert_eq!(progress.last().unwrap()["current"], 21);
+        let manifest = artifact::read_manifest(
+            &retry
+                .course_dir
+                .join("versions")
+                .join(&retry.version_id)
+                .join("manifest.json"),
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.outcomes.translation.status,
+            artifact::Status::Succeeded
+        );
+        assert_eq!(manifest.outcomes.translation.completed, Some(21));
+        assert!(manifest.outcomes.translation.message.is_none());
+        let restarted = run(root.path(), &retry);
+        assert!(restarted.status.success());
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
+    }
+}
+
+#[test]
+fn simplified_source_skips_translation_without_service_configuration() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("video.mp4");
+    std::fs::write(&source, b"broken").unwrap();
+    let mut task = request(root.path(), &source);
+    task.config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
+    for language in [None, Some("en"), Some("zh-Hant"), Some("zh")] {
+        task.source_language = language.map(str::to_owned);
+        assert!(task.resolve().unwrap().translation.enabled);
+    }
+    task.source_language = Some("zh-Hans".into());
+    assert!(!task.resolve().unwrap().translation.enabled);
+    let output = run(root.path(), &task);
+    let observed = events(&output);
+    assert!(output.status.success(), "{observed:#?}");
+    assert!(!observed.iter().any(|event| event["stage"] == "translation"));
+    assert!(
+        course2md::dispatch::receipts(&task.work_dir)
+            .unwrap()
+            .is_empty()
+    );
+    let manifest =
+        artifact::read_manifest(&task.course_dir.join("versions/version-one/manifest.json"))
+            .unwrap();
+    assert_eq!(
+        manifest.outcomes.translation.status,
+        artifact::Status::NotRequested
+    );
 }
 
 #[test]

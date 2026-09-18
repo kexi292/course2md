@@ -242,6 +242,31 @@ fn read_receipts(dir: &Path) -> Result<Vec<Receipt>> {
 }
 
 impl Ledger {
+    fn identity(
+        &self,
+        service: &str,
+        purpose: &str,
+        endpoint: &str,
+        payload: &Value,
+    ) -> Result<(String, String)> {
+        let version = self
+            .service_versions
+            .get(service)
+            .cloned()
+            .unwrap_or_else(|| format!("snapshot:{}", execution::digest(endpoint.as_bytes())));
+        let id = execution::digest(&serde_json::to_vec(
+            &serde_json::json!({"service_version":version,"purpose":purpose,"endpoint":endpoint,"payload":payload}),
+        )?);
+        // Older translation receipts used the proofreading service binding. Keep their
+        // identity so upgrading cannot resend a completed or uncertain request.
+        if service == "translation" && !self.dir.join(format!("{id}.json")).exists() {
+            let (legacy, legacy_version) = self.identity("llm", purpose, endpoint, payload)?;
+            if self.dir.join(format!("{legacy}.json")).exists() {
+                return Ok((legacy, legacy_version));
+            }
+        }
+        Ok((id, version))
+    }
     fn new(
         work_dir: &Path,
         control_path: Option<&Path>,
@@ -357,12 +382,9 @@ impl Ledger {
         send: impl FnOnce() -> std::result::Result<HttpResponse, NetworkFailure>,
         validate: impl FnOnce(&Value) -> Result<()>,
     ) -> std::result::Result<Value, Failure> {
-        let service_version = self
-            .service_versions
-            .get(service)
-            .cloned()
-            .unwrap_or_else(|| format!("snapshot:{}", execution::digest(endpoint.as_bytes())));
-        let stable_id = execution::digest(&serde_json::to_vec(&serde_json::json!({"service_version":service_version,"purpose":purpose,"endpoint":endpoint,"payload":identity})).map_err(Failure::local)?);
+        let (stable_id, service_version) = self
+            .identity(service, purpose, endpoint, identity)
+            .map_err(Failure::local)?;
         let lock = self
             .locks
             .lock()
@@ -532,6 +554,27 @@ impl Ledger {
         self.save(&receipt)?;
         Ok(value)
     }
+}
+
+/// Read-only recovery probe; never authorizes or sends a request.
+pub(crate) fn cached_response(
+    service: &str,
+    purpose: &str,
+    endpoint: &str,
+    payload: &Value,
+) -> Result<Option<Value>> {
+    let Some(ledger) = active() else {
+        return Ok(None);
+    };
+    let (id, _) = ledger.identity(service, purpose, endpoint, payload)?;
+    let path = ledger.dir.join(format!("{id}.json"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let receipt: Receipt = serde_json::from_slice(&std::fs::read(path)?)?;
+    Ok((receipt.state == State::Completed)
+        .then_some(receipt.response)
+        .flatten())
 }
 
 pub fn json_request(
