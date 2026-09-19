@@ -1859,56 +1859,54 @@ impl Desktop {
                 self.task_options.vision,
             ) != (defaults.llm, defaults.summarize, defaults.vision)
         };
-        view = view.child(
-            v_flex()
-                .gap_3()
-                .pt_2()
-                .child(conversion_ai_preference_row(
-                    ConversionAiOption::Proofread,
-                    "修正识别错误和标点，保留原意",
-                    coral_switch(
-                        Switch::new("import-proofread")
-                            .checked(conversion_ai_option_enabled(
-                                &self.task_options,
+        let ai_controls = v_flex()
+            .gap_3()
+            .pt_2()
+            .child(conversion_ai_preference_row(
+                ConversionAiOption::Proofread,
+                "修正识别错误和标点，保留原意",
+                coral_switch(
+                    Switch::new("import-proofread")
+                        .checked(conversion_ai_option_enabled(
+                            &self.task_options,
+                            ConversionAiOption::Proofread,
+                        ))
+                        .on_click(cx.listener(|this, value, _, cx| {
+                            apply_conversion_ai_option(
+                                &mut this.task_options,
                                 ConversionAiOption::Proofread,
-                            ))
-                            .on_click(cx.listener(|this, value, _, cx| {
-                                apply_conversion_ai_option(
-                                    &mut this.task_options,
-                                    ConversionAiOption::Proofread,
-                                    *value,
-                                );
-                                if this.save_current_draft(cx) {
-                                    this.advance_conversion_when_ready(cx);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-                ))
-                .child(vision_disclosure)
-                .child(conversion_ai_preference_row(
-                    ConversionAiOption::Summary,
-                    "提炼课程要点，正文继续保留",
-                    coral_switch(
-                        Switch::new("import-summary")
-                            .checked(conversion_ai_option_enabled(
-                                &self.task_options,
+                                *value,
+                            );
+                            if this.save_current_draft(cx) {
+                                this.advance_conversion_when_ready(cx);
+                            }
+                            cx.notify();
+                        })),
+                ),
+            ))
+            .child(vision_disclosure)
+            .child(conversion_ai_preference_row(
+                ConversionAiOption::Summary,
+                "提炼课程要点，正文继续保留",
+                coral_switch(
+                    Switch::new("import-summary")
+                        .checked(conversion_ai_option_enabled(
+                            &self.task_options,
+                            ConversionAiOption::Summary,
+                        ))
+                        .on_click(cx.listener(|this, value, _, cx| {
+                            apply_conversion_ai_option(
+                                &mut this.task_options,
                                 ConversionAiOption::Summary,
-                            ))
-                            .on_click(cx.listener(|this, value, _, cx| {
-                                apply_conversion_ai_option(
-                                    &mut this.task_options,
-                                    ConversionAiOption::Summary,
-                                    *value,
-                                );
-                                if this.save_current_draft(cx) {
-                                    this.advance_conversion_when_ready(cx);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-                )),
-        );
+                                *value,
+                            );
+                            if this.save_current_draft(cx) {
+                                this.advance_conversion_when_ready(cx);
+                            }
+                            cx.notify();
+                        })),
+                ),
+            ));
         let translation_enabled = self.import_base_config().translation.enabled;
         let ai_enabled = self.task_options.llm || self.task_options.summarize || translation_enabled;
         let mut ai_options = v_flex().gap_3();
@@ -1980,6 +1978,36 @@ impl Desktop {
             window,
             cx,
         ));
+        if ai_overridden || self.task_ai_options_open {
+            view = view.child(ai_controls);
+        } else {
+            let mut summary = Vec::new();
+            if self.task_options.llm {
+                summary.push("AI 校对");
+                if self.task_options.vision {
+                    summary.push("截图辅助校对");
+                }
+            }
+            if self.task_options.summarize {
+                summary.push("摘要");
+            }
+            let summary = if summary.is_empty() {
+                "不启用 AI 处理".to_owned()
+            } else {
+                format!("按设置执行：{}", summary.join("、"))
+            };
+            view = view
+                .child(help(summary))
+                .child(
+                    quiet("edit-task-ai-options")
+                        .icon(icons::edit())
+                        .label("修改本次任务")
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.task_ai_options_open = true;
+                            cx.notify();
+                        })),
+                );
+        }
         if ai_overridden {
             view = view.child(
                 h_flex()
@@ -2640,6 +2668,7 @@ impl Desktop {
                 self.restore_draft(window, cx);
                 self.source_editor_open = true;
                 self.generation_options_open = false;
+                self.task_ai_options_open = false;
                 true
             }
             Err(error) => {
@@ -2780,12 +2809,11 @@ impl Desktop {
                     .gap_6()
                     .child(recognition_box)
                     .child(box_section(icons::subtitles(), "笔记内容").child(self.import_ai_options(window, cx)))
-                    .child(self.import_destination(cx))
                     .child(self.import_exports(window, cx));
                 // idle 工作台不显示 conversion-defaults callout（见文件顶部设计决定注释）
                 let mut options_header = v_flex().w_full().min_w_0().gap_2();
                 options_header = options_header.child(self.generation_options_toggle(cx));
-                view = view.child(options_header).child(disclosure(
+                view = view.child(self.import_destination(cx)).child(options_header).child(disclosure(
                     "generation-options-body",
                     options_open,
                     options,
