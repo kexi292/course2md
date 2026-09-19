@@ -147,6 +147,8 @@ pub struct GenerationPreferences {
     pub last_local_provider: Option<AsrProvider>,
     pub subtitle_languages_draft: Option<String>,
     pub ai_concurrency: usize,
+    pub ai_retry_attempts: usize,
+    pub ai_retry_backoff_secs: u64,
     pub preferred_subtitle_languages: Vec<String>,
 }
 
@@ -169,6 +171,8 @@ impl Default for GenerationPreferences {
             last_local_provider: None,
             subtitle_languages_draft: None,
             ai_concurrency: 2,
+            ai_retry_attempts: 3,
+            ai_retry_backoff_secs: 1,
             preferred_subtitle_languages: Vec::new(),
         }
     }
@@ -219,6 +223,10 @@ impl GenerationPreferences {
         config.llm.vision = self.effective_vision();
         config.llm.prompt = self.prompt.clone();
         config.llm.concurrency = self.ai_concurrency;
+        config.llm.retry_attempts = self.ai_retry_attempts;
+        config.llm.retry_backoff_secs = self.ai_retry_backoff_secs;
+        config.translation.retry_attempts = self.ai_retry_attempts;
+        config.translation.retry_backoff_secs = self.ai_retry_backoff_secs;
         config.llm.disable_hint = true;
         clear_service_fields(config);
     }

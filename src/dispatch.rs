@@ -454,6 +454,7 @@ impl Ledger {
         for unresolved in read_receipts(&self.dir).map_err(Failure::local)? {
             if unresolved.stable_id != stable_id
                 && matches!(unresolved.state, State::Sending | State::Uncertain)
+                && !control.resend.contains(&unresolved.request_id)
             {
                 // Live in-flight requests may run concurrently; only stale Sending from another
                 // process is unknown. A lock currently held in this context proves it is live.

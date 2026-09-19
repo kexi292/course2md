@@ -233,6 +233,10 @@ enabled = false
 #vision = false
 # 并发请求数 / Concurrent requests
 #concurrency = 8
+# 5xx 自动重试次数（含首次请求） / 5xx attempts including the first request
+#retry_attempts = 3
+# 5xx 重试退避基数（秒） / 5xx retry backoff base in seconds
+#retry_backoff_secs = 1
 # 在笔记中加入 AI 总结，需要 enabled = true / Add AI summaries; requires enabled = true
 #summarize = false
 # 笔记核心语言：source 跟随原文；zh-hans 保留原文并附简体中文 / Core note language

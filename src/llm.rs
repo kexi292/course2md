@@ -77,6 +77,10 @@ pub struct LlmSettings {
     pub note_language: NoteLanguage,
     /// 润色并发数（chunk 间相互独立；自建网关/代理可调高）
     pub concurrency: usize,
+    /// 5xx 自动重试次数（含首次请求）。
+    pub retry_attempts: usize,
+    /// 5xx 重试退避基数；每次等待按 1x、2x、4x 增长。
+    pub retry_backoff_secs: u64,
 }
 
 impl Default for LlmSettings {
@@ -92,6 +96,8 @@ impl Default for LlmSettings {
             summarize: false,
             note_language: NoteLanguage::Source,
             concurrency: DEFAULT_CONCURRENCY,
+            retry_attempts: DEFAULT_RETRY_ATTEMPTS,
+            retry_backoff_secs: DEFAULT_RETRY_BACKOFF_SECS,
         }
     }
 }
@@ -110,6 +116,8 @@ pub struct TranslationSettings {
     pub api_key: String,
     pub model: String,
     pub concurrency: usize,
+    pub retry_attempts: usize,
+    pub retry_backoff_secs: u64,
 }
 
 impl Default for TranslationSettings {
@@ -120,6 +128,8 @@ impl Default for TranslationSettings {
             api_key: String::new(),
             model: String::new(),
             concurrency: DEFAULT_CONCURRENCY,
+            retry_attempts: DEFAULT_RETRY_ATTEMPTS,
+            retry_backoff_secs: DEFAULT_RETRY_BACKOFF_SECS,
         }
     }
 }
@@ -132,6 +142,8 @@ impl TranslationSettings {
             model: self.model.clone(),
             note_language: NoteLanguage::ZhHans,
             concurrency: self.concurrency,
+            retry_attempts: self.retry_attempts,
+            retry_backoff_secs: self.retry_backoff_secs,
             ..LlmSettings::default()
         }
     }
@@ -165,6 +177,8 @@ const DEFAULT_CONCURRENCY: usize = 8;
 const MAX_CONCURRENCY: usize = 16;
 /// LLM 请求最大尝试次数（1 次原始 + 重试）。
 const MAX_ATTEMPTS: usize = 3;
+const DEFAULT_RETRY_ATTEMPTS: usize = 3;
+const DEFAULT_RETRY_BACKOFF_SECS: u64 = 1;
 
 /// 润色/总结共享的 HTTP agent：整个任务复用同一 TCP+TLS 连接池，
 /// 不再每请求新建（对照 asr.rs 的共享 client 模式）。
@@ -849,13 +863,39 @@ fn request_chat_once(
         &url,
         body,
         || {
-            let request = agent.post(&url).set("Content-Type", "application/json");
-            let request = if s.api_key.is_empty() {
-                request
-            } else {
-                request.set("Authorization", &format!("Bearer {}", s.api_key))
-            };
-            crate::dispatch::receive(request.send_json(body))
+            let attempts = s.retry_attempts.clamp(1, 10);
+            let mut last = None;
+            for attempt in 1..=attempts {
+                let request = agent.post(&url).set("Content-Type", "application/json");
+                let request = if s.api_key.is_empty() {
+                    request
+                } else {
+                    request.set("Authorization", &format!("Bearer {}", s.api_key))
+                };
+                let response = crate::dispatch::receive(request.send_json(body))?;
+                if !(500..=599).contains(&response.status) || attempt == attempts {
+                    return Ok(response);
+                }
+                last = Some(response.status);
+                let wait = s
+                    .retry_backoff_secs
+                    .saturating_mul(1_u64 << (attempt.saturating_sub(1).min(6)));
+                tracing::warn!(attempt, of = attempts, status = response.status, ?wait, "LLM 服务暂时不可用，正在重试 / LLM service unavailable; retrying");
+                let mut slept = Duration::ZERO;
+                let delay = Duration::from_secs(wait);
+                while slept < delay {
+                    if let Err(error) = crate::dispatch::check_control() {
+                        return Err(crate::dispatch::NetworkFailure {
+                            message: error.to_string(),
+                            definitely_unsent: true,
+                        });
+                    }
+                    let step = (delay - slept).min(Duration::from_millis(200));
+                    std::thread::sleep(step);
+                    slept += step;
+                }
+            }
+            unreachable!("retry loop must return; last status: {last:?}")
         },
         |value| validate_chat_response(value, body, purpose),
     )
@@ -1250,6 +1290,8 @@ mod tests {
             summarize: false,
             note_language: NoteLanguage::Source,
             concurrency: 8,
+            retry_attempts: DEFAULT_RETRY_ATTEMPTS,
+            retry_backoff_secs: DEFAULT_RETRY_BACKOFF_SECS,
         }
     }
 
