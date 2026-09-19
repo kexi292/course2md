@@ -180,6 +180,15 @@ const MAX_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_ATTEMPTS: usize = 3;
 const DEFAULT_RETRY_BACKOFF_SECS: u64 = 1;
 
+fn is_chinese_translation_skip(text: &str) -> bool {
+    let han = text
+        .chars()
+        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+        .count();
+    let latin = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    han >= 2 && han >= latin
+}
+
 /// 润色/总结共享的 HTTP agent：整个任务复用同一 TCP+TLS 连接池，
 /// 不再每请求新建（对照 asr.rs 的共享 client 模式）。
 /// Agent clone 共享底层连接池，可安全传入 spawn_blocking 任务。
@@ -290,51 +299,67 @@ pub fn polish_sections_report(
     };
     let mut pending = Vec::new();
     let mut reused = 0;
+    let mut skipped = 0;
     for (si, sec) in sections.iter_mut().enumerate() {
-        for chunk in sec.speech.chunks_mut(BATCH) {
+        let batch = if stage == "translation" { 1 } else { BATCH };
+        for chunk in sec.speech.chunks_mut(batch) {
             crate::dispatch::check_control()?;
             let Some(image) = images[si].as_ref() else {
                 continue;
             };
-            let items: Vec<_> = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, e)| (i, e.text.as_str()))
-                .collect();
-            let body = build_chat_body(s, &items, image.as_deref())?;
-            let mut cached =
-                crate::dispatch::cached_response(service, purpose, &endpoint(&s.base_url), &body)?;
-            if cached.is_none() {
-                let mut relaxed = body.clone();
-                relaxed.as_object_mut().unwrap().remove("response_format");
-                cached = crate::dispatch::cached_response(
+            if stage == "translation" && is_chinese_translation_skip(&chunk[0].text) {
+                skipped += chunk.len();
+                continue;
+            }
+            {
+                let items: Vec<_> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| (i, e.text.as_str()))
+                    .collect();
+                let body = build_chat_body(s, &items, image.as_deref())?;
+                let mut cached = crate::dispatch::cached_response(
                     service,
                     purpose,
                     &endpoint(&s.base_url),
-                    &relaxed,
+                    &body,
                 )?;
-            }
-            if let Some(value) = cached {
-                validate_chat_response(&value, &body, purpose)?;
-                let parsed =
-                    parse_segments(value["choices"][0]["message"]["content"].as_str().unwrap())
-                        .unwrap();
-                if !apply_polish(chunk, &parsed, s.note_language) {
-                    reused += chunk.len();
+                if cached.is_none() {
+                    let mut relaxed = body.clone();
+                    relaxed.as_object_mut().unwrap().remove("response_format");
+                    cached = crate::dispatch::cached_response(
+                        service,
+                        purpose,
+                        &endpoint(&s.base_url),
+                        &relaxed,
+                    )?;
                 }
-            } else {
-                pending.push((si, chunk));
+                if let Some(value) = cached {
+                    validate_chat_response(&value, &body, purpose)?;
+                    let parsed = parse_segments(
+                        value["choices"][0]["message"]["content"]
+                            .as_str()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    if !apply_polish(chunk, &parsed, s.note_language) {
+                        reused += chunk.len();
+                    }
+                } else {
+                    pending.push((si, chunk));
+                }
             }
         }
     }
+    // Chinese-only translation segments stay unchanged and count as completed locally.
+    let pending_count = attempted.saturating_sub(reused + skipped);
     pb.set_position(reused as u64);
     pb.set_message(format!(
         "已复用 {reused} 段；待处理 {} 段 / Reused {reused} segments; {} pending",
-        attempted - reused,
-        attempted - reused
+        pending_count, pending_count
     ));
     let queue = std::sync::Mutex::new(pending.into_iter());
-    let succeeded = std::sync::atomic::AtomicUsize::new(reused);
+    let succeeded = std::sync::atomic::AtomicUsize::new(reused + skipped);
     let uncertain = std::sync::atomic::AtomicUsize::new(0);
     let aborted = std::sync::Mutex::new(None::<anyhow::Error>);
     std::thread::scope(|scope| {
@@ -1276,6 +1301,12 @@ mod tests {
             endpoint("https://api.x.com/v1/chat/completions"),
             "https://api.x.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn translation_skips_chinese_segments() {
+        assert!(is_chinese_translation_skip("这是中文 API 说明"));
+        assert!(!is_chinese_translation_skip("The compiler parses tokens"));
     }
 
     fn test_settings() -> LlmSettings {
