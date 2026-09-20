@@ -38,12 +38,40 @@ pub enum State {
     Rejected,
     Failed,
     Uncertain,
+    /// The logical unit was intentionally completed locally without a network call.
+    Skipped,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Attempt {
+    pub attempt: u32,
+    pub state: State,
+    pub request_id: String,
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub error_category: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Receipt {
     pub schema: u32,
     pub stable_id: String,
+    /// Schema-2 name for stable_id. Kept separately so schema-1 receipts remain readable.
+    #[serde(default)]
+    pub logical_id: String,
+    #[serde(default)]
+    pub task_id: String,
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub segment_start: Option<f64>,
+    #[serde(default)]
+    pub segment_end: Option<f64>,
     pub request_id: String,
     pub purpose: String,
     #[serde(default)]
@@ -61,6 +89,9 @@ pub struct Receipt {
     /// Sending/uncertain attempts still require Control::resend authorization.
     #[serde(default)]
     pub retry_authorized: Option<String>,
+    /// Prior attempts are append-only; the top-level fields describe the latest attempt.
+    #[serde(default)]
+    pub attempts: Vec<Attempt>,
 }
 
 #[derive(Debug)]
@@ -153,6 +184,7 @@ pub struct NetworkFailure {
 }
 
 struct Ledger {
+    diagnostics: Option<crate::diagnostics::Journal>,
     dir: PathBuf,
     control_path: Option<PathBuf>,
     service_versions: BTreeMap<String, String>,
@@ -166,9 +198,32 @@ fn active() -> Option<Arc<Ledger>> {
 pub fn is_active() -> bool {
     active().is_some()
 }
+
+pub(crate) fn record_diagnostic(event: Value) {
+    if let Some(ledger) = active() {
+        ledger.record(event);
+    }
+}
+
+pub(crate) fn record_request_diagnostic(
+    service: &str,
+    purpose: &str,
+    endpoint: &str,
+    payload: &Value,
+    mut event: Value,
+) {
+    if let Some(ledger) = active()
+        && let Ok((id, _)) = ledger.identity(service, purpose, endpoint, payload)
+    {
+        event["stable_id"] = id.into();
+        event["purpose"] = purpose.into();
+        ledger.record(event);
+    }
+}
 pub struct Guard(Arc<Ledger>);
 impl Drop for Guard {
     fn drop(&mut self) {
+        self.0.record(serde_json::json!({"type":"round_closed"}));
         // 锁中毒也要清掉当前 guard：否则 install 会一直报「同一进程不能同时执行两个任务」
         let mut current = ACTIVE
             .get_or_init(|| Mutex::new(None))
@@ -235,7 +290,14 @@ fn read_receipts(dir: &Path) -> Result<Vec<Receipt>> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.extension().is_some_and(|e| e == "json") {
-            result.push(serde_json::from_slice(&std::fs::read(path)?).context("外部请求记录损坏；没有重新发送 / Request receipt is damaged; no request was resent")?);
+            let mut receipt: Receipt = serde_json::from_slice(&std::fs::read(path)?).context("外部请求记录损坏；没有重新发送 / Request receipt is damaged; no request was resent")?;
+            if receipt.logical_id.is_empty() {
+                receipt.logical_id = receipt.stable_id.clone();
+            }
+            if receipt.stage.is_empty() {
+                receipt.stage = receipt.purpose.clone();
+            }
+            result.push(receipt);
         }
     }
     Ok(result)
@@ -275,6 +337,15 @@ impl Ledger {
         let dir = work_dir.join("requests");
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
+            diagnostics: match crate::diagnostics::Journal::new(work_dir) {
+                Ok(journal) => Some(journal),
+                Err(_) => {
+                    tracing::warn!(
+                        "AI diagnostic log could not be created; task processing continues"
+                    );
+                    None
+                }
+            },
             dir,
             control_path: control_path.map(Path::to_path_buf),
             service_versions: versions.clone(),
@@ -290,6 +361,8 @@ impl Ledger {
         }
     }
     fn block(&self, reason: &str, request: Option<&Receipt>, message: &str) -> Failure {
+        self.record(serde_json::json!({"type":"blocked", "reason":reason,
+            "request_id":request.map(|r| &r.request_id)}));
         let request_id = request.map(|r| r.request_id.clone());
         let message = request.filter(|r| !r.description.is_empty()).map_or_else(
             || message.to_string(),
@@ -350,11 +423,49 @@ impl Ledger {
         Ok(control)
     }
     fn save(&self, receipt: &Receipt) -> std::result::Result<(), Failure> {
+        let mut persisted = receipt.clone();
+        if let Some(attempt) = persisted
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.request_id == receipt.request_id)
+        {
+            attempt.state = receipt.state.clone();
+            attempt.http_status = receipt.http_status;
+            attempt.error_category = receipt.message.as_ref().map(|_| match &receipt.state {
+                State::Uncertain => "incomplete_response".into(),
+                State::Failed => "failed".into(),
+                State::Rejected => "rejected".into(),
+                State::Skipped => "skipped".into(),
+                _ => "completed".into(),
+            });
+        } else {
+            persisted.attempts.push(Attempt {
+                attempt: receipt.attempt,
+                state: receipt.state.clone(),
+                request_id: receipt.request_id.clone(),
+                http_status: receipt.http_status,
+                error_category: None,
+                started_at: None,
+                finished_at: None,
+            });
+        }
         atomic_write(
             &self.dir.join(format!("{}.json", receipt.stable_id)),
-            &serde_json::to_vec_pretty(receipt).map_err(Failure::local)?,
+            &serde_json::to_vec_pretty(&persisted).map_err(Failure::local)?,
         )
-        .map_err(Failure::local)
+        .map_err(Failure::local)?;
+        self.record(
+            serde_json::json!({"type":"receipt", "stable_id":receipt.stable_id,
+            "request_id":receipt.request_id, "purpose":receipt.purpose,
+            "attempt":receipt.attempt, "state":receipt.state, "http_status":receipt.http_status}),
+        );
+        Ok(())
+    }
+
+    fn record(&self, event: Value) {
+        if let Some(journal) = &self.diagnostics {
+            journal.record(event);
+        }
     }
     #[cfg(test)]
     fn send(
@@ -420,7 +531,10 @@ impl Ledger {
                     && receipt.retry_authorized.as_ref() == Some(&receipt.request_id))
         });
         if let Some(old) = &old {
-            if matches!(old.state, State::Sending | State::Uncertain) && !authorized {
+            if matches!(old.state, State::Sending | State::Uncertain)
+                && !authorized
+                && !(old.state == State::Uncertain && old.attempt == 1)
+            {
                 let mut uncertain = old.clone();
                 uncertain.state = State::Uncertain;
                 self.save(&uncertain)?;
@@ -449,31 +563,17 @@ impl Ledger {
                 });
             }
         }
-        // An unknown prerequisite cannot be bypassed by splitting/relaxing the payload
-        // or by beginning downstream summary requests. Unrelated local work remains possible.
-        for unresolved in read_receipts(&self.dir).map_err(Failure::local)? {
-            if unresolved.stable_id != stable_id
-                && matches!(unresolved.state, State::Sending | State::Uncertain)
-                && !control.resend.contains(&unresolved.request_id)
-            {
-                // Live in-flight requests may run concurrently; only stale Sending from another
-                // process is unknown. A lock currently held in this context proves it is live.
-                let live = self
-                    .locks
-                    .lock()
-                    .map_err(Failure::local)?
-                    .get(&unresolved.stable_id)
-                    .cloned()
-                    .is_some_and(|lock| lock.try_lock().is_err());
-                if unresolved.state == State::Uncertain || !live {
-                    return Err(self.block("uncertain", Some(&unresolved), "前一步请求结果尚不确定；已保留进度，没有继续发送 / A previous request is unresolved; progress retained"));
-                }
-            }
-        }
+        // Unknown results belong to one logical unit. Pipeline dependency checks decide
+        // whether a downstream stage may start; unrelated units must keep running.
         let attempt = old.as_ref().map_or(1, |r| r.attempt + 1);
         let mut receipt = Receipt {
-            schema: 1,
+            schema: 2,
             stable_id: stable_id.clone(),
+            logical_id: stable_id.clone(),
+            task_id: String::new(),
+            stage: purpose.into(),
+            segment_start: None,
+            segment_end: None,
             request_id: format!("{stable_id}.{attempt}"),
             purpose: purpose.into(),
             description: description.into(),
@@ -485,6 +585,9 @@ impl Ledger {
             message: None,
             unsupported_response_format: false,
             retry_authorized: None,
+            attempts: old
+                .as_ref()
+                .map_or_else(Vec::new, |previous| previous.attempts.clone()),
         };
         // This durable write happens before the only call that can send network bytes.
         self.save(&receipt)?;
@@ -506,7 +609,22 @@ impl Ledger {
                 receipt.state = State::Uncertain;
                 receipt.message = Some(error.message);
                 self.save(&receipt)?;
-                return Err(self.block("uncertain", Some(&receipt), "未收到服务的确定结果。服务可能已处理这部分，再次提交可能产生额外费用 / Service result is uncertain; resending may incur additional charges"));
+                let mut failure = self.block(
+                    "uncertain",
+                    Some(&receipt),
+                    "未收到服务的确定结果。服务可能已处理这部分；将自动重试一次 / Service result is uncertain; one automatic retry will be attempted",
+                );
+                // A single bounded retry recovers transient response loss. A second
+                // uncertain attempt remains manual-only to avoid an unbounded duplicate.
+                failure.retryable = matches!(
+                    crate::ai_state::retry_decision(
+                        crate::ai_state::AttemptState::Uncertain,
+                        receipt.attempt,
+                        false,
+                    ),
+                    crate::ai_state::RetryDecision::Automatic
+                );
+                return Err(failure);
             }
         };
         receipt.http_status = Some(response.status);
@@ -529,6 +647,18 @@ impl Ledger {
             });
         }
         if !(200..300).contains(&response.status) {
+            if response.status >= 500 {
+                receipt.state = State::Failed;
+                receipt.message = Some(rejection_message(response.status));
+                self.save(&receipt)?;
+                return Err(Failure {
+                    status: Some(response.status),
+                    retryable: true,
+                    uncertain: false,
+                    message: receipt.message.unwrap(),
+                    unsupported_response_format: false,
+                });
+            }
             receipt.state = State::Uncertain;
             self.save(&receipt)?;
             return Err(self.block("uncertain", Some(&receipt), "服务返回错误，无法确认是否已处理。再次提交可能产生额外费用 / Service processing is uncertain"));
@@ -867,7 +997,20 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            ledger
+                .send(
+                    "asr",
+                    "transcription",
+                    "https://example.test",
+                    &payload,
+                    || panic!("third uncertain attempt must be manual-only"),
+                    |_| Ok(())
+                )
+                .unwrap_err()
+                .uncertain
+        );
         atomic_write(
             &control,
             &serde_json::to_vec(&Control {

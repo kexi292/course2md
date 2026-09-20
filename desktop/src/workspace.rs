@@ -920,39 +920,38 @@ impl State {
             );
         }
         reconcile_receipts(&mut original)?;
+        let stage_selected = |purpose: &str| {
+            components.iter().any(|component| match component.as_str() {
+                "proofreading" => purpose == "proofreading" || purpose == "llm",
+                "translation" => purpose == "translation",
+                "summary" => purpose == "summary" || purpose == "summarize",
+                _ => false,
+            })
+        };
+        let stage_unknown: BTreeSet<String> = original
+            .blocked
+            .iter()
+            .filter(|request| request.reason == "uncertain")
+            .filter(|request| stage_selected(request.purpose.as_deref().unwrap_or_default()))
+            .filter_map(|request| request.request_id.clone())
+            .collect();
         if !resend.is_empty() {
-            let unknown: BTreeSet<_> = original
+            let unknown: BTreeSet<String> = original
                 .blocked
                 .iter()
                 .filter(|request| request.reason == "uncertain")
-                .filter_map(|request| request.request_id.as_ref())
+                .filter_map(|request| request.request_id.clone())
                 .collect();
+            let selected: BTreeSet<_> = resend.iter().cloned().collect();
+            ensure!(!unknown.is_empty() && selected.is_subset(&unknown),
+                "待确认请求已变化，请查看最新范围后再选择是否重新发送");
             ensure!(
-                !unknown.is_empty() && unknown == resend.iter().collect(),
+                !stage_unknown.is_empty() && stage_unknown == selected,
                 "待确认请求已变化，请查看最新范围后再选择是否重新发送"
             );
-            // The user is continuing the original task, including a requested
-            // summary that the uncertain proofreading prevented from starting.
-            // Any summary receipt means it has its own attempt to recover; do
-            // not infer permission to repeat it from a proofreading decision.
-            if components.iter().any(|part| part == "proofreading")
-                && !components.iter().any(|part| part == "summary")
-                && original.plan.config.llm.summarize
-                && value.get("summary").is_some_and(failed_outcome)
-                && original.blocked.iter().any(|request| {
-                    request.reason == "uncertain"
-                        && request.purpose.as_deref() == Some("proofreading")
-                })
-                && !course2md::dispatch::receipts(&original.work_dir)?
-                    .iter()
-                    .any(|receipt| receipt.purpose == "summary")
-            {
-                components.push("summary".into());
-                components.sort();
-            }
         } else {
             ensure!(
-                !original.blocked.iter().any(|r| r.reason == "uncertain"),
+                stage_unknown.is_empty(),
                 "仍有请求结果尚未确认，请先查看请求范围"
             );
         }
@@ -2554,6 +2553,11 @@ mod tests {
         let receipt = course2md::dispatch::Receipt {
             schema: 1,
             stable_id: "stable-request".into(),
+            logical_id: "stable-request".into(),
+            task_id: String::new(),
+            stage: "proofreading".into(),
+            segment_start: None,
+            segment_end: None,
             request_id: id.clone(),
             purpose: "proofreading".into(),
             description: "校对 00:00–00:20 的文字".into(),
@@ -2565,6 +2569,7 @@ mod tests {
             message: Some("连接断开 / connection lost".into()),
             unsupported_response_format: false,
             retry_authorized: None,
+            attempts: Vec::new(),
         };
         std::fs::create_dir_all(task.work_dir.join("requests")).unwrap();
         std::fs::write(
@@ -2600,7 +2605,7 @@ mod tests {
     }
 
     #[test]
-    fn proofreading_resend_continues_an_authorized_summary_that_was_never_sent() {
+    fn proofreading_resend_does_not_authorize_summary_that_was_never_sent() {
         let dir = tempfile::tempdir().unwrap();
         let mut ws = test_workspace(dir.path());
         let (id, request) = uncertain_proofreading_note(
@@ -2629,11 +2634,11 @@ mod tests {
         else {
             panic!("expected component recovery");
         };
-        assert_eq!(components, &["proofreading", "summary"]);
+        assert_eq!(components, &["proofreading"]);
         assert_eq!(Some(base_version_dir), original.artifact.as_ref());
         assert_eq!(prior_work_dir.as_ref(), Some(&original.work_dir));
-        assert!(child.plan.config.llm.enabled && child.plan.config.llm.summarize);
-        assert!(child.plan.options.llm && child.plan.options.summarize);
+        assert!(child.plan.config.llm.enabled && !child.plan.config.llm.summarize);
+        assert!(child.plan.options.llm && !child.plan.options.summarize);
         assert_eq!(child.resend, vec![request.clone()]);
         assert!(ws.state.task(&id).unwrap().plan == original.plan);
         assert!(ws.state.draft().unwrap() == &draft);
@@ -2695,6 +2700,11 @@ mod tests {
             let receipt = Receipt {
                 schema: 1,
                 stable_id: "summary-request".into(),
+                logical_id: "summary-request".into(),
+                task_id: String::new(),
+                stage: "summary".into(),
+                segment_start: None,
+                segment_end: None,
                 request_id: "summary-request.1".into(),
                 purpose: "summary".into(),
                 description: "生成摘要".into(),
@@ -2706,6 +2716,7 @@ mod tests {
                 message: None,
                 unsupported_response_format: false,
                 retry_authorized: None,
+                attempts: Vec::new(),
             };
             std::fs::write(
                 task.work_dir.join("requests/summary-request.json"),
@@ -3016,6 +3027,9 @@ mod tests {
                 ),
                 completed: Some(20),
                 total: Some(21),
+                failed: Some(if uncertain { 0 } else { 1 }),
+                uncertain: Some(if uncertain { 1 } else { 0 }),
+                skipped: Some(0),
             };
             let version = publish_note_with_outcomes(&ws.state, &id, outcomes.clone());
             let task = ws.state.task_mut(&id).unwrap();

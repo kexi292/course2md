@@ -293,17 +293,14 @@ impl Desktop {
             title,
         });
         let weak = cx.weak_entity();
-        window.open_dialog(cx, move |dialog, _, cx| {
+        window.open_dialog(cx, move |dialog, _, _| {
             let weak = weak.clone();
-            let saving = weak
-                .upgrade()
-                .is_some_and(|desktop| desktop.read(cx).folder_saving);
             dialog
                 .title(title)
                 .w(px(420.))
                 .overlay_closable(false)
                 .close_button(false)
-                .keyboard(!saving)
+                .keyboard(true)
                 .child(content.clone())
                 .on_close(move |_, _, cx| {
                     let _ = weak.update(cx, |this, cx| {

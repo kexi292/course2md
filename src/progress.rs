@@ -35,6 +35,16 @@ pub fn is_json() -> bool {
 
 /// 输出一个事件：json 模式写 stdout 一行并立即 flush；human 模式 no-op。
 pub fn emit(ev: serde_json::Value) {
+    // Export only fixed protocol fields; logs and outcome messages can contain user data.
+    if matches!(ev["type"].as_str(), Some("stage" | "done")) {
+        let mut diagnostic = serde_json::json!({"type":ev["type"]});
+        for key in ["stage", "status", "partial", "segments", "chars"] {
+            if let Some(value) = ev.get(key) {
+                diagnostic[key] = value.clone();
+            }
+        }
+        crate::dispatch::record_diagnostic(diagnostic);
+    }
     if !is_json() {
         return;
     }

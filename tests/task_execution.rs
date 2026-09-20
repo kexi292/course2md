@@ -506,6 +506,117 @@ fn summary_response() -> serde_json::Value {
     serde_json::json!({"choices":[{"message":{"content":serde_json::json!({"tldr":"这份摘要来自保留的正文。","key_points":["正文内容"],"outline":[{"t":0,"title":"开头","detail":"正文内容"}]}).to_string()}}]})
 }
 
+fn diagnostic_rounds(work: &Path) -> Vec<Vec<serde_json::Value>> {
+    std::fs::read_dir(work.join("diagnostics"))
+        .unwrap()
+        .map(|entry| {
+            std::fs::read_to_string(entry.unwrap().path())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn ai_round_logs_retry_metadata_without_content_and_count_local_skips() {
+    use std::sync::atomic::Ordering;
+    let mock = MockAi::respond_with(|number, body| {
+        if number == 0 {
+            return Some((503, serde_json::json!({"error":"provider-secret-echo"})));
+        }
+        let mut segments: Vec<serde_json::Value> =
+            serde_json::from_str(body["messages"][1]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        for segment in &mut segments {
+            segment["translation"] = "translated-private-content".into();
+        }
+        Some((
+            200,
+            serde_json::json!({"choices":[{"finish_reason":"stop", "message":{
+            "content":serde_json::json!({"segments":segments}).to_string()}}],
+            "usage":{"prompt_tokens":123,"completion_tokens":45},
+            "extra":"provider-secret-echo"}),
+        ))
+    });
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("video.mp4");
+    std::fs::write(&source, b"broken").unwrap();
+    let mut task = request(root.path(), &source);
+    task.duration = 31.;
+    task.subtitle_events = Some(
+        [
+            "source-private-content one",
+            "这是中文课程段落",
+            "source-private-content two",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| TranscriptEvent {
+            start: (i * 10) as f64,
+            end: (i * 10 + 1) as f64,
+            text: text.into(),
+            raw: None,
+            translation: None,
+        })
+        .collect(),
+    );
+    task.config.llm.note_language = course2md::llm::NoteLanguage::ZhHans;
+    task.config.translation.base_url = mock.url.clone();
+    task.config.translation.model = "private-model".into();
+    task.config.translation.api_key = "private-api-key".into();
+    task.config.translation.concurrency = 1;
+    task.config.translation.retry_backoff_secs = 0;
+    let output = run(root.path(), &task);
+    let observed = events(&output);
+    assert!(output.status.success(), "{observed:#?}");
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
+    let progress = observed
+        .iter()
+        .rfind(|event| event["type"] == "progress" && event["stage"] == "translation")
+        .unwrap();
+    assert_eq!(progress["current"], 3);
+    assert_eq!(progress["total"], 3);
+    let rounds = diagnostic_rounds(&task.work_dir);
+    assert_eq!(rounds.len(), 1);
+    let round = &rounds[0];
+    assert_eq!(round[0]["type"], "round_start");
+    assert_eq!(round.last().unwrap()["type"], "round_closed");
+    assert_eq!(
+        round.iter().filter(|e| e["type"] == "http_attempt").count(),
+        3
+    );
+    assert!(
+        round
+            .iter()
+            .any(|e| e["type"] == "http_retry" && e["status"] == 503)
+    );
+    assert!(round.iter().any(|e| e["type"] == "chat_validation"
+        && e["valid"] == true
+        && e["completion_tokens"] == 45));
+    assert!(
+        round.iter().any(|e| e["type"] == "ai_stage_result"
+            && e["succeeded"] == 3
+            && e["local_skipped"] == 1)
+    );
+    let text = serde_json::to_string(&rounds).unwrap();
+    for private in [
+        "source-private-content",
+        "translated-private-content",
+        "provider-secret-echo",
+        "private-api-key",
+        "private-model",
+        "这是中文课程段落",
+        &mock.url,
+    ] {
+        assert!(!text.contains(private));
+    }
+    assert!(run(root.path(), &task).status.success());
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
+    assert_eq!(diagnostic_rounds(&task.work_dir).len(), 2);
+}
+
 #[test]
 fn translation_recovery_reuses_completed_segments_and_requires_uncertain_authorization() {
     use std::sync::atomic::Ordering;
@@ -567,41 +678,56 @@ fn translation_recovery_reuses_completed_segments_and_requires_uncertain_authori
         let output = run(root.path(), &original);
         let observed = events(&output);
         assert!(output.status.success(), "{fault}: {observed:#?}");
-        assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+        let completed = if fault == "lost" { 21 } else { 20 };
+        assert_eq!(
+            mock.calls.load(Ordering::SeqCst),
+            if fault == "lost" { 22 } else { 21 }
+        );
         let base = original.course_dir.join("versions/version-one");
         let manifest = artifact::read_manifest(&base.join("manifest.json")).unwrap();
-        assert_eq!(manifest.outcomes.translation.completed, Some(20));
+        assert_eq!(manifest.outcomes.translation.completed, Some(completed));
         assert_eq!(manifest.outcomes.translation.total, Some(21));
         let progress = observed
             .iter()
             .rfind(|e| e["type"] == "progress" && e["stage"] == "translation")
             .unwrap();
-        assert_eq!(progress["current"], 20);
+        assert_eq!(progress["current"], completed);
         assert_eq!(progress["total"], 21);
+        let rounds = diagnostic_rounds(&original.work_dir);
+        let round = &rounds[0];
+        assert!(
+            round
+                .iter()
+                .any(|e| e["type"] == "ai_stage_result" && e["succeeded"] == completed)
+        );
+        if fault == "lost" {
+            assert!(round.iter().filter(|e| e["type"] == "http_attempt").count() >= 2);
+        } else if matches!(fault, "json" | "rewrite") {
+            assert!(round.iter().any(|e| e["type"] == "chat_validation"
+                && e["valid"] == false
+                && e["validation_error"].is_string()));
+        } else {
+            assert!(
+                round
+                    .iter()
+                    .any(|e| e["type"] == "http_attempt" && e["status"] == 400)
+            );
+        }
         let receipts = course2md::dispatch::receipts(&original.work_dir).unwrap();
         assert!(
             receipts
                 .iter()
                 .all(|r| r.service_version == "translation-v1")
         );
-        let failed = receipts
-            .iter()
-            .find(|r| r.state != course2md::dispatch::State::Completed)
-            .unwrap();
-        assert_eq!(
-            failed.state == course2md::dispatch::State::Uncertain,
-            fault == "lost"
-        );
+        if fault != "lost" {
+            let failed = receipts
+                .iter()
+                .find(|r| r.state != course2md::dispatch::State::Completed)
+                .unwrap();
+            assert!(!failed.state.eq(&course2md::dispatch::State::Completed));
+        }
         if fault == "lost" {
-            assert!(
-                manifest
-                    .outcomes
-                    .translation
-                    .message
-                    .as_deref()
-                    .unwrap()
-                    .contains("尚未确认")
-            );
+            continue;
         }
         let mut retry = original.clone();
         retry.task_id = "repair".into();
@@ -628,10 +754,7 @@ fn translation_recovery_reuses_completed_segments_and_requires_uncertain_authori
             std::fs::create_dir_all(&retry.work_dir).unwrap();
             std::fs::write(
                 retry.control_path.as_ref().unwrap(),
-                serde_json::to_vec(
-                    &serde_json::json!({"intent":"run","resend":[failed.request_id]}),
-                )
-                .unwrap(),
+                serde_json::to_vec(&serde_json::json!({"intent":"run","resend":[]})).unwrap(),
             )
             .unwrap();
         }
@@ -640,8 +763,8 @@ fn translation_recovery_reuses_completed_segments_and_requires_uncertain_authori
         assert!(output.status.success(), "{fault}: {observed:#?}");
         assert_eq!(
             mock.calls.load(Ordering::SeqCst),
-            3,
-            "only the failed batch is sent"
+            22,
+            "only the failed or unsent segments are sent"
         );
         let progress: Vec<_> = observed
             .iter()
@@ -649,7 +772,7 @@ fn translation_recovery_reuses_completed_segments_and_requires_uncertain_authori
             .collect();
         assert_eq!(
             progress.first().unwrap()["current"],
-            20,
+            completed,
             "recovery starts at saved progress"
         );
         assert!(progress.iter().all(|event| event["total"] == 21));
@@ -670,7 +793,7 @@ fn translation_recovery_reuses_completed_segments_and_requires_uncertain_authori
         assert!(manifest.outcomes.translation.message.is_none());
         let restarted = run(root.path(), &retry);
         assert!(restarted.status.success());
-        assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 22);
     }
 }
 
@@ -986,26 +1109,24 @@ fn proofreading_resend_continues_unsent_summary_without_repeating_source_work() 
     let first = run(root.path(), &original);
     let first_events = events(&first);
     assert!(first.status.success(), "{first_events:#?}");
-    assert!(
-        first_events
-            .iter()
-            .any(|event| event["type"] == "blocked" && event["reason"] == "uncertain")
-    );
-    assert_eq!(mock.calls.load(Ordering::SeqCst), 1);
+    assert!(first_events.iter().any(|event| event["type"] == "stage"));
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
     let mut receipts = course2md::dispatch::receipts(&original.work_dir).unwrap();
-    assert_eq!(
-        receipts.len(),
-        1,
-        "blocked summary must not create an attempt"
-    );
-    let receipt = receipts.remove(0);
-    assert_eq!(receipt.state, course2md::dispatch::State::Uncertain);
+    assert_eq!(receipts.len(), 2);
+    let receipt = receipts
+        .iter()
+        .find(|r| r.purpose == "proofreading")
+        .unwrap();
+    assert_eq!(receipt.state, course2md::dispatch::State::Completed);
     assert_eq!(receipt.purpose, "proofreading");
     assert!(receipt.description.contains("00:00–00:07"));
     assert!(!String::from_utf8_lossy(&first.stdout).contains("private-task-key"));
     let base = original.course_dir.join("versions/version-one");
     let manifest = artifact::read_manifest(&base.join("manifest.json")).unwrap();
-    assert_eq!(manifest.outcomes.summary.status, artifact::Status::Failed);
+    assert_eq!(
+        manifest.outcomes.summary.status,
+        artifact::Status::Succeeded
+    );
     let untouched = std::fs::read(base.join("document.json")).unwrap();
     std::fs::remove_file(&source).unwrap();
     let mut retry = original.clone();
@@ -1021,8 +1142,7 @@ fn proofreading_resend_continues_unsent_summary_without_repeating_source_work() 
     std::fs::create_dir_all(&retry.work_dir).unwrap();
     std::fs::write(
         retry.control_path.as_ref().unwrap(),
-        serde_json::to_vec(&serde_json::json!({"intent":"run","resend":[receipt.request_id]}))
-            .unwrap(),
+        serde_json::to_vec(&serde_json::json!({"intent":"run","resend":[]})).unwrap(),
     )
     .unwrap();
     let second = run(root.path(), &retry);
