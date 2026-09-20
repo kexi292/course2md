@@ -266,8 +266,9 @@ fn configure_cloud(cfg: &mut crate::settings::ConfigFile) -> Result<()> {
         "请输入完整的 HTTP(S) 服务地址。 / Enter a valid HTTP(S) base URL."
     );
     anyhow::ensure!(
-        !cfg.asr_api.api_key.trim().is_empty() || crate::config::asr_api_key_from_env().is_some(),
-        "未提供 API Key。请设置 COURSE2MD_ASR_API_KEY 后重试，或在向导中输入。 / No API key provided. Set COURSE2MD_ASR_API_KEY or enter a key in setup."
+        !cfg.asr_api.api_key.trim().is_empty()
+            || crate::config::asr_api_key_from_env_for(cfg.asr_api.mode).is_some(),
+        "未提供 API Key。请设置相应环境变量后重试，或在向导中输入。 / No API key provided. Set the protocol's environment variable or enter a key in setup."
     );
     Ok(())
 }

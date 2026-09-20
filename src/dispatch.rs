@@ -540,7 +540,10 @@ impl Ledger {
                 self.save(&uncertain)?;
                 return Err(self.block("uncertain", Some(old), "未收到服务的确定结果。服务可能已处理这部分，再次提交可能产生额外费用 / Service result is uncertain; resending may incur additional charges"));
             }
-            if old.state == State::Failed && !authorized {
+            if old.state == State::Failed
+                && !authorized
+                && !old.http_status.is_some_and(|status| status >= 500)
+            {
                 return Err(Failure {
                     status: old.http_status,
                     retryable: false,
@@ -741,7 +744,7 @@ pub fn json_request_described(
             validate,
         );
     }
-    // The CLI has no durable task context. Only confirmed unsent/429 are retryable.
+    // The CLI has no durable task context. Only confirmed unsent/429/5xx are retryable.
     let response = send().map_err(|e| Failure {
         status: None,
         retryable: e.definitely_unsent,
@@ -752,8 +755,8 @@ pub fn json_request_described(
     if !(200..300).contains(&response.status) {
         return Err(Failure {
             status: Some(response.status),
-            retryable: response.status == 429,
-            uncertain: response.status >= 500,
+            retryable: response.status == 429 || response.status >= 500,
+            uncertain: false,
             message: rejection_message(response.status),
             unsupported_response_format: rejects_response_format(
                 response.status,
@@ -952,6 +955,42 @@ mod tests {
         assert_eq!(receipts(dir.path()).unwrap()[0].state, State::NotSent);
         ledger
             .send("llm", "summary", &endpoint, &payload, success, |_| Ok(()))
+            .unwrap();
+        let receipt = &receipts(dir.path()).unwrap()[0];
+        assert_eq!(receipt.state, State::Completed);
+        assert_eq!(receipt.attempt, 2);
+    }
+
+    #[test]
+    fn confirmed_server_error_can_retry_without_manual_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = Ledger::new(dir.path(), None, &Default::default()).unwrap();
+        let payload = serde_json::json!({"audio":"hash"});
+        let failure = ledger
+            .send(
+                "asr",
+                "transcription",
+                "https://example.test",
+                &payload,
+                || {
+                    Ok(HttpResponse {
+                        status: 503,
+                        body: br#"{"message":"busy"}"#.to_vec(),
+                    })
+                },
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert!(failure.retryable);
+        ledger
+            .send(
+                "asr",
+                "transcription",
+                "https://example.test",
+                &payload,
+                success,
+                |_| Ok(()),
+            )
             .unwrap();
         let receipt = &receipts(dir.path()).unwrap()[0];
         assert_eq!(receipt.state, State::Completed);

@@ -45,6 +45,10 @@ pub enum AsrApiMode {
     /// POST {base_url}/chat/completions（支持音频输入的多模态 LLM，
     /// 如 gpt-4o-audio-preview、Gemini、Qwen2-Audio 等 OpenAI 兼容端点）
     Chat,
+    /// POST DashScope multimodal generation with a WAV Data URL.
+    #[serde(rename = "dashscope_fun_asr_flash")]
+    #[value(name = "dashscope-fun-asr-flash")]
+    DashscopeFunAsrFlash,
 }
 
 impl std::fmt::Display for AsrApiMode {
@@ -52,6 +56,7 @@ impl std::fmt::Display for AsrApiMode {
         f.write_str(match self {
             Self::Transcriptions => "transcriptions",
             Self::Chat => "chat",
+            Self::DashscopeFunAsrFlash => "dashscope_fun_asr_flash",
         })
     }
 }
@@ -210,14 +215,19 @@ const TEMPLATE: &str = r#"# course2md 配置 / Configuration
 #resume = false
 
 [asr_api]
-# OpenAI 兼容语音服务 / OpenAI-compatible speech service
+# 语音服务协议 / Speech service protocol
 # transcriptions: /audio/transcriptions; chat: /chat/completions
+# dashscope_fun_asr_flash: /services/aigc/multimodal-generation/generation
 # 请求方式和模型需由服务商支持 / The provider must support the selected mode and model
 #mode = "transcriptions"
 #base_url = "https://openrouter.ai/api/v1"
 # 推荐通过 COURSE2MD_ASR_API_KEY 环境变量提供密钥 / Prefer the COURSE2MD_ASR_API_KEY environment variable
 #api_key = ""
 #model = "qwen/qwen3-asr-flash-2026-02-10"
+# DashScope example (fill in the complete Workspace URL):
+#mode = "dashscope_fun_asr_flash"
+#base_url = "https://WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/api/v1"
+#model = "fun-asr-flash-2026-06-15"
 
 [llm]
 # 可选 AI 润色；运行 course2md llm setup 配置 / Optional AI proofreading; configure with course2md llm setup
@@ -338,6 +348,7 @@ pub fn print_effective(cfg: &ConfigFile) {
     );
     println!("  mmproj_offload : {}", d.mmproj_offload.unwrap_or(true));
     println!("[asr_api]");
+    println!("  mode           : {}", cfg.asr_api.mode);
     println!("  base_url       : {}", cfg.asr_api.base_url);
     println!("  model          : {}", cfg.asr_api.model);
     println!(

@@ -43,13 +43,40 @@ pub fn ensure_http_url(raw: &str) -> AnyhowResult<url::Url> {
 /// Accept a service root or its exact supported endpoint, never double-append paths.
 pub fn asr_endpoint(api: &crate::settings::AsrApi) -> AnyhowResult<String> {
     let base = api.base_url.trim().trim_end_matches('/');
+    if api.mode == crate::settings::AsrApiMode::DashscopeFunAsrFlash {
+        const SUFFIX: &str = "/services/aigc/multimodal-generation/generation";
+        let endpoint = if base.ends_with(SUFFIX) {
+            base.to_string()
+        } else {
+            anyhow::ensure!(
+                base.ends_with("/api/v1"),
+                "阿里云 Fun-ASR-Flash 地址应为 Workspace 的 /api/v1 根地址或完整 generation 端点 / DashScope Fun-ASR-Flash URL must be the Workspace /api/v1 root or full generation endpoint"
+            );
+            format!("{base}{SUFFIX}")
+        };
+        let url = ensure_http_url(&endpoint)?;
+        anyhow::ensure!(
+            url.scheme() == "https"
+                && url
+                    .host_str()
+                    .is_some_and(|host| host.ends_with(".maas.aliyuncs.com"))
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "阿里云 Fun-ASR-Flash 仅接受 maas.aliyuncs.com 的 HTTPS Workspace 地址 / DashScope Fun-ASR-Flash requires an HTTPS Workspace URL on maas.aliyuncs.com"
+        );
+        return Ok(endpoint);
+    }
     let suffix = match api.mode {
         crate::settings::AsrApiMode::Transcriptions => "/audio/transcriptions",
         crate::settings::AsrApiMode::Chat => "/chat/completions",
+        crate::settings::AsrApiMode::DashscopeFunAsrFlash => unreachable!(),
     };
     let other = match api.mode {
         crate::settings::AsrApiMode::Transcriptions => "/chat/completions",
         crate::settings::AsrApiMode::Chat => "/audio/transcriptions",
+        crate::settings::AsrApiMode::DashscopeFunAsrFlash => unreachable!(),
     };
     anyhow::ensure!(
         !base.ends_with(other),
@@ -67,6 +94,15 @@ pub fn asr_api_key_from_env() -> Option<String> {
     std::env::var("COURSE2MD_ASR_API_KEY")
         .ok()
         .filter(|k| !k.trim().is_empty())
+}
+
+pub fn asr_api_key_from_env_for(mode: crate::settings::AsrApiMode) -> Option<String> {
+    asr_api_key_from_env().or_else(|| {
+        (mode == crate::settings::AsrApiMode::DashscopeFunAsrFlash)
+            .then(|| std::env::var("DASHSCOPE_API_KEY").ok())
+            .flatten()
+            .filter(|key| !key.trim().is_empty())
+    })
 }
 
 /// ASR 后端。typed enum 取代散落各处的字符串比较（`eq_ignore_ascii_case`）。
@@ -410,9 +446,9 @@ impl PipelineConfig {
             anyhow::ensure!(
                 !require_key
                     || !self.asr_api.api_key.trim().is_empty()
-                    || (allow_environment && asr_api_key_from_env().is_some()),
+                    || (allow_environment && asr_api_key_from_env_for(self.asr_api.mode).is_some()),
                 "provider api 需要 API key：配置文件 [asr_api].api_key、--asr-api-key \
-                 或环境变量 COURSE2MD_ASR_API_KEY。/ Cloud transcription requires an API key; set COURSE2MD_ASR_API_KEY or [asr_api].api_key."
+                 或相应环境变量。/ Cloud transcription requires an API key; set the protocol's environment variable or [asr_api].api_key."
             );
         }
 
@@ -761,6 +797,37 @@ mod tests {
     #[test]
     fn validate_accepts_defaults() {
         valid_cfg().validate().unwrap();
+    }
+
+    #[test]
+    fn dashscope_endpoint_uses_user_workspace_url() {
+        let mut api = crate::settings::AsrApi {
+            base_url: "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1".into(),
+            api_key: String::new(),
+            model: "future-fun-asr-flash".into(),
+            mode: crate::settings::AsrApiMode::DashscopeFunAsrFlash,
+        };
+        let endpoint = asr_endpoint(&api).unwrap();
+        assert_eq!(
+            endpoint,
+            "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        );
+        api.base_url = endpoint.clone();
+        assert_eq!(asr_endpoint(&api).unwrap(), endpoint);
+        api.base_url = "https://example.test/api/v1".into();
+        assert!(asr_endpoint(&api).is_err());
+        api.base_url = "http://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1".into();
+        assert!(asr_endpoint(&api).is_err());
+
+        let mut config = valid_cfg();
+        config.provider = AsrProvider::Api;
+        config.asr_api = crate::settings::AsrApi {
+            base_url: "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1".into(),
+            api_key: String::new(),
+            model: "future-fun-asr-flash".into(),
+            mode: crate::settings::AsrApiMode::DashscopeFunAsrFlash,
+        };
+        config.validate_asr_with_auth(false, false).unwrap();
     }
 
     #[test]
