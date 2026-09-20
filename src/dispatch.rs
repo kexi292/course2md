@@ -38,12 +38,40 @@ pub enum State {
     Rejected,
     Failed,
     Uncertain,
+    /// The logical unit was intentionally completed locally without a network call.
+    Skipped,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Attempt {
+    pub attempt: u32,
+    pub state: State,
+    pub request_id: String,
+    #[serde(default)]
+    pub http_status: Option<u16>,
+    #[serde(default)]
+    pub error_category: Option<String>,
+    #[serde(default)]
+    pub started_at: Option<String>,
+    #[serde(default)]
+    pub finished_at: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Receipt {
     pub schema: u32,
     pub stable_id: String,
+    /// Schema-2 name for stable_id. Kept separately so schema-1 receipts remain readable.
+    #[serde(default)]
+    pub logical_id: String,
+    #[serde(default)]
+    pub task_id: String,
+    #[serde(default)]
+    pub stage: String,
+    #[serde(default)]
+    pub segment_start: Option<f64>,
+    #[serde(default)]
+    pub segment_end: Option<f64>,
     pub request_id: String,
     pub purpose: String,
     #[serde(default)]
@@ -61,6 +89,9 @@ pub struct Receipt {
     /// Sending/uncertain attempts still require Control::resend authorization.
     #[serde(default)]
     pub retry_authorized: Option<String>,
+    /// Prior attempts are append-only; the top-level fields describe the latest attempt.
+    #[serde(default)]
+    pub attempts: Vec<Attempt>,
 }
 
 #[derive(Debug)]
@@ -259,7 +290,14 @@ fn read_receipts(dir: &Path) -> Result<Vec<Receipt>> {
     for entry in std::fs::read_dir(dir)? {
         let path = entry?.path();
         if path.extension().is_some_and(|e| e == "json") {
-            result.push(serde_json::from_slice(&std::fs::read(path)?).context("外部请求记录损坏；没有重新发送 / Request receipt is damaged; no request was resent")?);
+            let mut receipt: Receipt = serde_json::from_slice(&std::fs::read(path)?).context("外部请求记录损坏；没有重新发送 / Request receipt is damaged; no request was resent")?;
+            if receipt.logical_id.is_empty() {
+                receipt.logical_id = receipt.stable_id.clone();
+            }
+            if receipt.stage.is_empty() {
+                receipt.stage = receipt.purpose.clone();
+            }
+            result.push(receipt);
         }
     }
     Ok(result)
@@ -499,35 +537,17 @@ impl Ledger {
                 });
             }
         }
-        // An unknown prerequisite cannot be bypassed by splitting/relaxing the payload
-        // or by beginning downstream summary requests. Unrelated local work remains possible.
-        for unresolved in read_receipts(&self.dir).map_err(Failure::local)? {
-            if unresolved.stable_id != stable_id
-                && matches!(unresolved.state, State::Sending | State::Uncertain)
-                && !control.resend.contains(&unresolved.request_id)
-            {
-                // Live in-flight requests may run concurrently; only stale Sending from another
-                // process is unknown. A lock currently held in this context proves it is live.
-                let live = self
-                    .locks
-                    .lock()
-                    .map_err(Failure::local)?
-                    .get(&unresolved.stable_id)
-                    .cloned()
-                    .is_some_and(|lock| lock.try_lock().is_err());
-                if unresolved.state == State::Uncertain || !live {
-                    self.record(
-                        serde_json::json!({"type":"request_blocked", "stable_id":stable_id,
-                        "blocked_by":unresolved.request_id,"purpose":purpose}),
-                    );
-                    return Err(self.block("uncertain", Some(&unresolved), "前一步请求结果尚不确定；已保留进度，没有继续发送 / A previous request is unresolved; progress retained"));
-                }
-            }
-        }
+        // Unknown results belong to one logical unit. Pipeline dependency checks decide
+        // whether a downstream stage may start; unrelated units must keep running.
         let attempt = old.as_ref().map_or(1, |r| r.attempt + 1);
         let mut receipt = Receipt {
-            schema: 1,
+            schema: 2,
             stable_id: stable_id.clone(),
+            logical_id: stable_id.clone(),
+            task_id: String::new(),
+            stage: purpose.into(),
+            segment_start: None,
+            segment_end: None,
             request_id: format!("{stable_id}.{attempt}"),
             purpose: purpose.into(),
             description: description.into(),
@@ -539,6 +559,24 @@ impl Ledger {
             message: None,
             unsupported_response_format: false,
             retry_authorized: None,
+            attempts: old.as_ref().map_or_else(Vec::new, |previous| {
+                let mut attempts = previous.attempts.clone();
+                attempts.push(Attempt {
+                    attempt: previous.attempt,
+                    state: previous.state.clone(),
+                    request_id: previous.request_id.clone(),
+                    http_status: previous.http_status,
+                    error_category: previous.message.as_ref().map(|_| match &previous.state {
+                        State::Uncertain => "incomplete_response".into(),
+                        State::Failed => "failed".into(),
+                        State::Rejected => "rejected".into(),
+                        _ => "completed".into(),
+                    }),
+                    started_at: None,
+                    finished_at: None,
+                });
+                attempts
+            }),
         };
         // This durable write happens before the only call that can send network bytes.
         self.save(&receipt)?;
@@ -591,6 +629,18 @@ impl Ledger {
             });
         }
         if !(200..300).contains(&response.status) {
+            if response.status >= 500 {
+                receipt.state = State::Failed;
+                receipt.message = Some(rejection_message(response.status));
+                self.save(&receipt)?;
+                return Err(Failure {
+                    status: Some(response.status),
+                    retryable: true,
+                    uncertain: false,
+                    message: receipt.message.unwrap(),
+                    unsupported_response_format: false,
+                });
+            }
             receipt.state = State::Uncertain;
             self.save(&receipt)?;
             return Err(self.block("uncertain", Some(&receipt), "服务返回错误，无法确认是否已处理。再次提交可能产生额外费用 / Service processing is uncertain"));
