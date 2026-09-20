@@ -1488,6 +1488,7 @@ impl Desktop {
                             )
                         }),
                 )
+                .child(self.folder_export_button(id, cx))
             })
             .child(
                 SingleChoiceGroup::new("library-layout", "笔记显示方式")
@@ -1513,33 +1514,40 @@ impl Desktop {
                     ),
                 )
             });
-        h_flex()
+        v_flex()
             .w_full()
             .min_w_0()
-            .flex_wrap()
             .gap_2()
             .pb_4()
             .child(
-                div()
-                    .flex_1()
-                    .flex_basis(rems(10.))
+                h_flex()
+                    .w_full()
                     .min_w_0()
-                    .max_w_full()
+                    .flex_wrap()
+                    .gap_2()
                     .child(
-                        text_input(&self.inputs[&Field::Search])
-                            .aria_label("搜索笔记标题")
-                            .w_full()
-                            .border_color(color(CONTROL))
-                            .text_size(TEXT_BODY)
-                            .prefix(
-                                icons::search()
-                                    .size(rems(18. / 14.))
-                                    .text_color(color(GRAY)),
-                            )
-                            .cleanable(true),
-                    ),
+                        div()
+                            .flex_1()
+                            .flex_basis(rems(10.))
+                            .min_w_0()
+                            .max_w_full()
+                            .child(
+                                text_input(&self.inputs[&Field::Search])
+                                    .aria_label("搜索笔记标题")
+                                    .w_full()
+                                    .border_color(color(CONTROL))
+                                    .text_size(TEXT_BODY)
+                                    .prefix(
+                                        icons::search()
+                                            .size(rems(18. / 14.))
+                                            .text_color(color(GRAY)),
+                                    )
+                                    .cleanable(true),
+                            ),
+                    )
+                    .child(controls),
             )
-            .child(controls)
+            .children(self.folder_export_feedback(cx))
     }
 
     /// Source identity helps readers recognize a note; routine revision numbers

@@ -31,7 +31,16 @@ pub fn export(version_dir: &Path, format: OutputFormat, destination: &Path) -> R
 /// Write one published note as Markdown beside a shared `assets` directory.
 /// Existing assets with identical content are reused; no user file is overwritten.
 pub fn export_markdown(version_dir: &Path, destination: &Path) -> Result<PathBuf> {
-    let document = read_document(version_dir)?;
+    let manifest = artifact::read_manifest(&version_dir.join("manifest.json"))?;
+    let document: Document = serde_json::from_slice(&std::fs::read(artifact::safe_asset_path(
+        version_dir,
+        &manifest.document,
+    )?)?)
+    .context("笔记正文无法读取")?;
+    anyhow::ensure!(
+        document.schema == 1 && artifact::has_readable_body(&document.sections),
+        "笔记正文无法读取"
+    );
     write_markdown_document(version_dir, &document, destination)
 }
 

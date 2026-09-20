@@ -104,7 +104,7 @@ fn version_course(dir: &Path) -> Result<Course> {
     })
 }
 
-fn current_course(dir: &Path) -> Result<Course> {
+pub(crate) fn current_course(dir: &Path) -> Result<Course> {
     let load = || -> Result<Course> {
         let current: course2md::artifact::CurrentVersion =
             serde_json::from_slice(&std::fs::read(dir.join("current.json"))?)?;
