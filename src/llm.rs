@@ -77,6 +77,10 @@ pub struct LlmSettings {
     pub note_language: NoteLanguage,
     /// 润色并发数（chunk 间相互独立；自建网关/代理可调高）
     pub concurrency: usize,
+    /// 5xx 自动重试次数（含首次请求）。
+    pub retry_attempts: usize,
+    /// 5xx 重试退避基数；每次等待按 1x、2x、4x 增长。
+    pub retry_backoff_secs: u64,
 }
 
 impl Default for LlmSettings {
@@ -92,6 +96,8 @@ impl Default for LlmSettings {
             summarize: false,
             note_language: NoteLanguage::Source,
             concurrency: DEFAULT_CONCURRENCY,
+            retry_attempts: DEFAULT_RETRY_ATTEMPTS,
+            retry_backoff_secs: DEFAULT_RETRY_BACKOFF_SECS,
         }
     }
 }
@@ -110,6 +116,8 @@ pub struct TranslationSettings {
     pub api_key: String,
     pub model: String,
     pub concurrency: usize,
+    pub retry_attempts: usize,
+    pub retry_backoff_secs: u64,
 }
 
 impl Default for TranslationSettings {
@@ -120,6 +128,8 @@ impl Default for TranslationSettings {
             api_key: String::new(),
             model: String::new(),
             concurrency: DEFAULT_CONCURRENCY,
+            retry_attempts: DEFAULT_RETRY_ATTEMPTS,
+            retry_backoff_secs: DEFAULT_RETRY_BACKOFF_SECS,
         }
     }
 }
@@ -132,6 +142,8 @@ impl TranslationSettings {
             model: self.model.clone(),
             note_language: NoteLanguage::ZhHans,
             concurrency: self.concurrency,
+            retry_attempts: self.retry_attempts,
+            retry_backoff_secs: self.retry_backoff_secs,
             ..LlmSettings::default()
         }
     }
@@ -165,6 +177,17 @@ const DEFAULT_CONCURRENCY: usize = 8;
 const MAX_CONCURRENCY: usize = 16;
 /// LLM 请求最大尝试次数（1 次原始 + 重试）。
 const MAX_ATTEMPTS: usize = 3;
+const DEFAULT_RETRY_ATTEMPTS: usize = 3;
+const DEFAULT_RETRY_BACKOFF_SECS: u64 = 1;
+
+fn is_chinese_translation_skip(text: &str) -> bool {
+    let han = text
+        .chars()
+        .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+        .count();
+    let latin = text.chars().filter(|c| c.is_ascii_alphabetic()).count();
+    han >= 2 && han >= latin
+}
 
 /// 润色/总结共享的 HTTP agent：整个任务复用同一 TCP+TLS 连接池，
 /// 不再每请求新建（对照 asr.rs 的共享 client 模式）。
@@ -276,51 +299,67 @@ pub fn polish_sections_report(
     };
     let mut pending = Vec::new();
     let mut reused = 0;
+    let mut skipped = 0;
     for (si, sec) in sections.iter_mut().enumerate() {
-        for chunk in sec.speech.chunks_mut(BATCH) {
+        let batch = if stage == "translation" { 1 } else { BATCH };
+        for chunk in sec.speech.chunks_mut(batch) {
             crate::dispatch::check_control()?;
             let Some(image) = images[si].as_ref() else {
                 continue;
             };
-            let items: Vec<_> = chunk
-                .iter()
-                .enumerate()
-                .map(|(i, e)| (i, e.text.as_str()))
-                .collect();
-            let body = build_chat_body(s, &items, image.as_deref())?;
-            let mut cached =
-                crate::dispatch::cached_response(service, purpose, &endpoint(&s.base_url), &body)?;
-            if cached.is_none() {
-                let mut relaxed = body.clone();
-                relaxed.as_object_mut().unwrap().remove("response_format");
-                cached = crate::dispatch::cached_response(
+            if stage == "translation" && is_chinese_translation_skip(&chunk[0].text) {
+                skipped += chunk.len();
+                continue;
+            }
+            {
+                let items: Vec<_> = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| (i, e.text.as_str()))
+                    .collect();
+                let body = build_chat_body(s, &items, image.as_deref())?;
+                let mut cached = crate::dispatch::cached_response(
                     service,
                     purpose,
                     &endpoint(&s.base_url),
-                    &relaxed,
+                    &body,
                 )?;
-            }
-            if let Some(value) = cached {
-                validate_chat_response(&value, &body, purpose)?;
-                let parsed =
-                    parse_segments(value["choices"][0]["message"]["content"].as_str().unwrap())
-                        .unwrap();
-                if !apply_polish(chunk, &parsed, s.note_language) {
-                    reused += chunk.len();
+                if cached.is_none() {
+                    let mut relaxed = body.clone();
+                    relaxed.as_object_mut().unwrap().remove("response_format");
+                    cached = crate::dispatch::cached_response(
+                        service,
+                        purpose,
+                        &endpoint(&s.base_url),
+                        &relaxed,
+                    )?;
                 }
-            } else {
-                pending.push((si, chunk));
+                if let Some(value) = cached {
+                    validate_chat_response(&value, &body, purpose)?;
+                    let parsed = parse_segments(
+                        value["choices"][0]["message"]["content"]
+                            .as_str()
+                            .unwrap(),
+                    )
+                    .unwrap();
+                    if !apply_polish(chunk, &parsed, s.note_language) {
+                        reused += chunk.len();
+                    }
+                } else {
+                    pending.push((si, chunk));
+                }
             }
         }
     }
+    // Chinese-only translation segments stay unchanged and count as completed locally.
+    let pending_count = attempted.saturating_sub(reused + skipped);
     pb.set_position(reused as u64);
     pb.set_message(format!(
         "已复用 {reused} 段；待处理 {} 段 / Reused {reused} segments; {} pending",
-        attempted - reused,
-        attempted - reused
+        pending_count, pending_count
     ));
     let queue = std::sync::Mutex::new(pending.into_iter());
-    let succeeded = std::sync::atomic::AtomicUsize::new(reused);
+    let succeeded = std::sync::atomic::AtomicUsize::new(reused + skipped);
     let uncertain = std::sync::atomic::AtomicUsize::new(0);
     let aborted = std::sync::Mutex::new(None::<anyhow::Error>);
     std::thread::scope(|scope| {
@@ -849,13 +888,39 @@ fn request_chat_once(
         &url,
         body,
         || {
-            let request = agent.post(&url).set("Content-Type", "application/json");
-            let request = if s.api_key.is_empty() {
-                request
-            } else {
-                request.set("Authorization", &format!("Bearer {}", s.api_key))
-            };
-            crate::dispatch::receive(request.send_json(body))
+            let attempts = s.retry_attempts.clamp(1, 10);
+            let mut last = None;
+            for attempt in 1..=attempts {
+                let request = agent.post(&url).set("Content-Type", "application/json");
+                let request = if s.api_key.is_empty() {
+                    request
+                } else {
+                    request.set("Authorization", &format!("Bearer {}", s.api_key))
+                };
+                let response = crate::dispatch::receive(request.send_json(body))?;
+                if !(500..=599).contains(&response.status) || attempt == attempts {
+                    return Ok(response);
+                }
+                last = Some(response.status);
+                let wait = s
+                    .retry_backoff_secs
+                    .saturating_mul(1_u64 << (attempt.saturating_sub(1).min(6)));
+                tracing::warn!(attempt, of = attempts, status = response.status, ?wait, "LLM 服务暂时不可用，正在重试 / LLM service unavailable; retrying");
+                let mut slept = Duration::ZERO;
+                let delay = Duration::from_secs(wait);
+                while slept < delay {
+                    if let Err(error) = crate::dispatch::check_control() {
+                        return Err(crate::dispatch::NetworkFailure {
+                            message: error.to_string(),
+                            definitely_unsent: true,
+                        });
+                    }
+                    let step = (delay - slept).min(Duration::from_millis(200));
+                    std::thread::sleep(step);
+                    slept += step;
+                }
+            }
+            unreachable!("retry loop must return; last status: {last:?}")
         },
         |value| validate_chat_response(value, body, purpose),
     )
@@ -1238,6 +1303,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn translation_skips_chinese_segments() {
+        assert!(is_chinese_translation_skip("这是中文 API 说明"));
+        assert!(!is_chinese_translation_skip("The compiler parses tokens"));
+    }
+
     fn test_settings() -> LlmSettings {
         LlmSettings {
             enabled: true,
@@ -1250,6 +1321,8 @@ mod tests {
             summarize: false,
             note_language: NoteLanguage::Source,
             concurrency: 8,
+            retry_attempts: DEFAULT_RETRY_ATTEMPTS,
+            retry_backoff_secs: DEFAULT_RETRY_BACKOFF_SECS,
         }
     }
 

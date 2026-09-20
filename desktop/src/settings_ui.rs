@@ -1341,6 +1341,40 @@ impl Desktop {
                 window,
                 cx,
             ));
+        if value.needs_ai() {
+            ai = ai.child(settings_row(
+                "ai-retry-settings",
+                icons::refresh(),
+                "服务暂时不可用时重试",
+                "仅对 5xx 响应生效；窗口耗尽后仍会保留待确认状态。",
+                v_flex()
+                    .gap_2()
+                    .child(
+                        self.setting_choices("ai-retry-attempts", "自动重试次数")
+                            .options([("1", "不自动重试"), ("3", "3 次"), ("5", "5 次"), ("7", "7 次")])
+                            .selected(value.ai_retry_attempts.to_string())
+                            .on_change(cx.listener(|this, selected: &SharedString, _, cx| {
+                                if let Ok(attempts) = selected.parse() {
+                                    let mut next = this.generation_edit_base();
+                                    next.ai_retry_attempts = attempts;
+                                    this.commit_generation(next, cx);
+                                }
+                            })),
+                    )
+                    .child(
+                        self.setting_choices("ai-retry-backoff", "首次等待")
+                            .options([("0", "立即"), ("1", "1 秒"), ("2", "2 秒"), ("5", "5 秒")])
+                            .selected(value.ai_retry_backoff_secs.to_string())
+                            .on_change(cx.listener(|this, selected: &SharedString, _, cx| {
+                                if let Ok(seconds) = selected.parse() {
+                                    let mut next = this.generation_edit_base();
+                                    next.ai_retry_backoff_secs = seconds;
+                                    this.commit_generation(next, cx);
+                                }
+                            })),
+                    ),
+            ));
+        }
         let selected = value.options.formats.clone().unwrap_or_default();
         v_flex()
             .w_full()
