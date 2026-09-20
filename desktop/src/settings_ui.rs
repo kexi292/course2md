@@ -398,6 +398,7 @@ fn service_protocol_label(protocol: ServiceProtocol) -> &'static str {
     match protocol {
         ServiceProtocol::SpeechTranscriptions => "语音转录",
         ServiceProtocol::SpeechChat => "音频对话",
+        ServiceProtocol::SpeechDashscopeFunAsrFlash => "阿里云 Fun-ASR-Flash",
         ServiceProtocol::AiChat => "AI 对话",
     }
 }
@@ -2684,6 +2685,7 @@ impl Desktop {
                                 [
                                     ServiceProtocol::SpeechTranscriptions,
                                     ServiceProtocol::SpeechChat,
+                                    ServiceProtocol::SpeechDashscopeFunAsrFlash,
                                     ServiceProtocol::AiChat,
                                 ]
                                 .into_iter()
@@ -2694,10 +2696,11 @@ impl Desktop {
                             )
                             .selected(protocol.label())
                             .disabled(awaiting_binding)
-                            .on_change(cx.listener(move |this, selected: &SharedString, _, cx| {
+                            .on_change(cx.listener(move |this, selected: &SharedString, window, cx| {
                                 let Some(candidate) = [
                                     ServiceProtocol::SpeechTranscriptions,
                                     ServiceProtocol::SpeechChat,
+                                    ServiceProtocol::SpeechDashscopeFunAsrFlash,
                                     ServiceProtocol::AiChat,
                                 ]
                                 .into_iter()
@@ -2705,11 +2708,29 @@ impl Desktop {
                                     return;
                                 };
                                 if let Some(editor) = &mut this.settings_ui.editor {
-                                    editor.draft.protocol = candidate;
+                                    editor.draft.select_protocol(candidate);
                                     editor.models.invalidate();
                                     editor.errors.clear();
                                     editor.evidence = None;
                                     editor.saved_configuration = None;
+                                }
+                                if candidate == ServiceProtocol::SpeechDashscopeFunAsrFlash
+                                    && this.settings_ui.inputs[&EditField::Model]
+                                        .read(cx)
+                                        .value()
+                                        .trim()
+                                        .is_empty()
+                                {
+                                    this.settings_ui.inputs[&EditField::Model].update(
+                                        cx,
+                                        |input, cx| {
+                                            input.set_value(
+                                                "fun-asr-flash-2026-06-15",
+                                                window,
+                                                cx,
+                                            )
+                                        },
+                                    );
                                 }
                                 cx.notify();
                             })),
@@ -2717,6 +2738,15 @@ impl Desktop {
             )
             })
             .child(self.setting_field(EditField::Address, "服务地址", cx));
+        if protocol == ServiceProtocol::SpeechDashscopeFunAsrFlash {
+            view = view.child(
+                theme::supporting_info(
+                    "service-dashscope-address-help",
+                    "填写包含 Workspace ID 和地域的完整服务地址，例如 https://WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/api/v1。",
+                )
+                .text_size(TEXT_AUX),
+            );
+        }
         let address = self.setting_value(EditField::Address, cx);
         if let Ok(endpoint) = preferences::normalize_endpoint(&address, protocol)
             && endpoint != address.trim()
@@ -2763,7 +2793,7 @@ impl Desktop {
         if auth == Authentication::ApiKey {
             view = view.child(self.setting_field(EditField::Key, "API Key", cx));
             for (index, name) in
-                preferences::Store::available_environment_credentials(protocol.purpose())
+                preferences::Store::available_environment_credentials(protocol)
                     .into_iter()
                     .enumerate()
             {

@@ -269,13 +269,16 @@ pub enum ServicePurpose {
 pub enum ServiceProtocol {
     SpeechTranscriptions,
     SpeechChat,
+    SpeechDashscopeFunAsrFlash,
     AiChat,
 }
 
 impl ServiceProtocol {
     pub fn purpose(self) -> ServicePurpose {
         match self {
-            Self::SpeechTranscriptions | Self::SpeechChat => ServicePurpose::Speech,
+            Self::SpeechTranscriptions
+            | Self::SpeechChat
+            | Self::SpeechDashscopeFunAsrFlash => ServicePurpose::Speech,
             Self::AiChat => ServicePurpose::Ai,
         }
     }
@@ -284,6 +287,7 @@ impl ServiceProtocol {
         match self {
             Self::SpeechTranscriptions => "语音转录（/audio/transcriptions）",
             Self::SpeechChat => "音频聊天（/chat/completions）",
+            Self::SpeechDashscopeFunAsrFlash => "阿里云 Fun-ASR-Flash",
             Self::AiChat => "AI 聊天（/chat/completions）",
         }
     }
@@ -292,6 +296,9 @@ impl ServiceProtocol {
         match self {
             Self::SpeechTranscriptions => "/audio/transcriptions",
             Self::SpeechChat | Self::AiChat => "/chat/completions",
+            Self::SpeechDashscopeFunAsrFlash => {
+                "/services/aigc/multimodal-generation/generation"
+            }
         }
     }
 }
@@ -356,6 +363,13 @@ impl ServiceDraft {
         }
     }
 
+    pub fn select_protocol(&mut self, protocol: ServiceProtocol) {
+        self.protocol = protocol;
+        if protocol == ServiceProtocol::SpeechDashscopeFunAsrFlash && self.model.trim().is_empty() {
+            self.model = "fun-asr-flash-2026-06-15".into();
+        }
+    }
+
     pub fn validate(&self) -> Vec<FieldError> {
         let mut errors = Vec::new();
         if let Err(error) = normalize_endpoint(&self.address, self.protocol) {
@@ -375,7 +389,14 @@ impl ServiceDraft {
                 message: "模型 ID 不能包含换行或控制字符".into(),
             });
         }
-        if self.authentication == Authentication::ApiKey && self.credential.is_none() {
+        if self.protocol == ServiceProtocol::SpeechDashscopeFunAsrFlash
+            && self.authentication != Authentication::ApiKey
+        {
+            errors.push(FieldError {
+                field: "api_key",
+                message: "阿里云 Fun-ASR-Flash 需要 API Key".into(),
+            });
+        } else if self.authentication == Authentication::ApiKey && self.credential.is_none() {
             errors.push(FieldError {
                 field: "api_key",
                 message: "此认证方式需要 API Key".into(),
@@ -718,10 +739,15 @@ impl Store {
     pub fn vault(&self) -> Arc<dyn CredentialVault> {
         Arc::clone(&self.vault)
     }
-    pub fn available_environment_credentials(purpose: ServicePurpose) -> Vec<&'static str> {
-        let names: &[&str] = match purpose {
-            ServicePurpose::Speech => &["COURSE2MD_ASR_API_KEY", "OPENROUTER_API_KEY"],
-            ServicePurpose::Ai => &["OPENAI_API_KEY", "OPENROUTER_API_KEY"],
+    pub fn available_environment_credentials(protocol: ServiceProtocol) -> Vec<&'static str> {
+        let names: &[&str] = match protocol {
+            ServiceProtocol::SpeechDashscopeFunAsrFlash => {
+                &["COURSE2MD_ASR_API_KEY", "DASHSCOPE_API_KEY"]
+            }
+            ServiceProtocol::SpeechTranscriptions | ServiceProtocol::SpeechChat => {
+                &["COURSE2MD_ASR_API_KEY", "OPENROUTER_API_KEY"]
+            }
+            ServiceProtocol::AiChat => &["OPENAI_API_KEY", "OPENROUTER_API_KEY"],
         };
         names
             .iter()
@@ -741,7 +767,7 @@ impl Store {
         mut draft: ServiceDraft,
         name: &str,
     ) -> Result<ServiceDraft> {
-        if !Self::available_environment_credentials(draft.protocol.purpose()).contains(&name) {
+        if !Self::available_environment_credentials(draft.protocol).contains(&name) {
             bail!("这个环境变量当前没有可用的凭据，请重新选择或填写 API Key");
         }
         let value = Secret::new(std::env::var(name).map_err(|_| anyhow!("无法读取所选环境变量"))?);
@@ -1324,7 +1350,11 @@ impl Store {
             config.asr_api.model = version.config.model.clone();
             config.asr_api.mode = match version.config.protocol {
                 ServiceProtocol::SpeechTranscriptions => AsrApiMode::Transcriptions,
-                _ => AsrApiMode::Chat,
+                ServiceProtocol::SpeechChat => AsrApiMode::Chat,
+                ServiceProtocol::SpeechDashscopeFunAsrFlash => {
+                    AsrApiMode::DashscopeFunAsrFlash
+                }
+                ServiceProtocol::AiChat => unreachable!(),
             };
         }
         if base.llm.needs_service() {
@@ -1737,13 +1767,28 @@ pub fn normalize_endpoint(address: &str, protocol: ServiceProtocol) -> Result<St
     {
         bail!("服务地址不能包含账号、密码、查询参数或片段；请通过认证字段保存凭据");
     }
+    if protocol == ServiceProtocol::SpeechDashscopeFunAsrFlash
+        && (url.scheme() != "https"
+            || !url
+                .host_str()
+                .is_some_and(|host| host.ends_with(".maas.aliyuncs.com")))
+    {
+        bail!("阿里云 Fun-ASR-Flash 需要完整的 HTTPS Workspace 服务地址");
+    }
     let path = url.path().trim_end_matches('/');
     let desired = protocol.endpoint_suffix();
+    if protocol == ServiceProtocol::SpeechDashscopeFunAsrFlash
+        && path != "/api/v1"
+        && !path.ends_with(desired)
+    {
+        bail!("请填写以 /api/v1 结尾的 Workspace 服务根地址或完整 generation 地址");
+    }
     for known in [
         "/audio/transcriptions",
         "/chat/completions",
         "/responses",
         "/completions",
+        "/services/aigc/multimodal-generation/generation",
     ] {
         if path.ends_with(known) && !path.ends_with(desired) {
             bail!("此完整地址与所选接口类型不一致，请更换接口类型或填写对应的服务地址");
@@ -2113,6 +2158,31 @@ mod tests {
             )
             .is_err()
         );
+        assert_eq!(
+            normalize_endpoint(
+                "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1",
+                ServiceProtocol::SpeechDashscopeFunAsrFlash
+            )
+            .unwrap(),
+            "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation"
+        );
+        assert!(
+            normalize_endpoint(
+                "https://example.test/api/v1",
+                ServiceProtocol::SpeechDashscopeFunAsrFlash
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn selecting_dashscope_prefills_only_an_empty_model() {
+        let mut draft = ServiceDraft::new(ServicePurpose::Speech);
+        draft.select_protocol(ServiceProtocol::SpeechDashscopeFunAsrFlash);
+        assert_eq!(draft.model, "fun-asr-flash-2026-06-15");
+        draft.model = "future-model".into();
+        draft.select_protocol(ServiceProtocol::SpeechDashscopeFunAsrFlash);
+        assert_eq!(draft.model, "future-model");
     }
 
     #[test]

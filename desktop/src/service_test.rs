@@ -54,7 +54,9 @@ impl TestKind {
         match self {
             Self::Speech => matches!(
                 protocol,
-                ServiceProtocol::SpeechTranscriptions | ServiceProtocol::SpeechChat
+                ServiceProtocol::SpeechTranscriptions
+                    | ServiceProtocol::SpeechChat
+                    | ServiceProtocol::SpeechDashscopeFunAsrFlash
             ),
             _ => protocol == ServiceProtocol::AiChat,
         }
@@ -115,6 +117,7 @@ struct HttpRequest {
     content_type: String,
     body: Vec<u8>,
     authorization: Option<Secret>,
+    dashscope: bool,
 }
 
 struct HttpResponse {
@@ -146,6 +149,11 @@ impl Transport for HttpTransport {
             .post(&request.endpoint)
             .set("Content-Type", &request.content_type);
         let call = crate::bounded_http::json_call(call, request.authorization.as_ref());
+        let call = if request.dashscope {
+            call.set("X-DashScope-SSE", "disable")
+        } else {
+            call
+        };
         // A nonempty POST body is non-retryable in ureq 2. Each test creates a fresh agent,
         // so a recycled connection cannot trigger a hidden resend either.
         let response = match call.send_bytes(&request.body) {
@@ -181,6 +189,7 @@ fn run_test(
         message: String::new(),
         details: vec![
             format!("用途：{}；内置样例语言：英语", kind.label()),
+            format!("接口类型：{}", config.protocol.label()),
             format!("请求模型：{}", config.model),
         ],
     };
@@ -222,6 +231,7 @@ fn run_test(
         content_type,
         body,
         authorization,
+        dashscope: config.protocol == ServiceProtocol::SpeechDashscopeFunAsrFlash,
     };
     if cancelled.load(Ordering::Acquire) {
         evidence.message = "测试已取消，尚未发送请求".into();
@@ -264,6 +274,7 @@ fn run_test(
                 value
                     .pointer("/error/code")
                     .or_else(|| value.pointer("/error/type"))
+                    .or_else(|| value.get("code"))
             })
             .and_then(Value::as_str)
             .unwrap_or_default()
@@ -304,11 +315,15 @@ fn run_test(
         evidence.message = "已收到回应，但返回内容不是所选接口需要的 JSON".into();
         return evidence;
     };
-    let content = if config.protocol == ServiceProtocol::SpeechTranscriptions {
-        json.get("text").and_then(Value::as_str)
-    } else {
-        json.pointer("/choices/0/message/content")
-            .and_then(Value::as_str)
+    let content = match config.protocol {
+        ServiceProtocol::SpeechTranscriptions => json.get("text").and_then(Value::as_str),
+        ServiceProtocol::SpeechDashscopeFunAsrFlash => json
+            .pointer("/output/text")
+            .or_else(|| json.pointer("/output/output/sentence/text"))
+            .and_then(Value::as_str),
+        ServiceProtocol::SpeechChat | ServiceProtocol::AiChat => json
+            .pointer("/choices/0/message/content")
+            .and_then(Value::as_str),
     };
     let Some(content) = content.filter(|content| !content.trim().is_empty()) else {
         evidence.outcome = TestOutcome::ContractMismatch;
@@ -352,6 +367,23 @@ fn request_body(config: &ServiceConfiguration, kind: TestKind) -> (String, Vec<u
         body.extend_from_slice(SPEECH_SAMPLE);
         body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
         return (format!("multipart/form-data; boundary={boundary}"), body);
+    }
+    if config.protocol == ServiceProtocol::SpeechDashscopeFunAsrFlash {
+        return (
+            "application/json".into(),
+            serde_json::to_vec(&json!({
+                "model": config.model,
+                "input": {"messages": [{"role": "user", "content": [{
+                    "type": "input_audio",
+                    "input_audio": {"data": format!(
+                        "data:audio/wav;base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(SPEECH_SAMPLE)
+                    )}
+                }]}]},
+                "parameters": {"format": "wav", "sample_rate": "16000"}
+            }))
+            .expect("sample is serializable"),
+        );
     }
     let (system, user) = match kind {
         TestKind::Speech => (
@@ -775,5 +807,55 @@ mod tests {
         assert!(SPEECH_SAMPLE.starts_with(b"RIFF"));
         assert!(SPEECH_SAMPLE.len() > 16000);
         assert!(BLUE_CARD.starts_with(b"\x89PNG"));
+    }
+
+    #[test]
+    fn dashscope_speech_test_uses_data_url_header_and_response_contract() {
+        use std::sync::Mutex;
+        struct Capture {
+            request: Mutex<Option<(bool, Vec<u8>)>>,
+        }
+        impl Transport for Capture {
+            fn send(&self, request: &HttpRequest) -> Result<HttpResponse, TransportFailure> {
+                *self.request.lock().unwrap() = Some((request.dashscope, request.body.clone()));
+                Ok(HttpResponse {
+                    status: 200,
+                    body: serde_json::to_vec(&json!({
+                        "output": {"output": {"sentence": {"text": "The blue notebook contains seven pages."}}}
+                    }))
+                    .unwrap(),
+                })
+            }
+        }
+        let config = ServiceConfiguration {
+            name: "DashScope".into(),
+            protocol: ServiceProtocol::SpeechDashscopeFunAsrFlash,
+            endpoint: "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation".into(),
+            model: "fun-asr-flash-2026-06-15".into(),
+            authentication: Authentication::None,
+            credential: None,
+            credential_source: None,
+        };
+        let capture = Capture {
+            request: Mutex::new(None),
+        };
+        let evidence = run_test(
+            &config,
+            TestKind::Speech,
+            &MemoryCredentialVault::new(),
+            &AtomicBool::new(false),
+            &capture,
+        );
+        assert_eq!(evidence.outcome, TestOutcome::Passed);
+        let (dashscope, bytes) = capture.request.lock().unwrap().take().unwrap();
+        assert!(dashscope);
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let data = body["input"]["messages"][0]["content"][0]["input_audio"]["data"]
+            .as_str()
+            .unwrap();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(data.strip_prefix("data:audio/wav;base64,").unwrap())
+            .unwrap();
+        assert_eq!(decoded, SPEECH_SAMPLE);
     }
 }
