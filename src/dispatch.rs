@@ -585,24 +585,9 @@ impl Ledger {
             message: None,
             unsupported_response_format: false,
             retry_authorized: None,
-            attempts: old.as_ref().map_or_else(Vec::new, |previous| {
-                let mut attempts = previous.attempts.clone();
-                attempts.push(Attempt {
-                    attempt: previous.attempt,
-                    state: previous.state.clone(),
-                    request_id: previous.request_id.clone(),
-                    http_status: previous.http_status,
-                    error_category: previous.message.as_ref().map(|_| match &previous.state {
-                        State::Uncertain => "incomplete_response".into(),
-                        State::Failed => "failed".into(),
-                        State::Rejected => "rejected".into(),
-                        _ => "completed".into(),
-                    }),
-                    started_at: None,
-                    finished_at: None,
-                });
-                attempts
-            }),
+            attempts: old
+                .as_ref()
+                .map_or_else(Vec::new, |previous| previous.attempts.clone()),
         };
         // This durable write happens before the only call that can send network bytes.
         self.save(&receipt)?;
