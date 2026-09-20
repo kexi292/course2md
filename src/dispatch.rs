@@ -467,7 +467,10 @@ impl Ledger {
                     && receipt.retry_authorized.as_ref() == Some(&receipt.request_id))
         });
         if let Some(old) = &old {
-            if matches!(old.state, State::Sending | State::Uncertain) && !authorized {
+            if matches!(old.state, State::Sending | State::Uncertain)
+                && !authorized
+                && !(old.state == State::Uncertain && old.attempt == 1)
+            {
                 let mut uncertain = old.clone();
                 uncertain.state = State::Uncertain;
                 self.save(&uncertain)?;
@@ -557,7 +560,15 @@ impl Ledger {
                 receipt.state = State::Uncertain;
                 receipt.message = Some(error.message);
                 self.save(&receipt)?;
-                return Err(self.block("uncertain", Some(&receipt), "未收到服务的确定结果。服务可能已处理这部分，再次提交可能产生额外费用 / Service result is uncertain; resending may incur additional charges"));
+                let mut failure = self.block(
+                    "uncertain",
+                    Some(&receipt),
+                    "未收到服务的确定结果。服务可能已处理这部分；将自动重试一次 / Service result is uncertain; one automatic retry will be attempted",
+                );
+                // A single bounded retry recovers transient response loss. A second
+                // uncertain attempt remains manual-only to avoid an unbounded duplicate.
+                failure.retryable = receipt.attempt == 1;
+                return Err(failure);
             }
         };
         receipt.http_status = Some(response.status);
@@ -918,7 +929,20 @@ mod tests {
                 )
                 .is_err()
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert!(
+            ledger
+                .send(
+                    "asr",
+                    "transcription",
+                    "https://example.test",
+                    &payload,
+                    || panic!("third uncertain attempt must be manual-only"),
+                    |_| Ok(())
+                )
+                .unwrap_err()
+                .uncertain
+        );
         atomic_write(
             &control,
             &serde_json::to_vec(&Control {
