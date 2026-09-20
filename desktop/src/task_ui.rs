@@ -1749,6 +1749,27 @@ impl Desktop {
         cx.notify();
     }
 
+    fn resend_stage(&mut self, id: String, stage: &'static str, cx: &mut Context<Self>) {
+        let Some(task) = self.workspace.as_ref().and_then(|w| w.state.task(&id)).cloned() else {
+            return;
+        };
+        let requests: Vec<_> = task
+            .blocked
+            .iter()
+            .filter(|b| b.reason == "uncertain")
+            .filter(|b| match stage {
+                "proofreading" => b.purpose.as_deref().is_some_and(|p| p == "proofreading" || p == "llm"),
+                "translation" => b.purpose.as_deref() == Some("translation"),
+                "summary" => b.purpose.as_deref().is_some_and(|p| p == "summary" || p == "summarize"),
+                _ => false,
+            })
+            .filter_map(|b| b.request_id.clone())
+            .collect();
+        if !requests.is_empty() {
+            self.reprocess_task(id, vec![stage.to_owned()], requests, cx);
+        }
+    }
+
     pub fn reprocess_task(
         &mut self,
         id: String,
@@ -3052,17 +3073,23 @@ impl Desktop {
                         "正在保存当前结果，完成后可以选择重新发送。",
                     ))
                 })
-                .child(
-                    primary_pill(SharedString::from(format!("resend-{id}")))
-                        .self_start()
-                        .icon(icons::refresh())
-                        .label("重新发送以上内容")
+                .children(["proofreading", "translation", "summary"].into_iter().filter_map(|stage| {
+                    let requests: Vec<_> = uncertain.iter().filter(|blocked| match stage {
+                        "proofreading" => blocked.purpose.as_deref().is_some_and(|p| p == "proofreading" || p == "llm"),
+                        "translation" => blocked.purpose.as_deref() == Some("translation"),
+                        _ => blocked.purpose.as_deref().is_some_and(|p| p == "summary" || p == "summarize"),
+                    }).filter_map(|blocked| blocked.request_id.as_ref()).collect();
+                    if requests.is_empty() { return None; }
+                    let label = match stage { "proofreading" => "仅补充校对", "translation" => "仅补充翻译", _ => "仅补充摘要" };
+                    Some(primary_pill(SharedString::from(format!("resend-{id}-{stage}")))
+                        .self_start().icon(icons::refresh()).label(format!("{label}（{} 个结果待确认）", requests.len()))
                         .disabled(active)
-                        .on_click(cx.listener({
-                            let id = id.clone();
-                            move |this, _, _, cx| this.resend_uncertain(id.clone(), cx)
-                        })),
-                ),
+                        .on_click(cx.listener({ let id = id.clone(); move |this, _, _, cx| this.resend_stage(id.clone(), stage, cx) })))
+                }))
+                .child(primary_pill(SharedString::from(format!("resend-all-{id}")))
+                    .self_start().icon(icons::refresh()).label("高级：重新发送全部待确认内容")
+                    .disabled(active)
+                    .on_click(cx.listener({ let id = id.clone(); move |this, _, _, cx| this.resend_uncertain(id.clone(), cx) }))),
         )
     }
 
@@ -4312,6 +4339,9 @@ mod tests {
             message: Some("部分校对请求尚未完成".into()),
             completed: Some(1),
             total: Some(2),
+            failed: Some(1),
+            uncertain: Some(0),
+            skipped: Some(0),
         };
         outcomes.exports.insert("md".into(), Outcome::succeeded());
         outcomes

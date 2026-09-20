@@ -33,6 +33,12 @@ pub struct Outcome {
     pub completed: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uncertain: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<usize>,
 }
 impl Outcome {
     pub fn succeeded() -> Self {
@@ -41,6 +47,9 @@ impl Outcome {
             message: None,
             completed: None,
             total: None,
+            failed: None,
+            uncertain: None,
+            skipped: None,
         }
     }
     pub fn not_requested() -> Self {

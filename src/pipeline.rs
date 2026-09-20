@@ -798,11 +798,14 @@ async fn run_prepared(
             outcomes.transcript = if completed.is_empty() {
                 Outcome::failed(format!("{error:#}"))
             } else {
-                Outcome {
-                    status: Status::Partial,
+            Outcome {
+                status: Status::Partial,
                     message: Some(format!("{error:#}")),
                     completed: Some(completed.len()),
                     total: None,
+                    failed: None,
+                    uncertain: None,
+                    skipped: None,
                 }
             };
             save_materials(cfg, &frames, &completed, &outcomes)?;
@@ -848,7 +851,23 @@ async fn run_prepared(
     }
     crate::dispatch::check_control()?;
     let summary = if cfg.llm.summarize {
-        summarize_step(cfg, &sections, meta, &mut outcomes).await?
+        if outcomes.proofreading.uncertain.unwrap_or_default() > 0 {
+            outcomes.summary = Outcome {
+                status: Status::Partial,
+                message: Some("校对存在结果未知，摘要等待确认 / Summary waits for proofreading authorization".into()),
+                completed: Some(0),
+                total: Some(1),
+                failed: Some(0),
+                uncertain: Some(1),
+                skipped: Some(0),
+            };
+            crate::dispatch::record_diagnostic(serde_json::json!({
+                "type":"stage_blocked", "stage":"summary", "blocked_by":"proofreading_uncertain"
+            }));
+            None
+        } else {
+            summarize_step(cfg, &sections, meta, &mut outcomes).await?
+        }
     } else {
         None
     };
@@ -1070,8 +1089,11 @@ impl Outcome {
                     .into()
             })
             },
-            completed: Some(report.succeeded),
+            completed: Some(report.completed),
             total: Some(report.attempted),
+            failed: Some(report.failed),
+            uncertain: Some(report.uncertain),
+            skipped: Some(report.skipped),
         }
     }
 }

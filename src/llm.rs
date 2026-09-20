@@ -229,11 +229,15 @@ pub(crate) fn chat_body(
 pub struct PolishReport {
     pub attempted: usize,
     pub succeeded: usize,
+    #[serde(default)]
+    pub completed: usize,
     pub failed: usize,
     #[serde(default)]
     pub uncertain: usize,
     #[serde(default)]
     pub reused: usize,
+    #[serde(default)]
+    pub skipped: usize,
 }
 
 /// 对已合并的 Section 做润色（在 merge 之后调用）。
@@ -365,6 +369,7 @@ pub fn polish_sections_report(
     ));
     let queue = std::sync::Mutex::new(pending.into_iter());
     let succeeded = std::sync::atomic::AtomicUsize::new(reused + skipped);
+    let completed = std::sync::atomic::AtomicUsize::new(reused);
     let uncertain = std::sync::atomic::AtomicUsize::new(0);
     let aborted = std::sync::Mutex::new(None::<anyhow::Error>);
     std::thread::scope(|scope| {
@@ -387,6 +392,7 @@ pub fn polish_sections_report(
                             let (count, unknown) =
                                 polish_chunk(&agent, s, chunk, image_b64.as_deref(), &warned);
                             succeeded.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
+                            completed.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
                             uncertain.fetch_add(unknown, std::sync::atomic::Ordering::Relaxed);
                             pb.inc(count as u64);
                         }
@@ -406,19 +412,22 @@ pub fn polish_sections_report(
         sec.speech.retain(|e| !e.text.trim().is_empty());
     }
     let succeeded = succeeded.load(std::sync::atomic::Ordering::Relaxed);
+    let completed = completed.load(std::sync::atomic::Ordering::Relaxed);
     let uncertain = uncertain.load(std::sync::atomic::Ordering::Relaxed);
     crate::dispatch::record_diagnostic(serde_json::json!({"type":"ai_stage_result",
         "purpose":purpose,"attempted":attempted,"succeeded":succeeded,
-        "failed":attempted.saturating_sub(succeeded + uncertain),
+        "completed":completed,"failed":attempted.saturating_sub(succeeded + uncertain),
         "uncertain":uncertain,"reused":reused,"local_skipped":skipped}));
-    pb.set_message(format!("已复用 {reused} 段；本次完成 {} 段；待确认 {uncertain} 段 / Reused {reused}; newly completed {}; uncertain {uncertain} segments", succeeded - reused, succeeded - reused));
+    pb.set_message(format!("已复用 {reused} 段；本次完成 {} 段；本地跳过 {skipped} 段；待确认 {uncertain} 段 / Reused {reused}; newly completed {}; locally skipped {skipped}; uncertain {uncertain} segments", succeeded - reused, succeeded - reused));
     pb.finish();
     Ok(PolishReport {
         attempted,
         succeeded,
+        completed,
         failed: attempted.saturating_sub(succeeded + uncertain),
         uncertain,
         reused,
+        skipped,
     })
 }
 

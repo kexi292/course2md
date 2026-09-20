@@ -423,9 +423,35 @@ impl Ledger {
         Ok(control)
     }
     fn save(&self, receipt: &Receipt) -> std::result::Result<(), Failure> {
+        let mut persisted = receipt.clone();
+        if let Some(attempt) = persisted
+            .attempts
+            .iter_mut()
+            .find(|attempt| attempt.request_id == receipt.request_id)
+        {
+            attempt.state = receipt.state.clone();
+            attempt.http_status = receipt.http_status;
+            attempt.error_category = receipt.message.as_ref().map(|_| match &receipt.state {
+                State::Uncertain => "incomplete_response".into(),
+                State::Failed => "failed".into(),
+                State::Rejected => "rejected".into(),
+                State::Skipped => "skipped".into(),
+                _ => "completed".into(),
+            });
+        } else {
+            persisted.attempts.push(Attempt {
+                attempt: receipt.attempt,
+                state: receipt.state.clone(),
+                request_id: receipt.request_id.clone(),
+                http_status: receipt.http_status,
+                error_category: None,
+                started_at: None,
+                finished_at: None,
+            });
+        }
         atomic_write(
             &self.dir.join(format!("{}.json", receipt.stable_id)),
-            &serde_json::to_vec_pretty(receipt).map_err(Failure::local)?,
+            &serde_json::to_vec_pretty(&persisted).map_err(Failure::local)?,
         )
         .map_err(Failure::local)?;
         self.record(
@@ -605,7 +631,14 @@ impl Ledger {
                 );
                 // A single bounded retry recovers transient response loss. A second
                 // uncertain attempt remains manual-only to avoid an unbounded duplicate.
-                failure.retryable = receipt.attempt == 1;
+                failure.retryable = matches!(
+                    crate::ai_state::retry_decision(
+                        crate::ai_state::AttemptState::Uncertain,
+                        receipt.attempt,
+                        false,
+                    ),
+                    crate::ai_state::RetryDecision::Automatic
+                );
                 return Err(failure);
             }
         };
