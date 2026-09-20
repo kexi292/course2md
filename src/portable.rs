@@ -24,13 +24,34 @@ pub fn file_name(format: OutputFormat) -> &'static str {
 /// Exact destination, with no overwrite. UI may explicitly confirm replacing a separate
 /// exported file, but must never mutate the immutable note version itself.
 pub fn export(version_dir: &Path, format: OutputFormat, destination: &Path) -> Result<PathBuf> {
+    let document = read_document(version_dir)?;
+    write_document(version_dir, &document, format, destination)
+}
+
+/// Write one published note as Markdown beside a shared `assets` directory.
+/// Existing assets with identical content are reused; no user file is overwritten.
+pub fn export_markdown(version_dir: &Path, destination: &Path) -> Result<PathBuf> {
     let manifest = artifact::read_manifest(&version_dir.join("manifest.json"))?;
-    artifact::validate_version(version_dir, &manifest)?;
     let document: Document = serde_json::from_slice(&std::fs::read(artifact::safe_asset_path(
         version_dir,
         &manifest.document,
-    )?)?)?;
-    write_document(version_dir, &document, format, destination)
+    )?)?)
+    .context("笔记正文无法读取")?;
+    anyhow::ensure!(
+        document.schema == 1 && artifact::has_readable_body(&document.sections),
+        "笔记正文无法读取"
+    );
+    write_markdown_document(version_dir, &document, destination)
+}
+
+fn read_document(version_dir: &Path) -> Result<Document> {
+    let manifest = artifact::read_manifest(&version_dir.join("manifest.json"))?;
+    artifact::validate_version(version_dir, &manifest)?;
+    serde_json::from_slice(&std::fs::read(artifact::safe_asset_path(
+        version_dir,
+        &manifest.document,
+    )?)?)
+    .context("笔记正文无法读取")
 }
 
 struct ImageAsset {
@@ -55,7 +76,11 @@ fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-fn images(root: &Path, document: &Document) -> Result<BTreeMap<String, ImageAsset>> {
+fn images(
+    root: &Path,
+    document: &Document,
+    directory: &str,
+) -> Result<BTreeMap<String, ImageAsset>> {
     let mut images = BTreeMap::new();
     for section in document.sections.iter().filter(|s| !s.image.is_empty()) {
         if images.contains_key(&section.image) {
@@ -75,7 +100,7 @@ fn images(root: &Path, document: &Document) -> Result<BTreeMap<String, ImageAsse
         images.insert(
             section.image.clone(),
             ImageAsset {
-                path: format!("images/{id}.{ext}"),
+                path: format!("{directory}/{id}.{ext}"),
                 id,
                 mime,
                 bytes,
@@ -103,7 +128,7 @@ pub(crate) fn write_document(
         .unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)?;
     let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    let images = images(root, document)?;
+    let images = images(root, document, "images")?;
     let mut portable = document.clone();
     let local_file = if portable.meta.extractor == "local" {
         let name = Path::new(&portable.meta.webpage_url)
@@ -176,6 +201,107 @@ pub(crate) fn write_document(
     Ok(destination.to_path_buf())
 }
 
+pub(crate) fn write_markdown_document(
+    root: &Path,
+    document: &Document,
+    destination: &Path,
+) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !destination.exists(),
+        "导出位置已有文件，未覆盖：{} / Export destination already exists",
+        destination.display()
+    );
+    let parent = destination
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let images = images(root, document, "assets")?;
+    let mut portable = document.clone();
+    let local_file = if portable.meta.extractor == "local" {
+        let name = Path::new(&portable.meta.webpage_url)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        portable.meta.webpage_url.clear();
+        name
+    } else {
+        None
+    };
+    for section in &mut portable.sections {
+        if let Some(image) = images.get(&section.image) {
+            section.image = image.path.clone();
+        }
+    }
+    let mut text = render::render_markdown(&portable.meta, &portable.sections);
+    if let Some(summary) = &portable.summary {
+        text = crate::summarize::insert_into_md(&text, summary);
+    }
+    if let Some(name) = local_file {
+        text.push_str(&format!("\n源文件：{}\n", name.replace(['\r', '\n'], " ")));
+    }
+
+    if !images.is_empty() {
+        let assets = parent.join("assets");
+        std::fs::create_dir_all(&assets)?;
+        for image in images.values() {
+            let target = parent.join(&image.path);
+            if target.exists() {
+                anyhow::ensure!(
+                    std::fs::read(&target)? == image.bytes,
+                    "共享图片摘要冲突，未覆盖已有文件"
+                );
+                continue;
+            }
+            let mut file = tempfile::NamedTempFile::new_in(&assets)?;
+            file.write_all(&image.bytes)?;
+            file.as_file().sync_all()?;
+            file.persist_noclobber(&target)
+                .with_context(|| "无法写入共享图片，未覆盖已有文件")?;
+        }
+        artifact::sync_dir(&assets)?;
+    }
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(text.as_bytes())?;
+    file.as_file().sync_all()?;
+    file.persist_noclobber(destination)
+        .with_context(|| "无法保存 Markdown，未覆盖已有文件")?;
+    artifact::sync_dir(parent)?;
+    Ok(destination.to_path_buf())
+}
+
+/// Export-only component handling. Storage identities intentionally keep using
+/// the existing shared sanitizer without Windows device-name rewriting.
+pub fn export_component(name: &str, fallback: &str) -> String {
+    let name = crate::config::sanitize_filename_with_fallback(name, fallback);
+    let device = name.split('.').next().unwrap_or_default();
+    let reserved = matches!(
+        device.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    );
+    if reserved { format!("_{name}") } else { name }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,5 +369,52 @@ mod tests {
         std::fs::write(&existing, "user content").unwrap();
         assert!(write_document(root.path(), &document, OutputFormat::Html, &existing).is_err());
         assert_eq!(std::fs::read_to_string(existing).unwrap(), "user content");
+    }
+
+    #[test]
+    fn markdown_files_share_hashed_assets_and_export_names_avoid_devices() {
+        use crate::{
+            fetch::VideoMeta,
+            timeline::{Section, TranscriptEvent},
+        };
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        std::fs::create_dir_all(source.join("frames")).unwrap();
+        image::RgbImage::from_pixel(2, 2, image::Rgb([20, 80, 180]))
+            .save(source.join("frames/a.png"))
+            .unwrap();
+        let document = Document {
+            schema: 1,
+            meta: VideoMeta {
+                title: "title".into(),
+                uploader: String::new(),
+                duration: 1.,
+                webpage_url: String::new(),
+                extractor: "web".into(),
+                id: "source".into(),
+            },
+            sections: vec![Section {
+                t: 0.,
+                end: 1.,
+                image: "frames/a.png".into(),
+                speech: vec![TranscriptEvent {
+                    start: 0.,
+                    end: 1.,
+                    text: "Actual note".into(),
+                    raw: None,
+                    translation: None,
+                }],
+            }],
+            summary: None,
+        };
+        let output = root.path().join("output");
+        write_markdown_document(&source, &document, &output.join("One.md")).unwrap();
+        write_markdown_document(&source, &document, &output.join("Two.md")).unwrap();
+        assert_eq!(std::fs::read_dir(output.join("assets")).unwrap().count(), 1);
+        let markdown = std::fs::read_to_string(output.join("One.md")).unwrap();
+        assert!(markdown.contains("assets/image-"));
+        assert_eq!(export_component("CON", "未命名笔记"), "_CON");
+        assert_eq!(export_component("<> ", "未命名笔记"), "未命名笔记");
+        assert!(write_markdown_document(&source, &document, &output.join("One.md")).is_err());
     }
 }

@@ -943,8 +943,10 @@ impl State {
                 .filter_map(|request| request.request_id.clone())
                 .collect();
             let selected: BTreeSet<_> = resend.iter().cloned().collect();
-            ensure!(!unknown.is_empty() && selected.is_subset(&unknown),
-                "待确认请求已变化，请查看最新范围后再选择是否重新发送");
+            ensure!(
+                !unknown.is_empty() && selected == unknown,
+                "待确认请求已变化，请查看最新范围后再选择是否重新发送"
+            );
             ensure!(
                 !stage_unknown.is_empty() && stage_unknown == selected,
                 "待确认请求已变化，请查看最新范围后再选择是否重新发送"

@@ -9,6 +9,7 @@ mod bounded_http;
 mod course_library;
 mod credentials;
 mod focus_scroll;
+mod folder_export;
 // Icon helpers ship ahead of the pages that reference them (M3+); same staged
 // token allowance as the theme module.
 #[allow(dead_code)]
@@ -261,6 +262,7 @@ struct Desktop {
     folder_saving: bool,
     folder_error: Option<String>,
     delete_folder: Option<u64>,
+    folder_export: folder_export::State,
     page: Page,
     result_origin: Page,
     settings_origin: Option<Page>,
@@ -615,6 +617,7 @@ impl Desktop {
             folder_saving: false,
             folder_error: None,
             delete_folder: None,
+            folder_export: Default::default(),
             result_origin: Page::Library,
             settings_origin: None,
             settings_return_focus: None,

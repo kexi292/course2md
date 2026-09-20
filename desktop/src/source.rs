@@ -551,16 +551,11 @@ fn inspect_local(input: String, cancel: &AtomicBool) -> Result<Source> {
     );
     let mut source = Source {
         input,
-        title: meta["format"]["tags"]["title"]
-            .as_str()
-            .filter(|title| !title.trim().is_empty())
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                path.file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned()
-            }),
+        title: path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
         author: ["artist", "author"]
             .iter()
             .find_map(|key| {
@@ -1101,7 +1096,7 @@ mod tests {
         )
         .unwrap();
         let source = inspect(path.display().to_string(), false, cancel.clone()).unwrap();
-        assert_eq!(source.title, "Local lecture");
+        assert_eq!(source.title, "Lecture");
         assert!(source.author.is_empty());
         assert!(source.duration > 0.);
         let cover = source.cover.unwrap();
