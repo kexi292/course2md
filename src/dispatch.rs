@@ -153,6 +153,7 @@ pub struct NetworkFailure {
 }
 
 struct Ledger {
+    diagnostics: Option<crate::diagnostics::Journal>,
     dir: PathBuf,
     control_path: Option<PathBuf>,
     service_versions: BTreeMap<String, String>,
@@ -166,9 +167,32 @@ fn active() -> Option<Arc<Ledger>> {
 pub fn is_active() -> bool {
     active().is_some()
 }
+
+pub(crate) fn record_diagnostic(event: Value) {
+    if let Some(ledger) = active() {
+        ledger.record(event);
+    }
+}
+
+pub(crate) fn record_request_diagnostic(
+    service: &str,
+    purpose: &str,
+    endpoint: &str,
+    payload: &Value,
+    mut event: Value,
+) {
+    if let Some(ledger) = active()
+        && let Ok((id, _)) = ledger.identity(service, purpose, endpoint, payload)
+    {
+        event["stable_id"] = id.into();
+        event["purpose"] = purpose.into();
+        ledger.record(event);
+    }
+}
 pub struct Guard(Arc<Ledger>);
 impl Drop for Guard {
     fn drop(&mut self) {
+        self.0.record(serde_json::json!({"type":"round_closed"}));
         // 锁中毒也要清掉当前 guard：否则 install 会一直报「同一进程不能同时执行两个任务」
         let mut current = ACTIVE
             .get_or_init(|| Mutex::new(None))
@@ -275,6 +299,15 @@ impl Ledger {
         let dir = work_dir.join("requests");
         std::fs::create_dir_all(&dir)?;
         Ok(Self {
+            diagnostics: match crate::diagnostics::Journal::new(work_dir) {
+                Ok(journal) => Some(journal),
+                Err(_) => {
+                    tracing::warn!(
+                        "AI diagnostic log could not be created; task processing continues"
+                    );
+                    None
+                }
+            },
             dir,
             control_path: control_path.map(Path::to_path_buf),
             service_versions: versions.clone(),
@@ -290,6 +323,8 @@ impl Ledger {
         }
     }
     fn block(&self, reason: &str, request: Option<&Receipt>, message: &str) -> Failure {
+        self.record(serde_json::json!({"type":"blocked", "reason":reason,
+            "request_id":request.map(|r| &r.request_id)}));
         let request_id = request.map(|r| r.request_id.clone());
         let message = request.filter(|r| !r.description.is_empty()).map_or_else(
             || message.to_string(),
@@ -354,7 +389,19 @@ impl Ledger {
             &self.dir.join(format!("{}.json", receipt.stable_id)),
             &serde_json::to_vec_pretty(receipt).map_err(Failure::local)?,
         )
-        .map_err(Failure::local)
+        .map_err(Failure::local)?;
+        self.record(
+            serde_json::json!({"type":"receipt", "stable_id":receipt.stable_id,
+            "request_id":receipt.request_id, "purpose":receipt.purpose,
+            "attempt":receipt.attempt, "state":receipt.state, "http_status":receipt.http_status}),
+        );
+        Ok(())
+    }
+
+    fn record(&self, event: Value) {
+        if let Some(journal) = &self.diagnostics {
+            journal.record(event);
+        }
     }
     #[cfg(test)]
     fn send(
@@ -466,6 +513,10 @@ impl Ledger {
                     .cloned()
                     .is_some_and(|lock| lock.try_lock().is_err());
                 if unresolved.state == State::Uncertain || !live {
+                    self.record(
+                        serde_json::json!({"type":"request_blocked", "stable_id":stable_id,
+                        "blocked_by":unresolved.request_id,"purpose":purpose}),
+                    );
                     return Err(self.block("uncertain", Some(&unresolved), "前一步请求结果尚不确定；已保留进度，没有继续发送 / A previous request is unresolved; progress retained"));
                 }
             }

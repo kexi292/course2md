@@ -333,7 +333,11 @@ pub async fn run(request: Request) -> Result<()> {
         &request.service_versions,
     )?;
     // No settings::load, environment credential resolution or wizard on this path.
-    crate::pipeline::run_task(&request, &cfg).await
+    let result = crate::pipeline::run_task(&request, &cfg).await;
+    crate::dispatch::record_diagnostic(
+        serde_json::json!({"type":"run_result", "ok":result.is_ok()}),
+    );
+    result
 }
 
 /// Call only while all writers are paused and the library copy has been verified.

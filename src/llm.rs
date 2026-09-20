@@ -300,15 +300,22 @@ pub fn polish_sections_report(
     let mut pending = Vec::new();
     let mut reused = 0;
     let mut skipped = 0;
+    crate::dispatch::record_diagnostic(serde_json::json!({"type":"ai_stage_start",
+        "purpose":purpose,"segments":attempted,"workers":workers,
+        "batch_size":if stage == "translation" {1} else {BATCH},
+        "vision":s.vision,"http_timeout_secs":300,
+        "retry_attempts":s.retry_attempts.clamp(1,10),"retry_backoff_secs":s.retry_backoff_secs}));
     for (si, sec) in sections.iter_mut().enumerate() {
         let batch = if stage == "translation" { 1 } else { BATCH };
         for chunk in sec.speech.chunks_mut(batch) {
             crate::dispatch::check_control()?;
             let Some(image) = images[si].as_ref() else {
+                record_chunk(purpose, chunk, "image_unavailable");
                 continue;
             };
             if stage == "translation" && is_chinese_translation_skip(&chunk[0].text) {
                 skipped += chunk.len();
+                record_chunk(purpose, chunk, "local_language_skip");
                 continue;
             }
             {
@@ -336,14 +343,12 @@ pub fn polish_sections_report(
                 }
                 if let Some(value) = cached {
                     validate_chat_response(&value, &body, purpose)?;
-                    let parsed = parse_segments(
-                        value["choices"][0]["message"]["content"]
-                            .as_str()
-                            .unwrap(),
-                    )
-                    .unwrap();
+                    let parsed =
+                        parse_segments(value["choices"][0]["message"]["content"].as_str().unwrap())
+                            .unwrap();
                     if !apply_polish(chunk, &parsed, s.note_language) {
                         reused += chunk.len();
+                        record_chunk(purpose, chunk, "reused");
                     }
                 } else {
                     pending.push((si, chunk));
@@ -353,7 +358,7 @@ pub fn polish_sections_report(
     }
     // Chinese-only translation segments stay unchanged and count as completed locally.
     let pending_count = attempted.saturating_sub(reused + skipped);
-    pb.set_position(reused as u64);
+    pb.set_position((reused + skipped) as u64);
     pb.set_message(format!(
         "已复用 {reused} 段；待处理 {} 段 / Reused {reused} segments; {} pending",
         pending_count, pending_count
@@ -402,6 +407,10 @@ pub fn polish_sections_report(
     }
     let succeeded = succeeded.load(std::sync::atomic::Ordering::Relaxed);
     let uncertain = uncertain.load(std::sync::atomic::Ordering::Relaxed);
+    crate::dispatch::record_diagnostic(serde_json::json!({"type":"ai_stage_result",
+        "purpose":purpose,"attempted":attempted,"succeeded":succeeded,
+        "failed":attempted.saturating_sub(succeeded + uncertain),
+        "uncertain":uncertain,"reused":reused,"local_skipped":skipped}));
     pb.set_message(format!("已复用 {reused} 段；本次完成 {} 段；待确认 {uncertain} 段 / Reused {reused}; newly completed {}; uncertain {uncertain} segments", succeeded - reused, succeeded - reused));
     pb.finish();
     Ok(PolishReport {
@@ -466,6 +475,12 @@ fn polish_chunk(
         .enumerate()
         .map(|(i, e)| (i, e.text.as_str()))
         .collect();
+    let purpose = if s.note_language == NoteLanguage::ZhHans {
+        "translation"
+    } else {
+        "proofreading"
+    };
+    record_chunk(purpose, chunk, "processing");
     let action = if s.note_language == NoteLanguage::ZhHans {
         "翻译"
     } else {
@@ -480,12 +495,14 @@ fn polish_chunk(
         Ok(polished) => {
             let mismatched = apply_polish(chunk, &polished, s.note_language);
             if mismatched {
+                record_chunk(purpose, chunk, "segment_mismatch");
                 warn_once(
                     warned,
                     "润色结果与原文段落不匹配，保留原文 / Polished segments do not match the input; keeping original text",
                 );
                 (0, 0)
             } else {
+                record_chunk(purpose, chunk, "completed");
                 (chunk.len(), 0)
             }
         }
@@ -499,9 +516,25 @@ fn polish_chunk(
             let uncertain = error
                 .downcast_ref::<crate::dispatch::Failure>()
                 .is_some_and(|failure| failure.uncertain);
+            record_chunk(
+                purpose,
+                chunk,
+                if uncertain {
+                    "uncertain_or_blocked"
+                } else {
+                    "failed"
+                },
+            );
             (0, if uncertain { chunk.len() } else { 0 })
         }
     }
+}
+
+fn record_chunk(purpose: &str, chunk: &[TranscriptEvent], state: &str) {
+    crate::dispatch::record_diagnostic(serde_json::json!({"type":"chunk", "purpose":purpose,
+        "state":state,"segments":chunk.len(),"start_secs":chunk.first().map(|e|e.start),
+        "end_secs":chunk.last().map(|e|e.end),
+        "input_chars":chunk.iter().map(|e|e.text.chars().count()).sum::<usize>()}));
 }
 
 /// 润色结果的 id 集恰好覆盖 0..expected（无缺失/重复/越界）的判定。
@@ -881,6 +914,15 @@ fn request_chat_once(
     } else {
         "llm"
     };
+    let request_started = std::time::Instant::now();
+    crate::dispatch::record_request_diagnostic(
+        service,
+        purpose,
+        &url,
+        body,
+        serde_json::json!({"type":"chat_start", "description":description,
+            "request_bytes":serde_json::to_vec(body).map_or(0, |bytes|bytes.len())}),
+    );
     crate::dispatch::json_request_described(
         service,
         purpose,
@@ -897,7 +939,15 @@ fn request_chat_once(
                 } else {
                     request.set("Authorization", &format!("Bearer {}", s.api_key))
                 };
-                let response = crate::dispatch::receive(request.send_json(body))?;
+                let started = std::time::Instant::now();
+                let result = crate::dispatch::receive(request.send_json(body));
+                crate::dispatch::record_request_diagnostic(service, purpose, &url, body,
+                    serde_json::json!({"type":"http_attempt", "attempt":attempt,
+                        "duration_ms":started.elapsed().as_millis(),
+                        "status":result.as_ref().ok().map(|r|r.status),
+                        "response_bytes":result.as_ref().ok().map(|r|r.body.len()),
+                        "definitely_unsent":result.as_ref().err().map(|e|e.definitely_unsent)}));
+                let response = result?;
                 if !(500..=599).contains(&response.status) || attempt == attempts {
                     return Ok(response);
                 }
@@ -905,6 +955,8 @@ fn request_chat_once(
                 let wait = s
                     .retry_backoff_secs
                     .saturating_mul(1_u64 << (attempt.saturating_sub(1).min(6)));
+                crate::dispatch::record_request_diagnostic(service, purpose, &url, body,
+                    serde_json::json!({"type":"http_retry", "attempt":attempt,"status":response.status,"wait_secs":wait}));
                 tracing::warn!(attempt, of = attempts, status = response.status, ?wait, "LLM 服务暂时不可用，正在重试 / LLM service unavailable; retrying");
                 let mut slept = Duration::ZERO;
                 let delay = Duration::from_secs(wait);
@@ -922,11 +974,32 @@ fn request_chat_once(
             }
             unreachable!("retry loop must return; last status: {last:?}")
         },
-        |value| validate_chat_response(value, body, purpose),
+        |value| {
+            let result = validate_chat_response(value, body, purpose);
+            let finish_reason = match value["choices"][0]["finish_reason"].as_str() {
+                Some(reason @ ("stop" | "length" | "content_filter" | "tool_calls" | "function_call")) => reason,
+                Some(_) => "other",
+                None => "missing",
+            };
+            crate::dispatch::record_request_diagnostic(service, purpose, &url, body,
+                serde_json::json!({"type":"chat_validation", "valid":result.is_ok(),
+                    "duration_ms":request_started.elapsed().as_millis(),"finish_reason":finish_reason,
+                    "completion_tokens":value["usage"]["completion_tokens"].as_u64(),
+                    "prompt_tokens":value["usage"]["prompt_tokens"].as_u64(),
+                    "content_chars":value["choices"][0]["message"]["content"].as_str().map(|s|s.chars().count()),
+                    "validation_error":result.as_ref().err().map(ToString::to_string)}));
+            result
+        },
     )
-    .map_err(|failure| ChatFailure {
-        retryable: failure.retryable,
-        err: anyhow::Error::new(failure),
+    .map_err(|failure| {
+        crate::dispatch::record_request_diagnostic(service, purpose, &url, body,
+            serde_json::json!({"type":"chat_failure", "status":failure.status,
+                "uncertain":failure.uncertain,"retryable":failure.retryable,
+                "duration_ms":request_started.elapsed().as_millis()}));
+        ChatFailure {
+            retryable: failure.retryable,
+            err: anyhow::Error::new(failure),
+        }
     })
 }
 

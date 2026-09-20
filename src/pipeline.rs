@@ -1036,6 +1036,10 @@ async fn polish_with_rollback(
     .await
     .context("AI 正文处理工作进程中断 / Text processing worker interrupted")??;
     if !artifact::has_readable_body(&sections) {
+        crate::dispatch::record_diagnostic(
+            serde_json::json!({"type":"body_rollback", "translation":translation,
+            "reason":"no_readable_body"}),
+        );
         sections = original;
         report.succeeded = 0;
         report.failed = report.attempted.saturating_sub(report.uncertain);
