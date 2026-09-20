@@ -21,7 +21,7 @@ pub(crate) async fn run_cmd(cmd: &mut Command, what: &str) -> Result<std::proces
     Ok(out)
 }
 
-/// 抽取 16kHz 单声道 s16 wav。已存在则跳过。
+/// 抽取并归一化为 16kHz 单声道 s16 wav。已存在则跳过。
 pub async fn extract_audio(media: &Path, dest: &Path) -> Result<()> {
     if dest.is_file() {
         tracing::info!(path = %dest.display(), "audio exists, skip extract");
@@ -38,7 +38,17 @@ pub async fn extract_audio(media: &Path, dest: &Path) -> Result<()> {
             .args(["-hide_banner", "-loglevel", "error", "-y"])
             .arg("-i")
             .arg(media)
-            .args(["-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+            .args([
+                "-vn",
+                "-af",
+                "loudnorm=I=-16:TP=-1.5:LRA=11",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+            ])
             .arg(temporary.path()),
         "ffmpeg",
     )
