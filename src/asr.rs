@@ -93,12 +93,7 @@ pub async fn run(cfg: &PipelineConfig, wav: &std::path::Path) -> Result<Vec<Tran
         let max_speech = effective_api_max_speech(cfg.asr_api.mode, cfg.max_speech);
         let endpoint = crate::config::asr_endpoint(&cfg.asr_api)?;
         // Endpoint, protocol and effective chunk boundaries all affect reusable output.
-        let model_id = format!(
-            "{}:{}:{}",
-            endpoint,
-            cfg.asr_api.mode,
-            cfg.asr_api.model
-        );
+        let model_id = format!("{}:{}:{}", endpoint, cfg.asr_api.mode, cfg.asr_api.model);
         let id = AsrIdentity::new("api", &model_id, max_speech);
         let api = cfg.asr_api.clone();
         let wav = wav.to_path_buf();
@@ -583,7 +578,10 @@ fn post_bytes_retry(
                     status: Some(response.status),
                     retryable: response.status == 429 || response.status >= 500,
                     uncertain: false,
-                    message: format!("本机识别请求失败（HTTP {0}） / Local transcription request failed (HTTP {0})", response.status),
+                    message: format!(
+                        "本机识别请求失败（HTTP {0}） / Local transcription request failed (HTTP {0})",
+                        response.status
+                    ),
                     unsupported_response_format: false,
                 }),
                 Err(error) => Err(crate::dispatch::Failure {
@@ -764,9 +762,7 @@ fn validate_api_response(
             chat_content_has_text(value),
             "语音服务响应缺少文字，不能当作静音 / Speech response is missing text"
         ),
-        crate::settings::AsrApiMode::DashscopeFunAsrFlash => {
-            dashscope_text(value).map(|_| ())?
-        }
+        crate::settings::AsrApiMode::DashscopeFunAsrFlash => dashscope_text(value).map(|_| ())?,
     }
     Ok(())
 }
@@ -832,9 +828,12 @@ pub fn gpu_devices(bin: &Path) -> Result<Vec<String>> {
         .stdout(stdout.try_clone()?)
         .stderr(stderr);
     let mut child = crate::runtime::ManagedChild::spawn("llama-server", &mut cmd)?;
-    let status = child
-        .wait_within(Duration::from_secs(15))
-        .map_err(|_| anyhow::anyhow!("llama-server GPU 检测超时 / llama-server GPU detection timed out. {}", GPU_SETUP_HINT))?;
+    let status = child.wait_within(Duration::from_secs(15)).map_err(|_| {
+        anyhow::anyhow!(
+            "llama-server GPU 检测超时 / llama-server GPU detection timed out. {}",
+            GPU_SETUP_HINT
+        )
+    })?;
     anyhow::ensure!(
         status.success(),
         "llama-server --list-devices 执行失败，请更新 llama.cpp 并检查驱动 / llama-server --list-devices failed; update llama.cpp and check the driver. {}",
@@ -1052,19 +1051,28 @@ fn transcribe_file(client: &ureq::Agent, base: &str, wav: &Path) -> Result<Strin
     let choice = &v["choices"][0];
     if choice.is_null() {
         // 协议错误才失败：响应缺少 choices
-        anyhow::bail!("本地识别响应缺少 choices / Local transcription response missing choices: {v}");
+        anyhow::bail!(
+            "本地识别响应缺少 choices / Local transcription response missing choices: {v}"
+        );
     }
     // 空文本按无语音处理（与云端 transcribe_api 的 Ok(None) 同语义）：
     // VAD 切出的近静音段在 llama-server 上常返回空，不该把整次 ASR 判死
-    Ok(choice["message"]["content"].as_str().unwrap_or("").to_string())
+    Ok(choice["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string())
 }
 
 pub(crate) fn ffmpeg_vad(wav: &Path, max_speech: f32) -> Result<Vec<Seg>> {
     // stdin 关闭 + 超时强制 kill：ffmpeg 在 GUI/管道 stdin 上可能挂死（issue 审查）
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-hide_banner", "-nostdin", "-i"])
-        .arg(wav)
-        .args(["-af", SILENCEDETECT_AF, "-f", "null", "-"]);
+    cmd.args(["-hide_banner", "-nostdin", "-i"]).arg(wav).args([
+        "-af",
+        SILENCEDETECT_AF,
+        "-f",
+        "null",
+        "-",
+    ]);
     let out = crate::runtime::run_bounded("ffmpeg", &mut cmd, VAD_TIMEOUT)?;
     if !out.status.success() {
         anyhow::bail!(
@@ -1343,14 +1351,21 @@ fn invert_silence(dur: f64, sil: &[(f64, f64)]) -> Vec<(f64, f64)> {
 pub fn cut_wav(src: &Path, start: f64, end: f64, dest: &Path) -> Result<()> {
     let dur = (end - start).max(0.05);
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss"])
-        .arg(format!("{start:.3}"))
-        .arg("-t")
-        .arg(format!("{dur:.3}"))
-        .arg("-i")
-        .arg(src)
-        .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
-        .arg(dest);
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+    ])
+    .arg(format!("{start:.3}"))
+    .arg("-t")
+    .arg(format!("{dur:.3}"))
+    .arg("-i")
+    .arg(src)
+    .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+    .arg(dest);
     let out = crate::runtime::run_bounded("ffmpeg", &mut cmd, CUT_TIMEOUT)?;
     if !out.status.success() {
         anyhow::bail!("无法切分音频 / ffmpeg could not split audio");
@@ -1374,7 +1389,13 @@ mod tests {
         let devices = super::parse_gpu_devices("Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n  MTL0: Apple M3 Max (110100 MiB, 110100 MiB free)\n").unwrap();
         assert_eq!(devices.len(), 1);
         assert!(devices[0].contains("Apple M3 Max"));
-        assert!(super::parse_gpu_devices("Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n").unwrap().is_empty());
+        assert!(
+            super::parse_gpu_devices(
+                "Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n"
+            )
+            .unwrap()
+            .is_empty()
+        );
         assert!(super::parse_gpu_devices("unknown option --list-devices").is_err());
     }
 
@@ -1444,15 +1465,15 @@ mod tests {
             " first "
         );
         assert_eq!(
-            dashscope_text(&serde_json::json!({"output":{"output":{"sentence":{"text":"second"}}}})).unwrap(),
+            dashscope_text(
+                &serde_json::json!({"output":{"output":{"sentence":{"text":"second"}}}})
+            )
+            .unwrap(),
             "second"
         );
         assert!(dashscope_text(&serde_json::json!({"output":{}})).is_err());
         assert_eq!(
-            effective_api_max_speech(
-                crate::settings::AsrApiMode::DashscopeFunAsrFlash,
-                600.0
-            ),
+            effective_api_max_speech(crate::settings::AsrApiMode::DashscopeFunAsrFlash, 600.0),
             225.0
         );
     }

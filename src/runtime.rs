@@ -141,7 +141,11 @@ pub struct BoundedOutput {
 
 /// 短命令执行：stdin 关闭（ffmpeg 等工具在 GUI/管道 stdin 上会挂死）、
 /// 超时强制 kill（ManagedChild 兜底）、输出经临时文件捕获（防 pipe 写满再超时）。
-pub fn run_bounded(name: &'static str, cmd: &mut Command, timeout: Duration) -> Result<BoundedOutput> {
+pub fn run_bounded(
+    name: &'static str,
+    cmd: &mut Command,
+    timeout: Duration,
+) -> Result<BoundedOutput> {
     use std::io::{Read, Seek};
     let mut stdout = tempfile::tempfile()?;
     let mut stderr = tempfile::tempfile()?;

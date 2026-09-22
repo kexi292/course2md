@@ -90,7 +90,10 @@ fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             // 向导的「退出，稍后下载」是正常结束，不是失败
-            if error.downcast_ref::<course2md::wizard::ExitWizard>().is_some() {
+            if error
+                .downcast_ref::<course2md::wizard::ExitWizard>()
+                .is_some()
+            {
                 return std::process::ExitCode::SUCCESS;
             }
             let message = format!("{error:#}");

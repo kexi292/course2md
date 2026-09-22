@@ -798,8 +798,8 @@ async fn run_prepared(
             outcomes.transcript = if completed.is_empty() {
                 Outcome::failed(format!("{error:#}"))
             } else {
-            Outcome {
-                status: Status::Partial,
+                Outcome {
+                    status: Status::Partial,
                     message: Some(format!("{error:#}")),
                     completed: Some(completed.len()),
                     total: None,
@@ -854,7 +854,10 @@ async fn run_prepared(
         if outcomes.proofreading.uncertain.unwrap_or_default() > 0 {
             outcomes.summary = Outcome {
                 status: Status::Partial,
-                message: Some("校对存在结果未知，摘要等待确认 / Summary waits for proofreading authorization".into()),
+                message: Some(
+                    "校对存在结果未知，摘要等待确认 / Summary waits for proofreading authorization"
+                        .into(),
+                ),
                 completed: Some(0),
                 total: Some(1),
                 failed: Some(0),

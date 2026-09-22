@@ -420,7 +420,9 @@ fn safe_tensor(path: &Path) -> bool {
         let mut header = vec![0; size as usize];
         file.read_exact(&mut header)?;
         let value: serde_json::Value = serde_json::from_slice(&header)?;
-        let tensors = value.as_object().context("权重索引无效 / Invalid weight index")?;
+        let tensors = value
+            .as_object()
+            .context("权重索引无效 / Invalid weight index")?;
         let mut count = 0;
         for (key, tensor) in tensors {
             if key == "__metadata__" {
@@ -451,14 +453,12 @@ fn files_under(root: &Path) -> Result<Vec<PathBuf>> {
     let mut seen = BTreeSet::new();
     let mut result = Vec::new();
     while let Some(path) = queue.pop() {
-        let canonical = path
-            .canonicalize()
-            .with_context(|| {
-                format!(
-                    "无法读取模型缓存 / Cannot read the model cache: {}",
-                    path.display()
-                )
-            })?;
+        let canonical = path.canonicalize().with_context(|| {
+            format!(
+                "无法读取模型缓存 / Cannot read the model cache: {}",
+                path.display()
+            )
+        })?;
         if !seen.insert(canonical) {
             continue;
         }
@@ -469,7 +469,10 @@ fn files_under(root: &Path) -> Result<Vec<PathBuf>> {
         } else if path.is_file() {
             result.push(path);
         }
-        ensure!(seen.len() < 20_000, "模型缓存包含过多文件，检查未完成 / Model cache contains too many files; check incomplete");
+        ensure!(
+            seen.len() < 20_000,
+            "模型缓存包含过多文件，检查未完成 / Model cache contains too many files; check incomplete"
+        );
     }
     result.sort();
     Ok(result)
