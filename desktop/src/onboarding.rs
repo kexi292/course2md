@@ -1663,24 +1663,49 @@ impl Desktop {
                         icons::cloud(),
                         SingleChoiceGroup::new("setup-speech-protocol", "语音接口类型")
                             .full_width()
-                            .options([("transcriptions", "语音转录"), ("chat", "音频聊天")])
+                            .options([
+                                ("transcriptions", "语音转录"),
+                                ("chat", "音频聊天"),
+                                ("dashscope", "阿里云 Fun-ASR-Flash"),
+                            ])
                             .selected(
-                                if service.draft.protocol
-                                    == preferences::ServiceProtocol::SpeechChat
-                                {
-                                    "chat"
-                                } else {
-                                    "transcriptions"
+                                match service.draft.protocol {
+                                    preferences::ServiceProtocol::SpeechChat => "chat",
+                                    preferences::ServiceProtocol::SpeechDashscopeFunAsrFlash => {
+                                        "dashscope"
+                                    }
+                                    _ => "transcriptions",
                                 },
                             )
                             .disabled(busy)
-                            .on_change(cx.listener(|this, value: &SharedString, _, cx| {
-                                this.onboarding.speech.draft.protocol = if value.as_ref() == "chat"
-                                {
-                                    preferences::ServiceProtocol::SpeechChat
-                                } else {
-                                    preferences::ServiceProtocol::SpeechTranscriptions
+                            .on_change(cx.listener(|this, value: &SharedString, window, cx| {
+                                let protocol = match value.as_ref() {
+                                    "chat" => preferences::ServiceProtocol::SpeechChat,
+                                    "dashscope" => {
+                                        preferences::ServiceProtocol::SpeechDashscopeFunAsrFlash
+                                    }
+                                    _ => preferences::ServiceProtocol::SpeechTranscriptions,
                                 };
+                                this.onboarding.speech.draft.select_protocol(protocol);
+                                if protocol
+                                    == preferences::ServiceProtocol::SpeechDashscopeFunAsrFlash
+                                    && this.onboarding.speech.inputs[&InputField::Model]
+                                        .read(cx)
+                                        .value()
+                                        .trim()
+                                        .is_empty()
+                                {
+                                    this.onboarding.speech.inputs[&InputField::Model].update(
+                                        cx,
+                                        |input, cx| {
+                                            input.set_value(
+                                                "fun-asr-flash-2026-06-15",
+                                                window,
+                                                cx,
+                                            )
+                                        },
+                                    );
+                                }
                                 this.onboarding.speech.evidence.clear();
                                 this.onboarding.speech.models.invalidate();
                                 cx.notify();
@@ -1691,6 +1716,20 @@ impl Desktop {
         }
         body = body
             .child(self.setup_input_row(purpose, InputField::Address, "服务地址", cx))
+            .when(
+                purpose == ServicePurpose::Speech
+                    && service.draft.protocol
+                        == preferences::ServiceProtocol::SpeechDashscopeFunAsrFlash,
+                |body| {
+                    body.child(
+                        help(
+                            "setup-dashscope-address-help",
+                            "填写包含 Workspace ID 和地域的完整服务地址，例如 https://WORKSPACE_ID.cn-beijing.maas.aliyuncs.com/api/v1。",
+                        )
+                        .text_size(TEXT_AUX),
+                    )
+                },
+            )
             .child(
                 self.setup_reveal(
                     format!("setup-auth-reveal-{}", purpose as usize),

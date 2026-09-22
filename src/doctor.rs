@@ -144,8 +144,8 @@ pub fn run() -> Result<()> {
                 out.push(format!("  仅 gpu/cpu 需要；下载约 2.4GB / Only needed for gpu/cpu (~2.4GB): course2md models download --dir {:?}", root));
             }
             let key = !cfg.asr_api.api_key.trim().is_empty()
-                || crate::config::asr_api_key_from_env().is_some();
-            out.push(if key { "✓ api  已设置密钥（隐藏）/ API key set (hidden)" } else { "- api  未设置密钥；仅云端识别需要 / API key not set; only required for cloud transcription: COURSE2MD_ASR_API_KEY" }.into());
+                || crate::config::asr_api_key_from_env_for(cfg.asr_api.mode).is_some();
+            out.push(if key { "✓ api  已设置密钥（隐藏）/ API key set (hidden)" } else { "- api  未设置密钥；仅云端识别需要 / API key not set; only required for cloud transcription: COURSE2MD_ASR_API_KEY or DASHSCOPE_API_KEY" }.into());
             let provider = cfg
                 .defaults
                 .provider

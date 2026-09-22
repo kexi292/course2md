@@ -115,12 +115,12 @@ pub struct RunOpts {
     #[arg(help_heading = "语音识别 / Speech recognition")]
     pub asr_model: Option<String>,
 
-    /// 云端识别地址 / Cloud speech API base URL (OpenAI-compatible)
+    /// 云端识别完整服务根地址 / Complete cloud speech service base URL
     #[arg(long)]
     #[arg(help_heading = "语音识别 / Speech recognition")]
     pub asr_api_base_url: Option<String>,
 
-    /// 云端识别密钥；建议用 COURSE2MD_ASR_API_KEY 环境变量 / Cloud API key; prefer the environment variable to avoid shell history
+    /// 云端识别密钥；建议用对应环境变量 / Cloud API key; prefer the protocol's environment variable
     #[arg(long)]
     #[arg(help_heading = "语音识别 / Speech recognition")]
     pub asr_api_key: Option<String>,
@@ -130,7 +130,7 @@ pub struct RunOpts {
     #[arg(help_heading = "语音识别 / Speech recognition")]
     pub asr_api_model: Option<String>,
 
-    /// 云端请求方式 / Cloud request mode: transcriptions (default) or chat (audio-capable models)
+    /// 云端请求方式 / Cloud request mode: transcriptions (default), chat, or dashscope-fun-asr-flash
     #[arg(long, value_enum)]
     #[arg(help_heading = "语音识别 / Speech recognition")]
     pub asr_api_mode: Option<crate::settings::AsrApiMode>,

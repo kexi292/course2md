@@ -90,18 +90,22 @@ pub async fn run(cfg: &PipelineConfig, wav: &std::path::Path) -> Result<Vec<Tran
     use crate::config::AsrProvider;
 
     if cfg.provider == AsrProvider::Api {
-        // 同一模型在 transcriptions / chat 两种端点下的输出可能不同，身份须含模式
+        let max_speech = effective_api_max_speech(cfg.asr_api.mode, cfg.max_speech);
+        let endpoint = crate::config::asr_endpoint(&cfg.asr_api)?;
+        // Endpoint, protocol and effective chunk boundaries all affect reusable output.
         let model_id = format!(
             "{}:{}:{}",
-            cfg.asr_api.base_url.trim().trim_end_matches('/'),
+            endpoint,
             cfg.asr_api.mode,
             cfg.asr_api.model
         );
-        let id = AsrIdentity::new("api", &model_id, cfg.max_speech);
+        let id = AsrIdentity::new("api", &model_id, max_speech);
         let api = cfg.asr_api.clone();
-        let max_speech = cfg.max_speech as f64;
         let wav = wav.to_path_buf();
-        return run_with_cp(cfg, &id, move |cp| run_api(&api, &wav, max_speech, cp)).await;
+        return run_with_cp(cfg, &id, move |cp| {
+            run_api(&api, &wav, max_speech as f64, cp)
+        })
+        .await;
     }
     if cfg.provider == AsrProvider::Npu {
         let model = crate::npu::resolve_npu_model(cfg.asr_model.as_deref());
@@ -158,6 +162,17 @@ pub async fn run(cfg: &PipelineConfig, wav: &std::path::Path) -> Result<Vec<Tran
         run_blocking(&wav, &model, &mmproj, offload, threads, max_speech, cp)
     })
     .await
+}
+
+const DASHSCOPE_MAX_SPEECH: f32 = 225.0;
+const DASHSCOPE_MAX_DATA_URL_BYTES: usize = 10_000_000;
+
+fn effective_api_max_speech(mode: crate::settings::AsrApiMode, configured: f32) -> f32 {
+    if mode == crate::settings::AsrApiMode::DashscopeFunAsrFlash {
+        configured.min(DASHSCOPE_MAX_SPEECH)
+    } else {
+        configured
+    }
 }
 
 fn run_blocking(
@@ -375,8 +390,8 @@ fn run_api(
         // The task preflight distinguished missing credentials from explicit no-auth.
         String::new()
     } else {
-        crate::config::asr_api_key_from_env()
-            .context("云端识别未设置密钥 / Cloud speech API key missing. 设置 / Set COURSE2MD_ASR_API_KEY or [asr_api].api_key.")?
+        crate::config::asr_api_key_from_env_for(api.mode)
+            .context("云端识别未设置密钥 / Cloud speech API key missing. 设置服务密钥或相应环境变量 / Set the service key or its environment variable.")?
     };
     let segs = ffmpeg_vad(wav, max_speech as f32)?;
     tracing::info!(segs = segs.len(), endpoint = %api.base_url, model = %api.model, "api vad");
@@ -498,6 +513,7 @@ fn post_json_retry(
         "application/json",
         &serde_json::to_vec(body)?,
         Some(body),
+        None,
     )
 }
 
@@ -508,6 +524,7 @@ fn post_bytes_retry(
     content_type: &str,
     body: &[u8],
     identity: Option<&serde_json::Value>,
+    mode: Option<crate::settings::AsrApiMode>,
 ) -> Result<serde_json::Value> {
     let mut delay = RETRY_BACKOFF_BASE;
     for attempt in 1..=MAX_ATTEMPTS {
@@ -516,6 +533,11 @@ fn post_bytes_retry(
             let request = agent.post(url).set("Content-Type", content_type);
             let request = if let Some(key) = key.filter(|key| !key.is_empty()) {
                 request.set("Authorization", &format!("Bearer {key}"))
+            } else {
+                request
+            };
+            let request = if mode == Some(crate::settings::AsrApiMode::DashscopeFunAsrFlash) {
+                request.set("X-DashScope-SSE", "disable")
             } else {
                 request
             };
@@ -544,17 +566,7 @@ fn post_bytes_retry(
                 url,
                 scope,
                 send,
-                |value| {
-                    anyhow::ensure!(
-                        value.get("error").is_none_or(serde_json::Value::is_null),
-                        "语音服务返回错误内容 / Speech service returned an error"
-                    );
-                    anyhow::ensure!(
-                        value["text"].is_string() || chat_content_has_text(value),
-                        "语音服务响应缺少文字，不能当作静音 / Speech response is missing text"
-                    );
-                    Ok(())
-                },
+                |value| validate_api_response(mode.context("missing ASR protocol")?, value),
             )
         } else {
             match send() {
@@ -626,6 +638,7 @@ fn transcribe_api(t: &ApiTarget, chunk: &Path, seg: Seg, wav: &Path) -> Result<O
                 &content_type,
                 &body,
                 Some(&identity),
+                Some(t.mode),
             )?
         }
         crate::settings::AsrApiMode::Chat => {
@@ -645,6 +658,19 @@ fn transcribe_api(t: &ApiTarget, chunk: &Path, seg: Seg, wav: &Path) -> Result<O
                 "application/json",
                 &serde_json::to_vec(&body)?,
                 Some(&identity),
+                Some(t.mode),
+            )?
+        }
+        crate::settings::AsrApiMode::DashscopeFunAsrFlash => {
+            let body = dashscope_request_body(t.model, &bytes)?;
+            post_bytes_retry(
+                t.client,
+                t.url,
+                Some(t.key),
+                "application/json",
+                &serde_json::to_vec(&body)?,
+                Some(&identity),
+                Some(t.mode),
             )?
         }
     };
@@ -668,9 +694,81 @@ fn transcribe_api(t: &ApiTarget, chunk: &Path, seg: Seg, wav: &Path) -> Result<O
             );
             parse_chat_content(&v).trim().to_string()
         }
+        crate::settings::AsrApiMode::DashscopeFunAsrFlash => dashscope_text(&v)?
+            .trim()
+            .to_string(),
     };
     let _ = std::fs::remove_file(chunk);
     Ok(if text.is_empty() { None } else { Some(text) })
+}
+
+fn dashscope_request_body(model: &str, audio: &[u8]) -> Result<serde_json::Value> {
+    use base64::Engine as _;
+    let data = format!(
+        "data:audio/wav;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(audio)
+    );
+    anyhow::ensure!(
+        data.len() <= DASHSCOPE_MAX_DATA_URL_BYTES,
+        "音频片段编码后超过阿里云 10 MB 上限，尚未发送 / Encoded audio segment exceeds the DashScope 10 MB limit; request was not sent"
+    );
+    Ok(serde_json::json!({
+        "model": model,
+        "input": {"messages": [{"role": "user", "content": [{
+            "type": "input_audio",
+            "input_audio": {"data": data}
+        }]}]},
+        "parameters": {"format": "wav", "sample_rate": "16000"}
+    }))
+}
+
+fn dashscope_text(value: &serde_json::Value) -> Result<&str> {
+    value["output"]["text"]
+        .as_str()
+        .or_else(|| value["output"]["output"]["sentence"]["text"].as_str())
+        .with_context(|| dashscope_response_error(value))
+}
+
+fn dashscope_response_error(value: &serde_json::Value) -> String {
+    let field = |name| value.get(name).and_then(serde_json::Value::as_str);
+    let details = [
+        field("request_id").map(|v| format!("request_id={v}")),
+        field("code").map(|v| format!("code={v}")),
+        field("message").map(|v| format!("message={v}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(", ");
+    if details.is_empty() {
+        "阿里云响应缺少文字 / DashScope response is missing text".into()
+    } else {
+        format!("阿里云响应缺少文字 / DashScope response is missing text ({details})")
+    }
+}
+
+fn validate_api_response(
+    mode: crate::settings::AsrApiMode,
+    value: &serde_json::Value,
+) -> Result<()> {
+    anyhow::ensure!(
+        value.get("error").is_none_or(serde_json::Value::is_null),
+        "语音服务返回错误内容 / Speech service returned an error"
+    );
+    match mode {
+        crate::settings::AsrApiMode::Transcriptions => anyhow::ensure!(
+            value["text"].is_string(),
+            "语音服务响应缺少文字，不能当作静音 / Speech response is missing text"
+        ),
+        crate::settings::AsrApiMode::Chat => anyhow::ensure!(
+            chat_content_has_text(value),
+            "语音服务响应缺少文字，不能当作静音 / Speech response is missing text"
+        ),
+        crate::settings::AsrApiMode::DashscopeFunAsrFlash => {
+            dashscope_text(value).map(|_| ())?
+        }
+    }
+    Ok(())
 }
 
 /// Standard OpenAI-compatible file upload, also accepted by OpenRouter.
@@ -1320,6 +1418,49 @@ mod tests {
         // 缺字段/异常响应 → 空串（调用方按无语音处理）
         let v = serde_json::json!({"choices":[]});
         assert_eq!(parse_chat_content(&v), "");
+    }
+
+    #[test]
+    fn dashscope_body_round_trips_audio_and_parses_both_response_shapes() {
+        use base64::Engine as _;
+        let audio = b"RIFF\0\xff\r\nWAVE";
+        let body = dashscope_request_body("fun-asr-flash-2026-06-15", audio).unwrap();
+        assert_eq!(body["model"], "fun-asr-flash-2026-06-15");
+        assert_eq!(body["parameters"]["format"], "wav");
+        assert_eq!(body["parameters"]["sample_rate"], "16000");
+        let data = body["input"]["messages"][0]["content"][0]["input_audio"]["data"]
+            .as_str()
+            .unwrap()
+            .strip_prefix("data:audio/wav;base64,")
+            .unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .unwrap(),
+            audio
+        );
+        assert_eq!(
+            dashscope_text(&serde_json::json!({"output":{"text":" first "}})).unwrap(),
+            " first "
+        );
+        assert_eq!(
+            dashscope_text(&serde_json::json!({"output":{"output":{"sentence":{"text":"second"}}}})).unwrap(),
+            "second"
+        );
+        assert!(dashscope_text(&serde_json::json!({"output":{}})).is_err());
+        assert_eq!(
+            effective_api_max_speech(
+                crate::settings::AsrApiMode::DashscopeFunAsrFlash,
+                600.0
+            ),
+            225.0
+        );
+    }
+
+    #[test]
+    fn dashscope_rejects_oversized_data_url_before_send() {
+        let audio = vec![0; 7_500_000];
+        assert!(dashscope_request_body("future-model", &audio).is_err());
     }
 
     // ---------- issue #12：GPU 卸载控制 ----------
