@@ -76,6 +76,40 @@ impl Source {
 
 pub use course2md::fetch::SourceCandidate;
 
+const VIDEO_EXTENSIONS: &[&str] = &[
+    "3gp", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts",
+    "ogv", "ts", "vob", "webm", "wmv",
+];
+
+pub fn local_video_files(directory: &Path) -> Result<Vec<PathBuf>> {
+    ensure!(directory.is_dir(), "请选择已有的视频文件夹");
+    let entries = std::fs::read_dir(directory)
+        .context("无法读取所选视频文件夹")?
+        .collect::<std::io::Result<Vec<_>>>()
+        .context("无法完整读取所选视频文件夹")?;
+    let mut files = entries
+        .into_iter()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        VIDEO_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str())
+                    })
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|path| {
+        path.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase()
+    });
+    ensure!(!files.is_empty(), "这个文件夹中没有可处理的视频文件");
+    Ok(files)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SourceProbe {
     Single(Source),
@@ -456,6 +490,46 @@ pub fn probe(input: String, online: bool, cancel: Arc<AtomicBool>) -> Result<Sou
     };
     ensure!(!cancel.load(Ordering::Relaxed), "已取消读取");
     Ok(result)
+}
+
+pub fn prepare_local_batch(
+    path: PathBuf,
+    source_mode: usize,
+    preferred_languages: &[String],
+    cancel: Arc<AtomicBool>,
+) -> Result<Source> {
+    let SourceProbe::Single(mut source) = probe(
+        path.display().to_string(),
+        false,
+        cancel.clone(),
+    )?
+    else {
+        anyhow::bail!("无法确认本地视频");
+    };
+    if let course2md::subtitle::SubtitleEvidence::Found { tracks, .. } = &mut source.subtitles {
+        course2md::subtitle::sort_tracks(
+            tracks,
+            preferred_languages,
+            "zh-Hans",
+            source.original_language.as_deref(),
+        );
+    }
+    if source_mode != 2 {
+        if let Some(track) = source.subtitles.tracks().first().cloned() {
+            match read_subtitle(&source, &track, cancel) {
+                Ok(subtitle) => source.selected_subtitle = Some(subtitle),
+                Err(error) if source_mode == 0 => {
+                    source.subtitles = course2md::subtitle::SubtitleEvidence::Failed {
+                        message: error.to_string(),
+                    };
+                }
+                Err(error) => return Err(anyhow::anyhow!(error.to_string())),
+            }
+        } else if source_mode == 1 {
+            anyhow::bail!("未找到可读取的字幕；请改用自动选择或语音识别");
+        }
+    }
+    Ok(source)
 }
 
 fn online_metadata(
@@ -1031,6 +1105,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn batch_folder_lists_supported_videos_once_in_filename_order() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["02.MKV", "01.mp4", "notes.txt", "caption.srt"] {
+            std::fs::write(dir.path().join(name), []).unwrap();
+        }
+        std::fs::create_dir(dir.path().join("03.mov")).unwrap();
+        let files = local_video_files(dir.path()).unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            ["01.mp4", "02.MKV"]
+        );
     }
 
     #[cfg(unix)]

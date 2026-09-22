@@ -304,6 +304,16 @@ impl Desktop {
                 .child(content.clone())
                 .on_close(move |_, _, cx| {
                     let _ = weak.update(cx, |this, cx| {
+                        if this
+                            .batch_import
+                            .as_ref()
+                            .is_some_and(|batch| batch.folder.is_none())
+                        {
+                            this.batch_import = None;
+                            this.message = Some(
+                                "批量处理已取消；必须新建一个笔记文件夹才能继续".into(),
+                            );
+                        }
                         this.folder_editor = None;
                         this.folder_origin = None;
                         this.folder_error = None;
@@ -427,6 +437,11 @@ impl Desktop {
                 self.folder_editor = None;
                 self.folder_origin = None;
                 self.folder_error = None;
+                if let Some(folder) = saved
+                    && self.batch_import.is_some()
+                {
+                    self.start_batch_import(folder, cx);
+                }
                 window.close_dialog(cx);
             }
             Err(error) => self.folder_error = Some(format!("{error:#}")),
@@ -526,6 +541,17 @@ impl Desktop {
                                 .label("取消")
                                 .disabled(self.folder_saving)
                                 .on_click(cx.listener(|this, _, window, cx| {
+                                    if this
+                                        .batch_import
+                                        .as_ref()
+                                        .is_some_and(|batch| batch.folder.is_none())
+                                    {
+                                        this.batch_import = None;
+                                        this.message = Some(
+                                            "批量处理已取消；必须新建一个笔记文件夹才能继续"
+                                                .into(),
+                                        );
+                                    }
                                     this.folder_editor = None;
                                     this.folder_origin = None;
                                     this.folder_error = None;

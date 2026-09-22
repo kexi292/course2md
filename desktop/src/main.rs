@@ -210,6 +210,18 @@ impl Default for ConversionOptions {
     }
 }
 
+struct BatchImport {
+    directory: PathBuf,
+    files: Vec<PathBuf>,
+    next: usize,
+    queued: usize,
+    failures: Vec<String>,
+    folder: Option<u64>,
+    draft: Option<workspace::Draft>,
+    first_task: Option<String>,
+    current: Option<String>,
+}
+
 struct Desktop {
     preferences: preferences::Store,
     settings_ui: settings_ui::State,
@@ -243,6 +255,8 @@ struct Desktop {
     preview_workers: usize,
     preview_error: Option<String>,
     source_validation: Option<String>,
+    batch_import: Option<BatchImport>,
+    batch_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     import_submit_focus: FocusHandle,
     root_focus: FocusHandle,
     show_preview_details: bool,
@@ -407,6 +421,10 @@ impl Desktop {
         if let Some(cancel) = &self.subtitle_cancel {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        if let Some(cancel) = self.batch_cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.batch_import = None;
         self.closing = true;
         self.quit_deadline = Some(Instant::now() + Duration::from_secs(10));
         self.refresh_dispatch_controls(cx);
@@ -597,6 +615,8 @@ impl Desktop {
             preview_workers: 0,
             preview_error: None,
             source_validation: None,
+            batch_import: None,
+            batch_cancel: None,
             import_submit_focus: cx.focus_handle(),
             root_focus: Self::install_root_focus(window, cx),
             show_preview_details: false,

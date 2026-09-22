@@ -785,6 +785,90 @@ impl Desktop {
         .detach();
     }
 
+    fn choose_video_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.batch_import.is_some() || !self.prepare_workbench_input(window, cx) {
+            return;
+        }
+        if self.online {
+            self.switch_source_kind(false, window, cx);
+        }
+        let prompt = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("选择包含视频的文件夹".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = prompt.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(Ok(Some(paths))) => {
+                        if let Some(directory) = paths.into_iter().next() {
+                            this.load_video_folder(directory, window, cx);
+                        }
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        this.message = Some(format!("无法打开文件夹选择器：{error:#}"))
+                    }
+                    Err(error) => this.message = Some(error.to_string()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn load_video_folder(
+        &mut self,
+        directory: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let directory_for_scan = directory.clone();
+        self.preview_workers += 1;
+        self.message = Some("正在读取视频文件夹…".into());
+        let task = crate::spawn_blocking_io(move || source::local_video_files(&directory_for_scan));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("视频文件夹读取线程意外结束")));
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.preview_workers = this.preview_workers.saturating_sub(1);
+                match result {
+                    Ok(files) => {
+                        this.batch_import = Some(BatchImport {
+                            directory,
+                            files,
+                            next: 0,
+                            queued: 0,
+                            failures: Vec::new(),
+                            folder: None,
+                            draft: None,
+                            first_task: None,
+                            current: None,
+                        });
+                        this.message = None;
+                        this.begin_folder(None, window, cx);
+                    }
+                    Err(error) => this.message = Some(format!("{error:#}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn cancel_batch_import(&mut self, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.batch_cancel.take() {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        self.batch_import = None;
+        self.message = Some("已停止继续读取视频文件夹；已经加入队列的任务仍会保留".into());
+        cx.notify();
+    }
+
     fn retry_subtitles(&mut self, cx: &mut Context<Self>) {
         let Some(source) = self.source_preview.clone() else {
             return;
@@ -941,6 +1025,9 @@ impl Desktop {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.batch_import.is_some() {
+            return;
+        }
         if self.online {
             self.switch_source_kind(false, window, cx);
         }
@@ -1107,11 +1194,27 @@ impl Desktop {
                                 .font_weight(FontWeight::MEDIUM),
                         )
                         .child(
-                            primary_pill("choose-video")
-                                .icon(IconName::FolderOpen)
-                                .label("选择视频")
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.pick(false, window, cx)),
+                            h_flex()
+                                .gap_2()
+                                .flex_wrap()
+                                .justify_center()
+                                .child(
+                                    primary_pill("choose-video")
+                                        .icon(IconName::FolderOpen)
+                                        .label("选择视频")
+                                        .disabled(self.batch_import.is_some())
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.pick(false, window, cx)
+                                        })),
+                                )
+                                .child(
+                                    outline_pill("choose-video-folder")
+                                        .icon(icons::folder_open())
+                                        .label("处理文件夹")
+                                        .disabled(self.batch_import.is_some())
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.choose_video_folder(window, cx)
+                                        })),
                                 ),
                         )
                         .on_drop(
@@ -1180,6 +1283,43 @@ impl Desktop {
                     view = view.child(issue(error.clone()));
                 }
             }
+        }
+        if let Some(batch) = &self.batch_import
+            && batch.folder.is_some()
+        {
+            let current = batch.current.clone().unwrap_or_else(|| "准备开始".into());
+            view = view.child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .gap_3()
+                    .items_center()
+                    .p_3()
+                    .rounded(RADIUS_SMALL)
+                    .bg(color(INSET))
+                    .child(motion::spinner("batch-import-spinner", cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                accessible_text(
+                                    "batch-import-status",
+                                    format!("正在读取 {} / {}：{current}", batch.next, batch.files.len()),
+                                )
+                                .font_weight(FontWeight::MEDIUM),
+                            )
+                            .child(help(format!("来源：{}", batch.directory.display()))),
+                    )
+                    .child(
+                        quiet("cancel-batch-import")
+                            .icon(IconName::Close)
+                            .label("停止")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cancel_batch_import(cx)
+                            })),
+                    ),
+            );
         }
         if self.preview_cancel.is_some() {
             view = view.child(motion::enter(

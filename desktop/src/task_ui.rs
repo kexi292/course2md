@@ -1000,11 +1000,6 @@ impl Desktop {
     }
 
     fn build_plan(&self, validation: PlanValidation) -> Result<TaskPlan> {
-        self.ordinary_preferences_ready_for_submit()?;
-        ensure!(
-            !self.preference_defaults_pending,
-            "默认设置已保存，当前视频的选项尚未同步。请重试保存输入记录。"
-        );
         let workspace = self.workspace.as_ref().context("输入与任务记录尚未恢复")?;
         let draft = workspace.state.draft().context("当前输入尚未准备好")?;
         ensure!(
@@ -1028,6 +1023,22 @@ impl Desktop {
             "当前字幕尚未确认，请重新读取字幕，或明确选择其他文字来源"
         );
         let source = draft.source.clone().context("请先读取并确认视频")?;
+        self.build_plan_for_source(validation, draft, source)
+    }
+
+    fn build_plan_for_source(
+        &self,
+        validation: PlanValidation,
+        draft: &workspace::Draft,
+        source: crate::source::Source,
+    ) -> Result<TaskPlan> {
+        self.ordinary_preferences_ready_for_submit()?;
+        ensure!(
+            !self.preference_defaults_pending,
+            "默认设置已保存，当前视频的选项尚未同步。请重试保存输入记录。"
+        );
+        ensure!(!draft.input.is_empty(), "请先选择一个视频");
+        let workspace = self.workspace.as_ref().context("输入与任务记录尚未恢复")?;
         let environment = self
             .environment
             .as_ref()
@@ -1301,6 +1312,169 @@ impl Desktop {
             }
         }
         cx.notify();
+    }
+
+    pub(super) fn start_batch_import(&mut self, folder: u64, cx: &mut Context<Self>) {
+        let Some(batch) = &mut self.batch_import else {
+            return;
+        };
+        let Some(mut draft) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.draft())
+            .cloned()
+        else {
+            self.message = Some("当前输入暂不可用，批量处理尚未开始".into());
+            self.batch_import = None;
+            return;
+        };
+        draft.online = false;
+        draft.folder = Some(folder);
+        draft.subtitle = None;
+        draft.retry_of = None;
+        draft.submitted_task = None;
+        batch.folder = Some(folder);
+        batch.draft = Some(draft);
+        self.advance_batch_import(cx);
+    }
+
+    fn advance_batch_import(&mut self, cx: &mut Context<Self>) {
+        if self.batch_cancel.is_some() {
+            return;
+        }
+        let Some(batch) = &mut self.batch_import else {
+            return;
+        };
+        if batch.next >= batch.files.len() {
+            let batch = self.batch_import.take().expect("batch exists");
+            let failed = batch.failures.len();
+            let failures = batch
+                .failures
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("；");
+            self.message = Some(if failed == 0 {
+                format!("已将 {} 个视频加入任务队列", batch.queued)
+            } else {
+                format!(
+                    "已将 {} 个视频加入任务队列，{} 个视频未能读取：{}{}",
+                    batch.queued, failed, failures,
+                    if failed > 3 {
+                        format!("；另有 {} 个", failed - 3)
+                    } else {
+                        String::new()
+                    }
+                )
+            });
+            if self.page == Page::New
+                && let Some(id) = batch.first_task
+            {
+                self.select_task(&id, cx);
+                self.navigate(Page::Task, cx);
+            }
+            self.start_next_task(cx);
+            cx.notify();
+            return;
+        }
+        let path = batch.files[batch.next].clone();
+        batch.next += 1;
+        batch.current = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        let source_mode = batch
+            .draft
+            .as_ref()
+            .map(|draft| draft.options.source_mode)
+            .unwrap_or_default();
+        let preferred = self
+            .preferences
+            .generation()
+            .preferred_subtitle_languages
+            .clone();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.batch_cancel = Some(cancel.clone());
+        self.preview_workers += 1;
+        let task = crate::spawn_blocking_io(move || {
+            crate::source::prepare_local_batch(path, source_mode, &preferred, cancel)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("视频读取线程意外结束")));
+            let _ = this.update(cx, |this, cx| {
+                this.preview_workers = this.preview_workers.saturating_sub(1);
+                this.batch_cancel = None;
+                this.finish_batch_item(result, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_batch_item(
+        &mut self,
+        result: anyhow::Result<crate::source::Source>,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .batch_import
+            .as_ref()
+            .and_then(|batch| batch.current.clone())
+            .unwrap_or_else(|| "视频".into());
+        let result = result.and_then(|source| {
+            let mut draft = self
+                .batch_import
+                .as_ref()
+                .and_then(|batch| batch.draft.clone())
+                .context("批量任务设置已丢失")?;
+            draft.input = source.input.clone();
+            draft.title = source.title.clone();
+            draft.source = Some(source.clone());
+            self.build_plan_for_source(PlanValidation::Submission, &draft, source)
+        });
+        match result {
+            Ok(plan) => {
+                let queued = self
+                    .workspace
+                    .as_mut()
+                    .context("任务记录暂不可用")
+                    .and_then(|workspace| workspace.transaction(|state| state.enqueue(plan, None)));
+                match queued {
+                    Ok((id, true)) => {
+                        if let Some(batch) = &mut self.batch_import {
+                            batch.queued += 1;
+                            batch.first_task.get_or_insert(id);
+                        }
+                        self.start_next_task(cx);
+                    }
+                    Ok((_, false)) => {
+                        if let Some(batch) = &mut self.batch_import {
+                            batch.failures.push(format!("{current}（已有任务）"));
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(batch) = &mut self.batch_import {
+                            batch.failures.push(format!(
+                                "{current}（{}）",
+                                error.to_string().lines().next().unwrap_or("读取失败")
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(batch) = &mut self.batch_import {
+                    batch.failures.push(format!(
+                        "{current}（{}）",
+                        error.to_string().lines().next().unwrap_or("读取失败")
+                    ));
+                }
+            }
+        }
+        self.advance_batch_import(cx);
     }
 
     fn request_for(
