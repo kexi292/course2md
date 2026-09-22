@@ -120,8 +120,8 @@ impl Failure {
     }
 }
 
-fn rejection_message(status: u16) -> String {
-    match status {
+fn rejection_message(status: u16, details: Option<&str>) -> String {
+    let generic = match status {
         401 => "服务未接受此任务保存的凭据，请检查对应服务的 API Key。 / The service rejected the saved credentials; check the API key for that service.".into(),
         403 => "此任务使用的凭据没有访问该服务或模型的权限。 / The credentials used by this task cannot access that service or model.".into(),
         404 => "服务未找到此任务指定的接口或模型，请检查服务地址和模型。 / The service does not have the endpoint or model this task names; check the base URL and model.".into(),
@@ -130,7 +130,49 @@ fn rejection_message(status: u16) -> String {
             format!("服务拒绝了请求参数（HTTP {status}），请检查此任务使用的模型与服务设置。 / The service rejected the request parameters (HTTP {status}); check the model and service settings for this task.")
         }
         _ => format!("服务未完成此请求（HTTP {status}）。 / The service did not complete this request (HTTP {status})."),
+    };
+    match details {
+        Some(details) if !details.is_empty() => format!("{generic} [{details}]"),
+        _ => generic,
     }
+}
+
+/// Keep provider diagnostics useful without persisting an untrusted response body.
+fn provider_error_details(value: Option<&Value>) -> Option<String> {
+    let objects = [value, value.and_then(|value| value.get("error"))];
+    let mut fields = Vec::new();
+    for object in objects.into_iter().flatten() {
+        for name in ["request_id", "code", "message"] {
+            let Some(text) = object.get(name).and_then(Value::as_str) else {
+                continue;
+            };
+            let text = sanitize_provider_text(text);
+            if !text.is_empty() {
+                let item = format!("{name}={text}");
+                if !fields.iter().any(|field| field == &item) {
+                    fields.push(item);
+                }
+            }
+        }
+    }
+    (!fields.is_empty()).then(|| fields.join(", "))
+}
+
+fn sanitize_provider_text(text: &str) -> String {
+    let mut text = text.trim().replace(['\r', '\n'], " ");
+    for marker in [
+        "data:audio/",
+        "Bearer ",
+        "api_key=",
+        "apikey=",
+        "access_token=",
+    ] {
+        if let Some(index) = text.find(marker) {
+            text.truncate(index);
+        }
+    }
+    text.truncate(512);
+    text.trim().to_string()
 }
 
 /// A status alone is not evidence that changing the payload will help. Classify
@@ -457,7 +499,8 @@ impl Ledger {
         self.record(
             serde_json::json!({"type":"receipt", "stable_id":receipt.stable_id,
             "request_id":receipt.request_id, "purpose":receipt.purpose,
-            "attempt":receipt.attempt, "state":receipt.state, "http_status":receipt.http_status}),
+            "attempt":receipt.attempt, "state":receipt.state, "http_status":receipt.http_status,
+            "message":receipt.message}),
         );
         Ok(())
     }
@@ -636,8 +679,10 @@ impl Ledger {
             receipt.state = State::Rejected;
             receipt.unsupported_response_format =
                 rejects_response_format(response.status, value.as_ref().ok());
-            receipt.message = Some(rejection_message(response.status));
-            // Error bodies may echo credentials. Keep status, not the untrusted body.
+            receipt.message = Some(rejection_message(
+                response.status,
+                provider_error_details(value.as_ref().ok()).as_deref(),
+            ));
             self.save(&receipt)?;
             return Err(Failure {
                 status: Some(response.status),
@@ -652,7 +697,10 @@ impl Ledger {
         if !(200..300).contains(&response.status) {
             if response.status >= 500 {
                 receipt.state = State::Failed;
-                receipt.message = Some(rejection_message(response.status));
+                receipt.message = Some(rejection_message(
+                    response.status,
+                    provider_error_details(value.as_ref().ok()).as_deref(),
+                ));
                 self.save(&receipt)?;
                 return Err(Failure {
                     status: Some(response.status),
@@ -757,7 +805,15 @@ pub fn json_request_described(
             status: Some(response.status),
             retryable: response.status == 429 || response.status >= 500,
             uncertain: false,
-            message: rejection_message(response.status),
+            message: rejection_message(
+                response.status,
+                provider_error_details(
+                    serde_json::from_slice::<Value>(&response.body)
+                        .ok()
+                        .as_ref(),
+                )
+                .as_deref(),
+            ),
             unsupported_response_format: rejects_response_format(
                 response.status,
                 serde_json::from_slice::<Value>(&response.body)
@@ -847,6 +903,28 @@ mod tests {
             500,
             Some(&serde_json::json!({"error":{"message":"response_format is unsupported"}}))
         ));
+    }
+
+    #[test]
+    fn provider_error_details_keep_safe_dashscope_fields_only() {
+        let value = serde_json::json!({
+            "request_id": "req-123",
+            "code": "InvalidParameter",
+            "message": "bad audio\nBearer secret data:audio/wav;base64,AAAA",
+            "input": {"audio": "data:audio/wav;base64,AAAA"}
+        });
+        let details = provider_error_details(Some(&value)).unwrap();
+        assert!(details.contains("request_id=req-123"));
+        assert!(details.contains("code=InvalidParameter"));
+        assert!(details.contains("message=bad audio"));
+        assert!(!details.contains("secret"));
+        assert!(!details.contains("data:audio/"));
+
+        let nested = serde_json::json!({"error": {"code": "invalid", "message": "no model"}});
+        assert_eq!(
+            provider_error_details(Some(&nested)).as_deref(),
+            Some("code=invalid, message=no model")
+        );
     }
 
     #[test]
