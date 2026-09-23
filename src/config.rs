@@ -212,6 +212,7 @@ pub struct PipelineConfig {
     pub threads: i32,
     pub provider: AsrProvider,
     /// 本机回退仅用于云端明确拒绝的片段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asr_fallback_provider: Option<AsrProvider>,
     pub max_speech: f32,
     pub formats: Vec<OutputFormat>,

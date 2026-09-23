@@ -426,6 +426,23 @@ mod tests {
     }
 
     #[test]
+    fn disabled_cloud_fallback_keeps_legacy_work_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            crate::options::resolve("video.mp4".into(), &Default::default(), &Default::default())
+                .unwrap();
+        let legacy = serde_json::json!({"config": cfg});
+        assert!(legacy["config"].get("asr_fallback_provider").is_none());
+        bind_work_dir(dir.path(), &legacy).unwrap();
+        bind_work_dir(dir.path(), &legacy).unwrap();
+
+        cfg.asr_fallback_provider = Some(crate::config::AsrProvider::Cpu);
+        let enabled = serde_json::json!({"config": cfg});
+        assert!(enabled["config"].get("asr_fallback_provider").is_some());
+        assert!(bind_work_dir(dir.path(), &enabled).is_err());
+    }
+
+    #[test]
     fn malformed_request_does_not_echo_secret() {
         let error = Request::read(br#"{"api_key":"private-test-key"}"#.as_slice())
             .err()
