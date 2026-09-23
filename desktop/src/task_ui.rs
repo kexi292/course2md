@@ -1117,34 +1117,48 @@ impl Desktop {
                 .provider
                 .unwrap_or_else(|| self.recommended_local_provider());
             use course2md::config::AsrProvider;
-            match provider {
-                AsrProvider::Coreml => ensure!(
-                    environment.apple,
-                    "Apple 原生识别组件不可用。请选择其他本机识别方式，或在设置中检查应用组件。"
-                ),
-                AsrProvider::Gpu => ensure!(
-                    environment.llama && environment.gpu.is_some(),
-                    "没有检测到可用的 GPU 识别引擎。请选择 CPU 或其他本机识别方式。"
-                ),
-                AsrProvider::Cpu => ensure!(
-                    environment.llama,
-                    "CPU 识别引擎尚未安装。请在设置的应用与诊断中查看安装方法。"
-                ),
-                AsrProvider::Npu => ensure!(
-                    environment.npu,
-                    "没有检测到可用的 Intel NPU 识别环境。请选择其他本机识别方式。"
-                ),
-                AsrProvider::Api => (),
+            let check_local_provider = |provider| -> Result<()> {
+                match provider {
+                    AsrProvider::Coreml => ensure!(
+                        environment.apple,
+                        "Apple 原生识别组件不可用。请选择其他本机识别方式，或在设置中检查应用组件。"
+                    ),
+                    AsrProvider::Gpu => ensure!(
+                        environment.llama && environment.gpu.is_some(),
+                        "没有检测到可用的 GPU 识别引擎。请选择 CPU 或其他本机识别方式。"
+                    ),
+                    AsrProvider::Cpu => ensure!(
+                        environment.llama,
+                        "CPU 识别引擎尚未安装。请在设置的应用与诊断中查看安装方法。"
+                    ),
+                    AsrProvider::Npu => ensure!(
+                        environment.npu,
+                        "没有检测到可用的 Intel NPU 识别环境。请选择其他本机识别方式。"
+                    ),
+                    AsrProvider::Api => (),
+                }
+                Ok(())
+            };
+            check_local_provider(provider)?;
+            if provider == AsrProvider::Api
+                && let Some(fallback) = config.defaults.asr_fallback_provider
+            {
+                check_local_provider(fallback)?;
             }
             config.defaults.provider = Some(provider);
-            if provider != AsrProvider::Api
+            let model_provider = config
+                .defaults
+                .asr_fallback_provider
+                .filter(|_| provider == AsrProvider::Api)
+                .unwrap_or(provider);
+            if model_provider != AsrProvider::Api
                 && config
                     .defaults
                     .asr_model
                     .as_deref()
                     .is_none_or(|model| model.trim().is_empty())
             {
-                config.defaults.asr_model = Some(if provider == AsrProvider::Npu {
+                config.defaults.asr_model = Some(if model_provider == AsrProvider::Npu {
                     course2md::npu::resolve_npu_model(None)
                 } else {
                     course2md::config::DEFAULT_ASR_MODEL.into()
@@ -3952,11 +3966,17 @@ fn task_stage_order(stage: &str) -> usize {
 }
 
 fn validate_plan_config(source: &str, config: &course2md::settings::ConfigFile) -> Result<()> {
-    let resolved = course2md::options::resolve(source.to_owned(), &Default::default(), config)?;
+    let mut resolved = course2md::options::resolve(source.to_owned(), &Default::default(), config)?;
     resolved.validate()?;
     if resolved.transcript_source != course2md::config::TranscriptSource::Subtitle {
         // Credentials belong to the service vault, not this static model/provider check.
         resolved.validate_asr_with_auth(false, false)?;
+        if resolved.provider == course2md::config::AsrProvider::Api
+            && let Some(fallback) = resolved.asr_fallback_provider
+        {
+            resolved.provider = fallback;
+            resolved.validate_asr_with_auth(false, false)?;
+        }
     }
     Ok(())
 }
@@ -4548,6 +4568,13 @@ mod tests {
         config.defaults.provider = Some(AsrProvider::Coreml);
         config.defaults.asr_model = Some("qwen3-0.6b".into());
         config.defaults.transcript_source = Some(TranscriptSource::Asr);
+        validate_plan_config("video.mp4", &config).unwrap();
+
+        config.defaults.provider = Some(AsrProvider::Api);
+        config.defaults.asr_fallback_provider = Some(AsrProvider::Cpu);
+        config.defaults.asr_model = Some("whisper".into());
+        assert!(validate_plan_config("video.mp4", &config).is_err());
+        config.defaults.asr_model = Some("qwen3-1.7b".into());
         validate_plan_config("video.mp4", &config).unwrap();
     }
 

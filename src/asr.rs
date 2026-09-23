@@ -93,14 +93,47 @@ pub async fn run(cfg: &PipelineConfig, wav: &std::path::Path) -> Result<Vec<Tran
         let max_speech = effective_api_max_speech(cfg.asr_api.mode, cfg.max_speech);
         let endpoint = crate::config::asr_endpoint(&cfg.asr_api)?;
         // Endpoint, protocol and effective chunk boundaries all affect reusable output.
-        let model_id = format!("{}:{}:{}", endpoint, cfg.asr_api.mode, cfg.asr_api.model);
+        let fallback = cfg
+            .asr_fallback_provider
+            .filter(|provider| *provider != AsrProvider::Api);
+        let model_id = match fallback {
+            Some(provider) => format!(
+                "{}:{}:{}:fallback={}:{}",
+                endpoint,
+                cfg.asr_api.mode,
+                cfg.asr_api.model,
+                provider,
+                cfg.asr_model.as_deref().unwrap_or("")
+            ),
+            None => format!("{}:{}:{}", endpoint, cfg.asr_api.mode, cfg.asr_api.model),
+        };
         let id = AsrIdentity::new("api", &model_id, max_speech);
         let api = cfg.asr_api.clone();
-        let wav = wav.to_path_buf();
-        return run_with_cp(cfg, &id, move |cp| {
-            run_api(&api, &wav, max_speech as f64, cp)
+        let cloud_wav = wav.to_path_buf();
+        let cloud = run_with_cp(cfg, &id, move |cp| {
+            run_api(&api, &cloud_wav, max_speech as f64, cp)
         })
         .await;
+        let cloud_error = match cloud {
+            Ok(events) => return Ok(events),
+            Err(error) => error,
+        };
+        let Some((provider, status)) = fallback.zip(cloud_rejection_status(&cloud_error)) else {
+            return Err(cloud_error);
+        };
+        tracing::warn!(
+            status,
+            fallback_provider = %provider,
+            "cloud ASR rejected audio; continuing unfinished segments locally"
+        );
+        let cloud_message = format!("{cloud_error:#}");
+        return run_local_fallback(cfg, wav, &id, provider, max_speech)
+            .await
+            .with_context(|| {
+                format!(
+                    "云端拒绝后，本机语音识别也失败 / Local transcription also failed after cloud rejection. Cloud error: {cloud_message}"
+                )
+            });
     }
     if cfg.provider == AsrProvider::Npu {
         let model = crate::npu::resolve_npu_model(cfg.asr_model.as_deref());
@@ -157,6 +190,81 @@ pub async fn run(cfg: &PipelineConfig, wav: &std::path::Path) -> Result<Vec<Tran
         run_blocking(&wav, &model, &mmproj, offload, threads, max_speech, cp)
     })
     .await
+}
+
+fn cloud_rejection_status(error: &anyhow::Error) -> Option<u16> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::dispatch::Failure>())
+        .and_then(|failure| match failure.status {
+            Some(status @ (400 | 422)) if !failure.uncertain => Some(status),
+            _ => None,
+        })
+}
+
+async fn run_local_fallback(
+    cfg: &PipelineConfig,
+    wav: &Path,
+    identity: &crate::checkpoint::AsrIdentity,
+    provider: crate::config::AsrProvider,
+    max_speech: f32,
+) -> Result<Vec<TranscriptEvent>> {
+    use crate::config::AsrProvider;
+    match provider {
+        AsrProvider::Api => {
+            anyhow::bail!("本机回退不能使用云端后端 / Cloud API is not a local fallback")
+        }
+        AsrProvider::Npu => {
+            let model = crate::npu::resolve_npu_model(cfg.asr_model.as_deref());
+            let wav = wav.to_path_buf();
+            run_with_cp(cfg, identity, move |cp| {
+                crate::npu::run_npu(&model, &wav, max_speech as f64, cp)
+            })
+            .await
+        }
+        AsrProvider::Coreml => {
+            #[cfg(apple_native)]
+            {
+                let model = crate::apple::resolve_model(
+                    cfg.asr_model
+                        .as_deref()
+                        .filter(|model| !model.trim().is_empty()),
+                )?;
+                let wav = wav.to_path_buf();
+                return run_with_cp(cfg, identity, move |cp| {
+                    let tmp = crate::runtime::TempWorkDir::new("asr")?;
+                    crate::apple::run_coreml(&wav, max_speech as f64, &model, tmp.path(), cp)
+                })
+                .await;
+            }
+            #[cfg(not(apple_native))]
+            anyhow::bail!(
+                "此构建不含 Apple 识别后端 / This build does not include Apple transcription"
+            )
+        }
+        AsrProvider::Gpu | AsrProvider::Cpu => {
+            let llama = crate::models::ensure_llama_or_download(&cfg.model_dir).await?;
+            let offload = OffloadOpts {
+                provider,
+                gpu_layers: cfg.gpu_layers,
+                mmproj_offload: cfg.mmproj_offload,
+            };
+            let threads = cfg.threads;
+            let wav = wav.to_path_buf();
+            run_with_cp(cfg, identity, move |cp| {
+                run_blocking(
+                    &wav,
+                    &llama.model,
+                    &llama.mmproj,
+                    offload,
+                    threads,
+                    max_speech,
+                    cp,
+                )
+            })
+            .await
+        }
+    }
 }
 
 const DASHSCOPE_MAX_SPEECH: f32 = 225.0;
@@ -1425,6 +1533,39 @@ pub fn cut_wav(src: &Path, start: f64, end: f64, dest: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn cloud_failure(status: Option<u16>, uncertain: bool) -> anyhow::Error {
+        anyhow::Error::new(crate::dispatch::Failure {
+            status,
+            retryable: false,
+            uncertain,
+            message: "fixture".into(),
+            unsupported_response_format: false,
+        })
+        .context("cloud transcription")
+    }
+
+    #[test]
+    fn local_fallback_only_accepts_explicit_audio_rejections() {
+        assert_eq!(
+            super::cloud_rejection_status(&cloud_failure(Some(400), false)),
+            Some(400)
+        );
+        assert_eq!(
+            super::cloud_rejection_status(&cloud_failure(Some(422), false)),
+            Some(422)
+        );
+        for status in [None, Some(401), Some(403), Some(429), Some(500)] {
+            assert_eq!(
+                super::cloud_rejection_status(&cloud_failure(status, false)),
+                None
+            );
+        }
+        assert_eq!(
+            super::cloud_rejection_status(&cloud_failure(Some(400), true)),
+            None
+        );
+    }
+
     #[test]
     fn gpu_probe_distinguishes_devices_from_cpu_only_and_unknown_output() {
         assert!(

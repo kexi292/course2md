@@ -179,7 +179,7 @@ impl Request {
             .as_deref()
             .is_none_or(|model| model.trim().is_empty())
         {
-            cfg.asr_model = match cfg.provider {
+            cfg.asr_model = match cfg.asr_fallback_provider.unwrap_or(cfg.provider) {
                 crate::config::AsrProvider::Coreml
                 | crate::config::AsrProvider::Cpu
                 | crate::config::AsrProvider::Gpu => Some(crate::config::DEFAULT_ASR_MODEL.into()),

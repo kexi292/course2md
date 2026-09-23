@@ -190,6 +190,11 @@ impl GenerationPreferences {
             }
         } else {
             self.last_local_provider = provider;
+            if self.options.asr_fallback_provider.is_some()
+                && let Some(provider) = provider
+            {
+                self.options.asr_fallback_provider = Some(provider);
+            }
         }
         self.options.provider = provider;
     }
@@ -1842,6 +1847,18 @@ mod tests {
             assert_eq!(restored.options.provider, provider);
             assert_eq!(restored.options.asr_model.as_deref(), Some("qwen3-1.7b"));
         }
+    }
+
+    #[test]
+    fn enabled_cloud_fallback_tracks_an_explicit_local_engine() {
+        let mut preferences = GenerationPreferences::default();
+        preferences.options.provider = Some(AsrProvider::Api);
+        preferences.options.asr_fallback_provider = Some(AsrProvider::Cpu);
+        preferences.select_provider(Some(AsrProvider::Gpu));
+        assert_eq!(
+            preferences.options.asr_fallback_provider,
+            Some(AsrProvider::Gpu)
+        );
     }
 
     #[test]

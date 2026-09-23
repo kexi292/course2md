@@ -1308,6 +1308,7 @@ mod tests {
             roi: None,
             threads: 2,
             provider: c::AsrProvider::Cpu,
+            asr_fallback_provider: None,
             max_speech: 20.0,
             formats: vec![c::OutputFormat::Md],
             model_dir: dir.clone(),

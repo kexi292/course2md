@@ -804,9 +804,16 @@ impl State {
             "仍有请求结果尚未确认，请查看请求范围后选择是否重新发送"
         );
         if intent == Intent::Run {
+            let local_fallback = task
+                .plan
+                .config
+                .defaults
+                .asr_fallback_provider
+                .is_some();
             for receipt in course2md::dispatch::receipts(&task.work_dir)?.into_iter().filter(
                 |receipt| {
-                    receipt.state == course2md::dispatch::State::Rejected
+                    !local_fallback
+                        && receipt.state == course2md::dispatch::State::Rejected
                         && receipt.purpose == "transcription"
                         && receipt.http_status != Some(429)
                 },
@@ -2562,6 +2569,25 @@ mod tests {
         let task = ws.state.task(&id).unwrap();
         assert_eq!(task.state, TaskState::Queued);
         assert_eq!(task.resend, vec![transcription]);
+
+        let mut fallback_plan = plan(&ws.state.default_library);
+        fallback_plan.config.defaults.asr_fallback_provider =
+            Some(course2md::config::AsrProvider::Cpu);
+        let fallback_id = ws.state.enqueue(fallback_plan, None).unwrap().0;
+        let fallback_task = ws.state.task_mut(&fallback_id).unwrap();
+        fallback_task.state = TaskState::NeedsAttention;
+        fallback_task.intent = Intent::Pause;
+        write_receipt(
+            fallback_task,
+            "fallback-transcription-request",
+            "transcription",
+            1,
+            course2md::dispatch::State::Rejected,
+            Some(400),
+        );
+
+        ws.state.set_intent(&fallback_id, Intent::Run).unwrap();
+        assert!(ws.state.task(&fallback_id).unwrap().resend.is_empty());
     }
 
     fn test_workspace(dir: &Path) -> Workspace {

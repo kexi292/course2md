@@ -99,6 +99,9 @@ pub fn resolve(
             .provider
             .or(d.provider)
             .unwrap_or_else(config::default_provider_hint),
+        asr_fallback_provider: d
+            .asr_fallback_provider
+            .filter(|provider| *provider != config::AsrProvider::Api),
         max_speech: opts
             .max_speech
             .or(d.max_speech)
@@ -198,5 +201,32 @@ mod tests {
             .unwrap()
             .validate()
             .unwrap();
+    }
+
+    #[test]
+    fn cloud_fallback_is_opt_in_and_must_be_local() {
+        let defaults = settings::ConfigFile::default();
+        assert_eq!(
+            resolve("video".into(), &Default::default(), &defaults)
+                .unwrap()
+                .asr_fallback_provider,
+            None
+        );
+
+        let mut configured = defaults;
+        configured.defaults.asr_fallback_provider = Some(config::AsrProvider::Cpu);
+        assert_eq!(
+            resolve("video".into(), &Default::default(), &configured)
+                .unwrap()
+                .asr_fallback_provider,
+            Some(config::AsrProvider::Cpu)
+        );
+        configured.defaults.asr_fallback_provider = Some(config::AsrProvider::Api);
+        assert_eq!(
+            resolve("video".into(), &Default::default(), &configured)
+                .unwrap()
+                .asr_fallback_provider,
+            None
+        );
     }
 }

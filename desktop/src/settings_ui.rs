@@ -1118,8 +1118,26 @@ impl Desktop {
                 })),
         ));
         if provider == "api" {
-            recognition =
-                recognition.child(self.service_picker(ServicePurpose::Speech, false, false, cx));
+            recognition = recognition
+                .child(self.service_picker(ServicePurpose::Speech, false, false, cx))
+                .child(self.setting_preference(
+                    icons::computer(),
+                    "云端拒绝后使用本机识别",
+                    "仅在服务以 HTTP 400/422 明确拒绝音频时回退；连接中断、结果不确定、鉴权失败或限流不会自动重发。",
+                    Switch::new("cloud-asr-local-fallback")
+                        .checked(value.options.asr_fallback_provider.is_some())
+                        .on_click(cx.listener(|this, enabled: &bool, _, cx| {
+                            let mut next = this.generation_edit_base();
+                            let fallback = next
+                                .last_local_provider
+                                .unwrap_or_else(|| this.recommended_local_provider());
+                            next.options.asr_fallback_provider = (*enabled).then_some(fallback);
+                            if *enabled {
+                                next.last_local_provider = Some(fallback);
+                            }
+                            this.commit_generation(next, cx);
+                        })),
+                ));
         } else {
             recognition =
                 recognition
@@ -1156,13 +1174,23 @@ impl Desktop {
                                 .selected(provider.to_owned())
                                 .on_change(cx.listener(|this, id: &SharedString, _, cx| {
                                     let mut next = this.generation_edit_base();
-                                    next.select_provider(match id.as_ref() {
+                                    let selected = match id.as_ref() {
                                         "coreml" => Some(course2md::config::AsrProvider::Coreml),
                                         "gpu" => Some(course2md::config::AsrProvider::Gpu),
                                         "cpu" => Some(course2md::config::AsrProvider::Cpu),
                                         "npu" => Some(course2md::config::AsrProvider::Npu),
                                         _ => None,
-                                    });
+                                    };
+                                    let fallback_enabled =
+                                        next.options.asr_fallback_provider.is_some();
+                                    next.select_provider(selected);
+                                    if fallback_enabled {
+                                        next.options.asr_fallback_provider = Some(
+                                            selected.unwrap_or_else(|| {
+                                                this.recommended_local_provider()
+                                            }),
+                                        );
+                                    }
                                     this.commit_generation(next, cx);
                                 })),
                         ),
