@@ -47,9 +47,64 @@ use gpui_component::{
 };
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
+    fs::File,
+    io::Write,
     path::PathBuf,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
+
+struct StartupLog {
+    started: Instant,
+    file: Mutex<File>,
+}
+
+static STARTUP_LOG: OnceLock<StartupLog> = OnceLock::new();
+static FIRST_RENDER_LOGGED: AtomicBool = AtomicBool::new(false);
+
+fn initialize_startup_log() {
+    let started = Instant::now();
+    let directory = course2md::config::config_dir();
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let Ok(file) = File::create(directory.join("startup.log")) else {
+        return;
+    };
+    let _ = STARTUP_LOG.set(StartupLog {
+        started,
+        file: Mutex::new(file),
+    });
+    startup_log(format_args!(
+        "process entered version={}",
+        env!("CARGO_PKG_VERSION")
+    ));
+}
+
+pub(crate) fn startup_log(message: impl std::fmt::Display) {
+    let Some(log) = STARTUP_LOG.get() else {
+        return;
+    };
+    let Ok(mut file) = log.file.lock() else {
+        return;
+    };
+    let _ = writeln!(
+        file,
+        "{} [+{}ms] {message}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+        log.started.elapsed().as_millis()
+    );
+    let _ = file.flush();
+}
+
+pub(crate) fn startup_first_render() {
+    if !FIRST_RENDER_LOGGED.swap(true, Ordering::Relaxed) {
+        startup_log("first render entered");
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
@@ -438,17 +493,26 @@ impl Desktop {
         self.job.is_none() && self.preview_workers == 0
     }
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        startup_log("desktop initialization entered");
         let configuration_directory = course2md::config::config_dir();
         let message = None;
         // Fresh installs bootstrap managed local storage so the welcome screen does not
         // synchronously access a protected Documents folder before the user chooses a location.
         let output = configuration_directory.join("desktop-local-library");
+        startup_log("preferences open entered");
+        let started = Instant::now();
         let preferences = preferences::Store::open(
             configuration_directory.join("desktop-preferences"),
             credentials::system_vault(configuration_directory.join("desktop-credentials.json")),
         );
+        startup_log(format_args!(
+            "preferences open completed duration_ms={}",
+            started.elapsed().as_millis()
+        ));
         let mut config = preferences.defaults_config();
         config.defaults.out = Some(output.clone());
+        startup_log("input controls creation entered");
+        let started = Instant::now();
         let fields = [
             (
                 Field::Source,
@@ -484,6 +548,10 @@ impl Desktop {
                 )
             })
             .collect();
+        startup_log(format_args!(
+            "input controls creation completed duration_ms={}",
+            started.elapsed().as_millis()
+        ));
         let mut subscriptions: Vec<Subscription> = inputs
             .iter()
             .map(|(field, input)| {
@@ -571,6 +639,8 @@ impl Desktop {
                 }
             }
         });
+        startup_log("workspace open entered");
+        let started = Instant::now();
         let (workspace, workspace_error) =
             match workspace::Workspace::open(output.clone(), options.clone()) {
                 Ok(workspace) => (Some(workspace), None),
@@ -579,9 +649,24 @@ impl Desktop {
                     Some(format!("输入与任务记录无法读取，原文件已保留：{error:#}")),
                 ),
             };
+        startup_log(format_args!(
+            "workspace open completed duration_ms={} status={} task_count={}",
+            started.elapsed().as_millis(),
+            if workspace.is_some() { "ok" } else { "error" },
+            workspace
+                .as_ref()
+                .map(|workspace| workspace.state.tasks.len())
+                .unwrap_or(0)
+        ));
+        startup_log("desktop substate creation entered");
+        let started = Instant::now();
         let settings_ui = settings_ui::State::new(window, cx);
         let onboarding = onboarding::State::new(window, cx);
         let reader_ui = reader_ui::State::new(window, cx);
+        startup_log(format_args!(
+            "desktop substate creation completed duration_ms={}",
+            started.elapsed().as_millis()
+        ));
         let mut this = Self {
             preferences,
             settings_ui,
@@ -699,13 +784,25 @@ impl Desktop {
             _subscriptions: subscriptions,
             _poll: poll,
         };
+        startup_log("desktop state restoration entered");
+        let started = Instant::now();
+        startup_log("edited settings restoration entered");
         this.settings_snapshot = this.edited_settings(cx);
+        startup_log("edited settings restoration completed");
         // Preferences and workspace records are saved separately. Reconcile
         // inherited options after an interrupted save before restoring input.
+        startup_log("preference defaults reconciliation entered");
         this.refresh_preference_defaults(cx);
+        startup_log("preference defaults reconciliation completed");
+        startup_log("draft restoration entered");
         this.restore_draft(window, cx);
+        startup_log("draft restoration completed");
+        startup_log("workbench input restoration entered");
         this.prepare_workbench_input(window, cx);
+        startup_log("workbench input restoration completed");
+        startup_log("storage state restoration entered");
         this.restore_storage_state(cx);
+        startup_log("storage state restoration completed");
         cx.set_reduce_motion(this.desktop_settings.reduce_motion);
         this.refresh_account(cx);
         this.refresh_environment(cx);
@@ -713,17 +810,32 @@ impl Desktop {
         if !this.preferences.application().desktop.setup_completed {
             this.start_onboarding(window, cx);
         }
+        startup_log(format_args!(
+            "desktop state restoration completed duration_ms={}",
+            started.elapsed().as_millis()
+        ));
+        startup_log("desktop initialization completed");
         this
     }
     fn refresh_environment(&mut self, cx: &mut Context<Self>) {
+        startup_log("background environment detection entered");
+        let started = Instant::now();
         self.environment = None;
         // 环境探测会同步启动子进程（Metal 枚举可超过十秒），必须离开 executor；
         // 见 spawn_blocking_io 的说明
         let task = spawn_blocking_io(backend::Environment::detect);
         cx.spawn(async move |this, cx| {
             let Ok(environment) = task.recv().await else {
+                startup_log(format_args!(
+                    "background environment detection failed duration_ms={}",
+                    started.elapsed().as_millis()
+                ));
                 return;
             };
+            startup_log(format_args!(
+                "background environment detection completed duration_ms={}",
+                started.elapsed().as_millis()
+            ));
             let _ = this.update(cx, |this, cx| {
                 this.environment = Some(environment);
                 this.refresh_model_diagnostics(cx);
@@ -1145,6 +1257,12 @@ impl Desktop {
         let locations = self.registered_storage_locations();
         self.library_generation = self.library_generation.wrapping_add(1);
         let generation = self.library_generation;
+        startup_log(format_args!(
+            "background library scan entered generation={} location_count={}",
+            generation,
+            locations.len()
+        ));
+        let started = Instant::now();
         self.storage_ui
             .begin_location_checks(generation, &locations);
         self.loading = true;
@@ -1156,6 +1274,12 @@ impl Desktop {
         });
         cx.spawn(async move |this, cx| {
             let results = task.await;
+            startup_log(format_args!(
+                "background library scan completed generation={} duration_ms={} location_count={}",
+                generation,
+                started.elapsed().as_millis(),
+                results.len()
+            ));
             let _ = this.update(cx, |this, cx| {
                 if this.library_generation != generation {
                     return;
@@ -1573,18 +1697,29 @@ fn dispatch_desktop_action(
 }
 
 fn main() {
+    initialize_startup_log();
+    startup_log("accessibility diagnostics initialization entered");
     a11y::init_validation_diagnostics();
+    startup_log("accessibility diagnostics initialization completed");
+    startup_log("GPUI application creation entered");
     let app = gpui_platform::application().with_assets(icons::Assets);
+    startup_log("GPUI application creation completed");
     app.on_reopen(|cx| {
         cx.activate(true);
         for handle in cx.windows() {
             let _ = cx.update_window(handle, |_, window, _| window.activate_window());
         }
     });
+    startup_log("GPUI event loop entered");
     app.run(|cx| {
+        startup_log("GPUI setup callback entered");
+        startup_log("GPUI components initialization entered");
         gpui_component::init(cx);
         gpui_component::set_locale("zh-CN");
+        startup_log("GPUI components initialization completed");
+        startup_log("theme initialization entered");
         theme::init(cx);
+        startup_log("theme initialization completed");
         // Debug validation uses the same native window and render path at an exact size.
         // Release builds always use the ordinary initial window size.
         let initial_size = if cfg!(debug_assertions) {
@@ -1601,6 +1736,7 @@ fn main() {
         } else {
             size(px(1140.), px(820.))
         };
+        startup_log("native window creation entered");
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::centered(initial_size, cx)),
@@ -1612,6 +1748,7 @@ fn main() {
                 ..TitleBar::window_options()
             },
             |window, cx| {
+                startup_log("native window callback entered");
                 window.set_window_title("course2md");
                 #[cfg(feature = "performance")]
                 performance::start(window, cx);
@@ -1682,10 +1819,13 @@ fn main() {
                     }
                     false
                 });
-                cx.new(|cx| Root::new(view, window, cx))
+                let root = cx.new(|cx| Root::new(view, window, cx));
+                startup_log("native window callback completed");
+                root
             },
         )
         .expect("无法创建 course2md 窗口");
+        startup_log("native window creation completed");
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -1713,7 +1853,9 @@ fn main() {
                 .items([gpui::MenuItem::action("搜索课程或当前笔记", SearchContent)]),
         ]);
         cx.activate(true);
+        startup_log("GPUI setup callback completed");
     });
+    startup_log("GPUI event loop exited");
 }
 
 #[cfg(test)]

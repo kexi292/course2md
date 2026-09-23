@@ -172,6 +172,8 @@ impl Desktop {
         if self.account.checking {
             return;
         }
+        crate::startup_log("background account check entered");
+        let started = std::time::Instant::now();
         self.account.status_generation = self.account.status_generation.wrapping_add(1);
         let generation = self.account.status_generation;
         self.account.checking = true;
@@ -185,8 +187,17 @@ impl Desktop {
         });
         cx.spawn(async move |this, cx| {
             let Ok((saved, result)) = task.recv().await else {
+                crate::startup_log(format_args!(
+                    "background account check failed duration_ms={}",
+                    started.elapsed().as_millis()
+                ));
                 return;
             };
+            crate::startup_log(format_args!(
+                "background account check completed duration_ms={} status={}",
+                started.elapsed().as_millis(),
+                if result.is_ok() { "ok" } else { "error" }
+            ));
             let _ = this.update(cx, |this, cx| {
                 if this.account.apply_status(generation, saved, result) {
                     cx.notify();
@@ -724,7 +735,8 @@ impl Desktop {
             .when(layout.side_by_side, |view| view.flex_row())
             .child(crate::motion::enter(
                 SharedString::from(format!("qr-visual-{}-{phase}", self.account.generation)),
-                visual))
+                visual,
+            ))
             .child(explanation)
             .into_any_element()
     }
