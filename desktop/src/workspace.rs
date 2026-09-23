@@ -790,6 +790,11 @@ impl State {
             intent != Intent::Run || !matches!(task.state, TaskState::Running | TaskState::Pausing),
             "这项任务正在处理当前操作"
         );
+        if intent == Intent::Run {
+            // Paused and attention-needed tasks are checked lazily when the user
+            // resumes them, keeping their historical receipts out of cold start.
+            reconcile_receipts(task)?;
+        }
         ensure!(
             intent != Intent::Run
                 || !task
@@ -1635,13 +1640,23 @@ impl Workspace {
         };
         state.recover();
         for task in &mut state.tasks {
+            // Only tasks that can start automatically need a cold-start receipt
+            // check. Paused/attention-needed tasks reconcile when the user resumes
+            // them; terminal tasks reconcile in their explicit reprocess path.
+            let needs_receipt_reconciliation = task.state == TaskState::Queued
+                && task.intent == Intent::Run
+                && task.handled_by.is_none();
             let result = state
                 .libraries
                 .iter()
                 .find(|location| location.id == task.plan.library_id)
                 .map(|location| reconcile_artifact(task, location))
                 .unwrap_or(Ok(()))
-                .and_then(|_| reconcile_receipts(task));
+                .and_then(|_| {
+                    needs_receipt_reconciliation
+                        .then(|| reconcile_receipts(task))
+                        .unwrap_or(Ok(()))
+                });
             if let Err(error) = result {
                 task.state = TaskState::NeedsAttention;
                 task.error = Some(format!("请求记录暂时无法读取，尚未发送新请求：{error:#}"));
@@ -2471,6 +2486,35 @@ mod tests {
         assert!(failed.unread);
     }
 
+    #[test]
+    fn resuming_a_paused_task_reconciles_deferred_receipts_before_queueing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        let task = ws.state.task_mut(&id).unwrap();
+        task.state = TaskState::Paused;
+        task.intent = Intent::Pause;
+        write_unknown(task, 1);
+        ws.save().unwrap();
+        drop(ws);
+
+        let mut reopened = test_workspace(dir.path());
+        let task = reopened.state.task(&id).unwrap();
+        assert_eq!(task.state, TaskState::Paused);
+        assert!(task.blocked.is_empty());
+
+        let error = reopened
+            .transaction(|state| state.set_intent(&id, Intent::Run))
+            .unwrap_err();
+        assert!(error.to_string().contains("仍有请求结果尚未确认"));
+        assert_eq!(reopened.state.task(&id).unwrap().state, TaskState::Paused);
+        assert!(reopened.state.task(&id).unwrap().blocked.is_empty());
+    }
+
     fn test_workspace(dir: &Path) -> Workspace {
         Workspace::open_at(
             dir.join("workspace.json"),
@@ -2795,6 +2839,34 @@ mod tests {
         assert_eq!(task.state, TaskState::Complete);
         assert_eq!(task.artifact.as_ref(), Some(&version));
         assert!(restored.state.next_task().is_none());
+    }
+
+    #[test]
+    fn startup_defers_terminal_receipts_but_explicit_reconcile_still_checks_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        let version = publish_note(&ws.state, &id, false);
+        let task = ws.state.task_mut(&id).unwrap();
+        task.state = TaskState::Complete;
+        task.artifact = Some(version);
+        write_unknown(task, 1);
+        ws.save().unwrap();
+        drop(ws);
+
+        let mut reopened = test_workspace(dir.path());
+        let task = reopened.state.task(&id).unwrap();
+        assert_eq!(task.state, TaskState::Complete);
+        assert!(task.blocked.is_empty());
+
+        reconcile_receipts(reopened.state.task_mut(&id).unwrap()).unwrap();
+        let task = reopened.state.task(&id).unwrap();
+        assert_eq!(task.state, TaskState::Uncertain);
+        assert_eq!(task.blocked.len(), 1);
     }
 
     #[test]
