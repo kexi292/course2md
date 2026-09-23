@@ -524,7 +524,10 @@ fn post_bytes_retry(
     let mut delay = RETRY_BACKOFF_BASE;
     for attempt in 1..=MAX_ATTEMPTS {
         crate::dispatch::check_control()?;
+        let fallback = serde_json::json!({"payload_sha256": crate::execution::digest(body)});
+        let scope = identity.unwrap_or(&fallback);
         let send = || {
+            let started = Instant::now();
             let request = agent.post(url).set("Content-Type", content_type);
             let request = if let Some(key) = key.filter(|key| !key.is_empty()) {
                 request.set("Authorization", &format!("Bearer {key}"))
@@ -536,13 +539,29 @@ fn post_bytes_retry(
             } else {
                 request
             };
-            crate::dispatch::receive(request.send_bytes(body))
+            let result = crate::dispatch::receive(request.send_bytes(body));
+            if key.is_some() {
+                crate::dispatch::record_request_diagnostic(
+                    "asr",
+                    "transcription",
+                    url,
+                    scope,
+                    serde_json::json!({
+                        "type":"asr_http_attempt", "transport_attempt":attempt,
+                        "duration_ms":started.elapsed().as_millis(),
+                        "request_bytes":body.len(), "content_type":content_type,
+                        "status":result.as_ref().ok().map(|response|response.status),
+                        "response_bytes":result.as_ref().ok().map(|response|response.body.len()),
+                        "provider_request_id":result.as_ref().ok().and_then(|response|response.provider_request_id.as_deref()),
+                        "definitely_unsent":result.as_ref().err().map(|error|error.definitely_unsent),
+                    }),
+                );
+            }
+            result
         };
         // No key argument means the private local model server, not a cloud API.
         // Cloud no-auth mode still passes Some("") and gets a durable request receipt.
         let result = if key.is_some() {
-            let fallback = serde_json::json!({"payload_sha256": crate::execution::digest(body)});
-            let scope = identity.unwrap_or(&fallback);
             let description = match (
                 scope["segment_start"].as_f64(),
                 scope["segment_end"].as_f64(),
@@ -626,6 +645,37 @@ fn transcribe_api(t: &ApiTarget, chunk: &Path, seg: Seg, wav: &Path) -> Result<O
     let bytes = std::fs::read(chunk)
         .with_context(|| format!("读取音频片段 / Reading audio segment: {}", chunk.display()))?;
     let identity = serde_json::json!({"model":t.model,"mode":t.mode,"audio_sha256":crate::execution::digest(&bytes),"segment_start":seg.start,"segment_end":seg.end,"cut_start":seg.cut_start,"cut_end":seg.cut_end});
+    let (rms_dbfs, max_window_rms_dbfs) = Energy::load(chunk).ok().map_or((None, None), |energy| {
+        let dbfs = |amplitude: f32| (amplitude > 0.0).then(|| 20.0 * amplitude.log10());
+        let rms = (!energy.rms.is_empty()).then(|| {
+            (energy.rms.iter().map(|value| value * value).sum::<f32>() / energy.rms.len() as f32)
+                .sqrt()
+        });
+        (
+            rms.and_then(dbfs),
+            energy
+                .rms
+                .iter()
+                .copied()
+                .max_by(f32::total_cmp)
+                .and_then(dbfs),
+        )
+    });
+    crate::dispatch::record_request_diagnostic(
+        "asr",
+        "transcription",
+        t.url,
+        &identity,
+        serde_json::json!({
+            "type":"asr_chunk", "mode":t.mode,
+            "segment_start":seg.start, "segment_end":seg.end,
+            "speech_duration_ms":((seg.end-seg.start)*1000.0).round() as u64,
+            "cut_start":seg.cut_start, "cut_end":seg.cut_end,
+            "cut_duration_ms":((seg.cut_end-seg.cut_start)*1000.0).round() as u64,
+            "audio_bytes":bytes.len(), "rms_dbfs":rms_dbfs,
+            "max_window_rms_dbfs":max_window_rms_dbfs,
+        }),
+    );
     let v = match t.mode {
         crate::settings::AsrApiMode::Transcriptions => {
             let (content_type, body) = transcription_form(t.model, &bytes);
