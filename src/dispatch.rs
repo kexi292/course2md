@@ -82,7 +82,7 @@ pub struct Receipt {
     pub http_status: Option<u16>,
     pub response: Option<Value>,
     pub message: Option<String>,
-    /// A reviewed compatibility rejection; never stores the provider's error body.
+    /// A reviewed compatibility rejection.
     #[serde(default)]
     pub unsupported_response_format: bool,
     /// Explicit component reprocessing permits this exact known-failed attempt once.
@@ -137,42 +137,51 @@ fn rejection_message(status: u16, details: Option<&str>) -> String {
     }
 }
 
-/// Keep provider diagnostics useful without persisting an untrusted response body.
+/// Temporary diagnostics: preserve the complete provider response so parameter
+/// rejections can be diagnosed from the task log. Known credential-like markers
+/// are still redacted before the body is persisted.
 fn provider_error_details(value: Option<&Value>) -> Option<String> {
-    let objects = [value, value.and_then(|value| value.get("error"))];
-    let mut fields = Vec::new();
-    for object in objects.into_iter().flatten() {
-        for name in ["request_id", "code", "message"] {
-            let Some(text) = object.get(name).and_then(Value::as_str) else {
-                continue;
-            };
-            let text = sanitize_provider_text(text);
-            if !text.is_empty() {
-                let item = format!("{name}={text}");
-                if !fields.iter().any(|field| field == &item) {
-                    fields.push(item);
+    let mut value = value?.clone();
+    sanitize_provider_value(&mut value);
+    serde_json::to_string(&value)
+        .ok()
+        .filter(|body| !body.is_empty())
+        .map(|body| format!("provider_response={body}"))
+}
+
+fn sanitize_provider_value(value: &mut Value) {
+    match value {
+        Value::String(text) => {
+            let mut sanitized = text.trim().replace(['\r', '\n'], " ");
+            for marker in [
+                "data:audio/",
+                "Bearer ",
+                "api_key=",
+                "apikey=",
+                "access_token=",
+            ] {
+                if let Some(index) = sanitized.find(marker) {
+                    sanitized.truncate(index);
+                    sanitized.push_str("[已隐藏敏感内容]");
+                }
+            }
+            *text = sanitized;
+        }
+        Value::Array(values) => values.iter_mut().for_each(sanitize_provider_value),
+        Value::Object(values) => {
+            for (key, value) in values {
+                if matches!(
+                    key.to_ascii_lowercase().as_str(),
+                    "authorization" | "api_key" | "apikey" | "access_token" | "token"
+                ) {
+                    *value = Value::String("[已隐藏敏感内容]".into());
+                } else {
+                    sanitize_provider_value(value);
                 }
             }
         }
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
-    (!fields.is_empty()).then(|| fields.join(", "))
-}
-
-fn sanitize_provider_text(text: &str) -> String {
-    let mut text = text.trim().replace(['\r', '\n'], " ");
-    for marker in [
-        "data:audio/",
-        "Bearer ",
-        "api_key=",
-        "apikey=",
-        "access_token=",
-    ] {
-        if let Some(index) = text.find(marker) {
-            text.truncate(index);
-        }
-    }
-    text.truncate(512);
-    text.trim().to_string()
 }
 
 /// A status alone is not evidence that changing the payload will help. Classify
@@ -906,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_error_details_keep_safe_dashscope_fields_only() {
+    fn provider_error_details_preserve_full_body_with_redaction() {
         let value = serde_json::json!({
             "request_id": "req-123",
             "code": "InvalidParameter",
@@ -914,17 +923,17 @@ mod tests {
             "input": {"audio": "data:audio/wav;base64,AAAA"}
         });
         let details = provider_error_details(Some(&value)).unwrap();
-        assert!(details.contains("request_id=req-123"));
-        assert!(details.contains("code=InvalidParameter"));
-        assert!(details.contains("message=bad audio"));
+        assert!(details.contains("provider_response="));
+        assert!(details.contains("request_id"));
+        assert!(details.contains("InvalidParameter"));
+        assert!(details.contains("bad audio"));
         assert!(!details.contains("secret"));
         assert!(!details.contains("data:audio/"));
 
         let nested = serde_json::json!({"error": {"code": "invalid", "message": "no model"}});
-        assert_eq!(
-            provider_error_details(Some(&nested)).as_deref(),
-            Some("code=invalid, message=no model")
-        );
+        let details = provider_error_details(Some(&nested)).unwrap();
+        assert!(details.contains("\"error\""));
+        assert!(details.contains("no model"));
     }
 
     #[test]
