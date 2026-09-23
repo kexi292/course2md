@@ -803,6 +803,19 @@ impl State {
                     .any(|request| request.reason == "uncertain"),
             "仍有请求结果尚未确认，请查看请求范围后选择是否重新发送"
         );
+        if intent == Intent::Run {
+            for receipt in course2md::dispatch::receipts(&task.work_dir)?.into_iter().filter(
+                |receipt| {
+                    receipt.state == course2md::dispatch::State::Rejected
+                        && receipt.purpose == "transcription"
+                        && receipt.http_status != Some(429)
+                },
+            ) {
+                if !task.resend.contains(&receipt.request_id) {
+                    task.resend.push(receipt.request_id);
+                }
+            }
+        }
         task.intent = intent;
         task.updated = now();
         task.state = match intent {
@@ -2515,6 +2528,42 @@ mod tests {
         assert!(reopened.state.task(&id).unwrap().blocked.is_empty());
     }
 
+    #[test]
+    fn resuming_authorizes_rejected_transcription_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        let task = ws.state.task_mut(&id).unwrap();
+        task.state = TaskState::NeedsAttention;
+        task.intent = Intent::Pause;
+        let transcription = write_receipt(
+            task,
+            "transcription-request",
+            "transcription",
+            1,
+            course2md::dispatch::State::Rejected,
+            Some(400),
+        );
+        write_receipt(
+            task,
+            "proofreading-request",
+            "proofreading",
+            1,
+            course2md::dispatch::State::Rejected,
+            Some(400),
+        );
+
+        ws.state.set_intent(&id, Intent::Run).unwrap();
+
+        let task = ws.state.task(&id).unwrap();
+        assert_eq!(task.state, TaskState::Queued);
+        assert_eq!(task.resend, vec![transcription]);
+    }
+
     fn test_workspace(dir: &Path) -> Workspace {
         Workspace::open_at(
             dir.join("workspace.json"),
@@ -2595,22 +2644,40 @@ mod tests {
     }
 
     fn write_unknown(task: &TaskRecord, attempt: u32) -> String {
-        let id = format!("stable-request.{attempt}");
+        write_receipt(
+            task,
+            "stable-request",
+            "proofreading",
+            attempt,
+            course2md::dispatch::State::Uncertain,
+            None,
+        )
+    }
+
+    fn write_receipt(
+        task: &TaskRecord,
+        stable_id: &str,
+        purpose: &str,
+        attempt: u32,
+        state: course2md::dispatch::State,
+        http_status: Option<u16>,
+    ) -> String {
+        let id = format!("{stable_id}.{attempt}");
         let receipt = course2md::dispatch::Receipt {
             schema: 1,
-            stable_id: "stable-request".into(),
-            logical_id: "stable-request".into(),
+            stable_id: stable_id.into(),
+            logical_id: stable_id.into(),
             task_id: String::new(),
-            stage: "proofreading".into(),
+            stage: purpose.into(),
             segment_start: None,
             segment_end: None,
             request_id: id.clone(),
-            purpose: "proofreading".into(),
+            purpose: purpose.into(),
             description: "校对 00:00–00:20 的文字".into(),
             service_version: "version-a".into(),
             attempt,
-            state: course2md::dispatch::State::Uncertain,
-            http_status: None,
+            state,
+            http_status,
             response: None,
             message: Some("连接断开 / connection lost".into()),
             unsupported_response_format: false,
@@ -2619,7 +2686,7 @@ mod tests {
         };
         std::fs::create_dir_all(task.work_dir.join("requests")).unwrap();
         std::fs::write(
-            task.work_dir.join("requests/stable-request.json"),
+            task.work_dir.join("requests").join(format!("{stable_id}.json")),
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
