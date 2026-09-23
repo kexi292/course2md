@@ -245,10 +245,7 @@ fn processing_issues(manifest: &course2md::artifact::Manifest) -> Vec<Processing
             ProcessingStage::Proofreading,
             &manifest.outcomes.proofreading,
         ),
-        (
-            ProcessingStage::Translation,
-            &manifest.outcomes.translation,
-        ),
+        (ProcessingStage::Translation, &manifest.outcomes.translation),
         (ProcessingStage::Summary, &manifest.outcomes.summary),
     ]
     .into_iter()
@@ -530,8 +527,10 @@ mod tests {
         );
         let preview = read_preview(first.courses[0].clone()).unwrap();
         assert!(preview.plain_text.contains("真实正文"));
-        assert!(preview.plain_text.find("真实正文").unwrap()
-            < preview.plain_text.find("Translated body").unwrap());
+        assert!(
+            preview.plain_text.find("真实正文").unwrap()
+                < preview.plain_text.find("Translated body").unwrap()
+        );
         assert!(preview.blocks.iter().any(|block| matches!(
             block,
             PreviewBlock::Paragraph { anchor, .. } if anchor.ends_with("-translation")

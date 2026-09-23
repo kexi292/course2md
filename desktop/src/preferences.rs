@@ -218,8 +218,7 @@ impl GenerationPreferences {
         config.llm.enabled = self.ai_proofread;
         config.llm.summarize = self.ai_summary;
         config.llm.note_language = self.note_language;
-        config.translation.enabled =
-            self.note_language == course2md::llm::NoteLanguage::ZhHans;
+        config.translation.enabled = self.note_language == course2md::llm::NoteLanguage::ZhHans;
         config.llm.vision = self.effective_vision();
         config.llm.prompt = self.prompt.clone();
         config.llm.concurrency = self.ai_concurrency;
@@ -276,9 +275,9 @@ pub enum ServiceProtocol {
 impl ServiceProtocol {
     pub fn purpose(self) -> ServicePurpose {
         match self {
-            Self::SpeechTranscriptions
-            | Self::SpeechChat
-            | Self::SpeechDashscopeFunAsrFlash => ServicePurpose::Speech,
+            Self::SpeechTranscriptions | Self::SpeechChat | Self::SpeechDashscopeFunAsrFlash => {
+                ServicePurpose::Speech
+            }
             Self::AiChat => ServicePurpose::Ai,
         }
     }
@@ -296,9 +295,7 @@ impl ServiceProtocol {
         match self {
             Self::SpeechTranscriptions => "/audio/transcriptions",
             Self::SpeechChat | Self::AiChat => "/chat/completions",
-            Self::SpeechDashscopeFunAsrFlash => {
-                "/services/aigc/multimodal-generation/generation"
-            }
+            Self::SpeechDashscopeFunAsrFlash => "/services/aigc/multimodal-generation/generation",
         }
     }
 }
@@ -1351,9 +1348,7 @@ impl Store {
             config.asr_api.mode = match version.config.protocol {
                 ServiceProtocol::SpeechTranscriptions => AsrApiMode::Transcriptions,
                 ServiceProtocol::SpeechChat => AsrApiMode::Chat,
-                ServiceProtocol::SpeechDashscopeFunAsrFlash => {
-                    AsrApiMode::DashscopeFunAsrFlash
-                }
+                ServiceProtocol::SpeechDashscopeFunAsrFlash => AsrApiMode::DashscopeFunAsrFlash,
                 ServiceProtocol::AiChat => unreachable!(),
             };
         }

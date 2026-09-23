@@ -683,7 +683,11 @@ pub fn badge(kind: BadgeKind) -> gpui::Div {
         BadgeKind::Success => (SUCCESS, SUCCESS_BG, Some(crate::icons::check_circle())),
         BadgeKind::Warning => (WARNING, WARNING_BG, Some(crate::icons::warning())),
         BadgeKind::Danger => (DANGER, DANGER_BG, Some(crate::icons::error())),
-        BadgeKind::Progress => (BADGE_PROGRESS, BADGE_PROGRESS_BG, Some(crate::icons::schedule())),
+        BadgeKind::Progress => (
+            BADGE_PROGRESS,
+            BADGE_PROGRESS_BG,
+            Some(crate::icons::schedule()),
+        ),
         // Neutral 为纯文字片：ⓘ 专属说明文字（review2-settings#3）
         BadgeKind::Neutral => (GRAY, INSET, None),
     };

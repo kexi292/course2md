@@ -1362,10 +1362,7 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                                         .object_fit(ObjectFit::Contain)
                                         .with_fallback(move || {
                                             theme::accessible_text(
-                                                (
-                                                    "failed-reader-image",
-                                                    frame_index.unwrap_or(0)
-                                                ),
+                                                ("failed-reader-image", frame_index.unwrap_or(0)),
                                                 "这张截图无法读取；对应正文仍可阅读。",
                                             )
                                             .into_any_element()
@@ -1384,13 +1381,11 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                     )
                     // 「从此处观看」贴着它作用的截图（图下左对齐），不再挤进章节标题行（review2#1）
                     .when_some(
-                        frame
-                            .and_then(|frame| frame.seconds)
-                            .and_then(|seconds| {
-                                flow.source
-                                    .as_ref()
-                                    .and_then(|source| nav::seek_url(source, seconds))
-                            }),
+                        frame.and_then(|frame| frame.seconds).and_then(|seconds| {
+                            flow.source
+                                .as_ref()
+                                .and_then(|source| nav::seek_url(source, seconds))
+                        }),
                         |view, url| {
                             view.child(
                                 h_flex().w_full().justify_start().child(
@@ -1755,25 +1750,26 @@ impl Desktop {
         self.reader_ui.offline_opening = false;
         cx.spawn(async move |this, cx| {
             // 解析全文与离线检查是同步文件/子进程工作；见 crate::spawn_blocking_io 的说明
-            let (data, source, source_available, offline_video) = crate::spawn_blocking_io(move || {
-                let source = source.map(|source| match source {
-                    nav::SourceTarget::Local(path) => {
-                        nav::SourceTarget::Local(nav::relocated_source(&path, &locations))
-                    }
-                    other => other,
-                });
-                let available = source.as_ref().is_some_and(|source| match source {
-                    nav::SourceTarget::Web(_) => true,
-                    nav::SourceTarget::Local(path) => path.is_file(),
-                });
-                let offline_video = offline_request
-                    .map(|request| request.inspect())
-                    .unwrap_or_default();
-                (load_reader_data(&preview), source, available, offline_video)
-            })
-            .recv()
-            .await
-            .unwrap_or_default();
+            let (data, source, source_available, offline_video) =
+                crate::spawn_blocking_io(move || {
+                    let source = source.map(|source| match source {
+                        nav::SourceTarget::Local(path) => {
+                            nav::SourceTarget::Local(nav::relocated_source(&path, &locations))
+                        }
+                        other => other,
+                    });
+                    let available = source.as_ref().is_some_and(|source| match source {
+                        nav::SourceTarget::Web(_) => true,
+                        nav::SourceTarget::Local(path) => path.is_file(),
+                    });
+                    let offline_video = offline_request
+                        .map(|request| request.inspect())
+                        .unwrap_or_default();
+                    (load_reader_data(&preview), source, available, offline_video)
+                })
+                .recv()
+                .await
+                .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
                 if this.reader_ui.generation != generation
                     || this
@@ -1947,16 +1943,15 @@ impl Desktop {
             let input = path.to_string_lossy().into_owned();
             let identity = key.clone();
             let checked = crate::spawn_blocking_io(move || {
-                let source::SourceProbe::Single(source) =
-                    source::probe(input, false, probing)?
-                    else {
-                        anyhow::bail!("请选择可读取的视频文件");
-                    };
-                    anyhow::ensure!(
-                        !identity.starts_with("local:sha256:") || identity == source.identity,
-                        "这个文件与生成笔记时的视频内容不同，请选择同一个原视频"
-                    );
-                    Ok::<_, anyhow::Error>(())
+                let source::SourceProbe::Single(source) = source::probe(input, false, probing)?
+                else {
+                    anyhow::bail!("请选择可读取的视频文件");
+                };
+                anyhow::ensure!(
+                    !identity.starts_with("local:sha256:") || identity == source.identity,
+                    "这个文件与生成笔记时的视频内容不同，请选择同一个原视频"
+                );
+                Ok::<_, anyhow::Error>(())
             });
             let checked = checked
                 .recv()
@@ -2460,7 +2455,8 @@ impl Desktop {
                     .gap_2()
                     .py_6()
                     .child(crate::motion::spinner("reader-opening-spinner", cx))
-                    .child(theme::accessible_text("opening-note", "正在打开笔记…")));
+                    .child(theme::accessible_text("opening-note", "正在打开笔记…")),
+            );
         };
         // 渲染只读已提交快照：数据加载在 preview 变更的事件路径触发（ensure_reader_data），
         // tab stops 在各 result_tab 赋值点同步
@@ -3209,7 +3205,8 @@ impl Desktop {
                     .child(theme::accessible_text(
                         "reader-version-loading-label",
                         "正在打开笔记…",
-                    ))));
+                    )),
+            ));
         }
         let mut details = vec![("标题", icons::article(), preview.course.title.clone())];
         let local_source = self.reader_source().and_then(|source| match source {
@@ -3422,7 +3419,8 @@ impl Desktop {
                                     this.open_reader_version(newer.clone(), cx)
                                 })))
                             .into_any_element(),
-                        ))));
+                        )),
+                ));
             }
         }
         if let Some(notice) = processing_notice(&preview.processing_issues) {
@@ -3616,9 +3614,7 @@ impl Desktop {
                 window,
                 cx,
             ));
-            page = page.child(crate::motion::enter(
-                "reader-processing-notice",
-                problem));
+            page = page.child(crate::motion::enter("reader-processing-notice", problem));
         }
         if files_need_reload(&preview, &self.reader_ui.issues, &self.reader_ui.frames) {
             let course = preview.course.clone();
@@ -3675,7 +3671,8 @@ impl Desktop {
                                 this.load_reader_version(course.clone(), true, cx)
                             })))
                         .into_any_element(),
-                    ))));
+                    )),
+            ));
         }
         let reading_note = self.result_tab == 0;
         let items = note_items(&preview.blocks, short_reader);
@@ -3800,7 +3797,9 @@ impl Desktop {
                     .py_3(),
                 )
                 // 正文滚动容器也兑现「始终显示滚动条」偏好（review4#4）
-                .child(crate::backend::vertical_scrollbar_for(&self.reader_ui.note_list))
+                .child(crate::backend::vertical_scrollbar_for(
+                    &self.reader_ui.note_list,
+                ))
                 .into_any_element()
         } else {
             let mut article = v_flex()
@@ -3868,7 +3867,8 @@ impl Desktop {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.select_reader_view(0, window, cx)
                                 })),
-                        )));
+                        ),
+                ));
             }
             if !self.reader_ui.frames.is_empty() && gallery_indices.is_empty() {
                 article = article.child(
@@ -4052,9 +4052,7 @@ impl Desktop {
                         .line_height(excerpt_line_height)
                         .text_color(color(GRAY))
                         .when(excerpt_marks.is_empty(), |view| {
-                            view.text_ellipsis()
-                                .line_clamp(3)
-                                .child(excerpt.clone())
+                            view.text_ellipsis().line_clamp(3).child(excerpt.clone())
                         })
                         .when(!excerpt_marks.is_empty(), |view| {
                             view.child(StyledText::new(excerpt).with_highlights(excerpt_marks))
@@ -4137,7 +4135,8 @@ impl Desktop {
         crate::motion::state_enter(
             SharedString::from(format!("reader-open:{}", preview.course.dir.display())),
             root.child(controls)
-                .child(v_flex().flex_1().min_h_0().w_full().child(body)))
+                .child(v_flex().flex_1().min_h_0().w_full().child(body)),
+        )
     }
     /// Contents are a reading rail; persistent selection belongs to the row
     /// surface so pointer feedback cannot erase the current chapter.

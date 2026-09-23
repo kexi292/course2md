@@ -3006,7 +3006,10 @@ mod tests {
         .unwrap();
         std::fs::write(
             config_dir.join("config.toml"),
-            format!("[defaults]\nout = {}\n[desktop]\nsetup_completed = true\n", serde_json::to_string(&root.join("library")).unwrap()),
+            format!(
+                "[defaults]\nout = {}\n[desktop]\nsetup_completed = true\n",
+                serde_json::to_string(&root.join("library")).unwrap()
+            ),
         )
         .unwrap();
         for (name, uncertain) in [("翻译确认失败", false), ("翻译结果待确认", true)] {

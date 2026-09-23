@@ -310,9 +310,8 @@ impl Desktop {
                             .is_some_and(|batch| batch.folder.is_none())
                         {
                             this.batch_import = None;
-                            this.message = Some(
-                                "批量处理已取消；必须新建一个笔记文件夹才能继续".into(),
-                            );
+                            this.message =
+                                Some("批量处理已取消；必须新建一个笔记文件夹才能继续".into());
                         }
                         this.folder_editor = None;
                         this.folder_origin = None;
@@ -505,7 +504,9 @@ impl Desktop {
                                 }),
                         );
                 } else {
-                    view = view.child(accessible_text("folder-library-value", label).text_color(color(MUTED)));
+                    view = view.child(
+                        accessible_text("folder-library-value", label).text_color(color(MUTED)),
+                    );
                 }
             }
             view = view
@@ -548,8 +549,7 @@ impl Desktop {
                                     {
                                         this.batch_import = None;
                                         this.message = Some(
-                                            "批量处理已取消；必须新建一个笔记文件夹才能继续"
-                                                .into(),
+                                            "批量处理已取消；必须新建一个笔记文件夹才能继续".into(),
                                         );
                                     }
                                     this.folder_editor = None;

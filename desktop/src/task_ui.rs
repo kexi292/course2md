@@ -1360,7 +1360,9 @@ impl Desktop {
             } else {
                 format!(
                     "已将 {} 个视频加入任务队列，{} 个视频未能读取：{}{}",
-                    batch.queued, failed, failures,
+                    batch.queued,
+                    failed,
+                    failures,
                     if failed > 3 {
                         format!("；另有 {} 个", failed - 3)
                     } else {
@@ -1924,7 +1926,12 @@ impl Desktop {
     }
 
     fn resend_stage(&mut self, id: String, stage: &'static str, cx: &mut Context<Self>) {
-        let Some(task) = self.workspace.as_ref().and_then(|w| w.state.task(&id)).cloned() else {
+        let Some(task) = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.state.task(&id))
+            .cloned()
+        else {
             return;
         };
         let requests: Vec<_> = task
@@ -1932,9 +1939,15 @@ impl Desktop {
             .iter()
             .filter(|b| b.reason == "uncertain")
             .filter(|b| match stage {
-                "proofreading" => b.purpose.as_deref().is_some_and(|p| p == "proofreading" || p == "llm"),
+                "proofreading" => b
+                    .purpose
+                    .as_deref()
+                    .is_some_and(|p| p == "proofreading" || p == "llm"),
                 "translation" => b.purpose.as_deref() == Some("translation"),
-                "summary" => b.purpose.as_deref().is_some_and(|p| p == "summary" || p == "summarize"),
+                "summary" => b
+                    .purpose
+                    .as_deref()
+                    .is_some_and(|p| p == "summary" || p == "summarize"),
                 _ => false,
             })
             .filter_map(|b| b.request_id.clone())
@@ -3247,23 +3260,61 @@ impl Desktop {
                         "正在保存当前结果，完成后可以选择重新发送。",
                     ))
                 })
-                .children(["proofreading", "translation", "summary"].into_iter().filter_map(|stage| {
-                    let requests: Vec<_> = uncertain.iter().filter(|blocked| match stage {
-                        "proofreading" => blocked.purpose.as_deref().is_some_and(|p| p == "proofreading" || p == "llm"),
-                        "translation" => blocked.purpose.as_deref() == Some("translation"),
-                        _ => blocked.purpose.as_deref().is_some_and(|p| p == "summary" || p == "summarize"),
-                    }).filter_map(|blocked| blocked.request_id.as_ref()).collect();
-                    if requests.is_empty() { return None; }
-                    let label = match stage { "proofreading" => "仅补充校对", "translation" => "仅补充翻译", _ => "仅补充摘要" };
-                    Some(primary_pill(SharedString::from(format!("resend-{id}-{stage}")))
-                        .self_start().icon(icons::refresh()).label(format!("{label}（{} 个结果待确认）", requests.len()))
+                .children(
+                    ["proofreading", "translation", "summary"]
+                        .into_iter()
+                        .filter_map(|stage| {
+                            let requests: Vec<_> = uncertain
+                                .iter()
+                                .filter(|blocked| match stage {
+                                    "proofreading" => blocked
+                                        .purpose
+                                        .as_deref()
+                                        .is_some_and(|p| p == "proofreading" || p == "llm"),
+                                    "translation" => {
+                                        blocked.purpose.as_deref() == Some("translation")
+                                    }
+                                    _ => blocked
+                                        .purpose
+                                        .as_deref()
+                                        .is_some_and(|p| p == "summary" || p == "summarize"),
+                                })
+                                .filter_map(|blocked| blocked.request_id.as_ref())
+                                .collect();
+                            if requests.is_empty() {
+                                return None;
+                            }
+                            let label = match stage {
+                                "proofreading" => "仅补充校对",
+                                "translation" => "仅补充翻译",
+                                _ => "仅补充摘要",
+                            };
+                            Some(
+                                primary_pill(SharedString::from(format!("resend-{id}-{stage}")))
+                                    .self_start()
+                                    .icon(icons::refresh())
+                                    .label(format!("{label}（{} 个结果待确认）", requests.len()))
+                                    .disabled(active)
+                                    .on_click(cx.listener({
+                                        let id = id.clone();
+                                        move |this, _, _, cx| {
+                                            this.resend_stage(id.clone(), stage, cx)
+                                        }
+                                    })),
+                            )
+                        }),
+                )
+                .child(
+                    primary_pill(SharedString::from(format!("resend-all-{id}")))
+                        .self_start()
+                        .icon(icons::refresh())
+                        .label("高级：重新发送全部待确认内容")
                         .disabled(active)
-                        .on_click(cx.listener({ let id = id.clone(); move |this, _, _, cx| this.resend_stage(id.clone(), stage, cx) })))
-                }))
-                .child(primary_pill(SharedString::from(format!("resend-all-{id}")))
-                    .self_start().icon(icons::refresh()).label("高级：重新发送全部待确认内容")
-                    .disabled(active)
-                    .on_click(cx.listener({ let id = id.clone(); move |this, _, _, cx| this.resend_uncertain(id.clone(), cx) }))),
+                        .on_click(cx.listener({
+                            let id = id.clone();
+                            move |this, _, _, cx| this.resend_uncertain(id.clone(), cx)
+                        })),
+                ),
         )
     }
 

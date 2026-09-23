@@ -77,8 +77,8 @@ impl Source {
 pub use course2md::fetch::SourceCandidate;
 
 const VIDEO_EXTENSIONS: &[&str] = &[
-    "3gp", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts",
-    "ogv", "ts", "vob", "webm", "wmv",
+    "3gp", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "mts", "ogv", "ts",
+    "vob", "webm", "wmv",
 ];
 
 pub fn local_video_files(directory: &Path) -> Result<Vec<PathBuf>> {
@@ -498,11 +498,7 @@ pub fn prepare_local_batch(
     preferred_languages: &[String],
     cancel: Arc<AtomicBool>,
 ) -> Result<Source> {
-    let SourceProbe::Single(mut source) = probe(
-        path.display().to_string(),
-        false,
-        cancel.clone(),
-    )?
+    let SourceProbe::Single(mut source) = probe(path.display().to_string(), false, cancel.clone())?
     else {
         anyhow::bail!("无法确认本地视频");
     };
