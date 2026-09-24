@@ -15,6 +15,8 @@ use std::{
 };
 
 const READER_MEASURE: Rems = rems(52.);
+const READER_CONTEXT_PANEL: Rems = rems(22.);
+const READER_COLUMN_GAP: f32 = 24.;
 /// Minimum spacing between polled reading-position saves during scrolling.
 const READING_POSITION_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -517,6 +519,40 @@ fn block_time(blocks: &[PreviewBlock], index: usize) -> Option<f64> {
         }
     }
     None
+}
+
+fn contextual_frame_index(
+    frames: &[Frame],
+    blocks: &[PreviewBlock],
+    current_block: usize,
+) -> Option<usize> {
+    let current_block = current_block.min(blocks.len().checked_sub(1)?);
+    let section_anchor = blocks[..=current_block].iter().rev().find_map(|block| {
+        if let PreviewBlock::Heading { anchor, .. } = block {
+            Some(anchor.as_str())
+        } else {
+            None
+        }
+    });
+    if let Some(anchor) = section_anchor
+        && let Some(index) = frames
+            .iter()
+            .position(|frame| frame.path.is_some() && frame.body_anchor.as_deref() == Some(anchor))
+    {
+        return Some(index);
+    }
+    let timed = block_time(blocks, current_block).and_then(|seconds| {
+        nav::nearest_time(
+            frames
+                .iter()
+                .enumerate()
+                .filter(|(_, frame)| frame.path.is_some())
+                .map(|(index, frame)| (index, frame.seconds)),
+            seconds,
+        )
+        .map(|(index, _)| index)
+    });
+    timed.or_else(|| frames.iter().position(|frame| frame.path.is_some()))
 }
 fn capture_reader_position(
     layout: &nav::ReadingLayout,
@@ -2485,13 +2521,35 @@ impl Desktop {
         self.schedule_reader_restore(window, cx);
         let rem_size = f32::from(window.rem_size());
         let content_width = crate::views::shell_content_width(Page::Result, window);
+        let reading_note = self.result_tab == 0;
         // A single frame aligns navigation, title, tools and document content.
+        // Wide readers add a contextual image without stretching the prose measure.
+        let standard_reader_width = f32::from(READER_MEASURE.to_pixels(window.rem_size()))
+            + f32::from(TOC_PANEL.to_pixels(window.rem_size()))
+            + READER_COLUMN_GAP;
+        let wide_reader_width = standard_reader_width
+            + f32::from(READER_CONTEXT_PANEL.to_pixels(window.rem_size()))
+            + READER_COLUMN_GAP;
+        let context_available = self
+            .reader_ui
+            .frames
+            .iter()
+            .any(|frame| frame.path.is_some());
+        let context_loading = self.reader_ui.data_loading
+            && (preview.course.slides > 0
+                || preview
+                    .blocks
+                    .iter()
+                    .any(|block| matches!(block, PreviewBlock::Image(_))));
+        let wide_context = reading_note
+            && (context_available || context_loading)
+            && content_width >= wide_reader_width;
         // Reserve the same reading axis when the user hides the adjacent contents.
-        let reader_width = content_width.min(
-            f32::from(READER_MEASURE.to_pixels(window.rem_size()))
-                + f32::from(TOC_PANEL.to_pixels(window.rem_size()))
-                + 24.,
-        );
+        let reader_width = if wide_context {
+            wide_reader_width
+        } else {
+            content_width.min(standard_reader_width)
+        };
         let toc_fits_beside = reader_width >= rem_size * 56. + 24.;
         let available_height = (layout.1 - rem_size * (40. / 14.) - 64.).max(0.);
         let compact = reader_width < rem_size * 60. || available_height < rem_size * 36.;
@@ -3674,7 +3732,6 @@ impl Desktop {
                     )),
             ));
         }
-        let reading_note = self.result_tab == 0;
         let items = note_items(&preview.blocks, short_reader);
         // The note flow's persistent list state follows the loaded note and the
         // item sequence derived from it; text-scale changes only re-measure.
@@ -3734,6 +3791,9 @@ impl Desktop {
             .filter(|(index, _, _)| *index <= top_index)
             .last()
             .map(|(index, _, _)| *index);
+        let context_frame = wide_context
+            .then(|| contextual_frame_index(&self.reader_ui.frames, &preview.blocks, top_index))
+            .flatten();
         // Match the exported HTML's continuous article: one text measure,
         // regular 1.7-line body copy, and spacing between sections. The note
         // tab's blocks form a variable-height list: only the visible window
@@ -4080,7 +4140,20 @@ impl Desktop {
             && !headings.is_empty()
             && self.result_tab == 0;
         let toc_side = toc_open && toc_fits_beside;
-        let body = if toc_side {
+        let body = if wide_context {
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .gap(px(READER_COLUMN_GAP))
+                .items_stretch()
+                .child(self.reader_context_panel(&preview, context_frame, cx))
+                .child(article)
+                .when(toc_side, |body| {
+                    body.child(self.reader_toc_panel(&headings, current_chapter, true, cx))
+                })
+                .into_any_element()
+        } else if toc_side {
             h_flex()
                 .flex_1()
                 .min_h_0()
@@ -4132,11 +4205,140 @@ impl Desktop {
         } else {
             controls
         };
+        let controls = if wide_context {
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_start()
+                .child(
+                    div()
+                        .w(READER_CONTEXT_PANEL)
+                        .mr(px(READER_COLUMN_GAP))
+                        .flex_shrink_0(),
+                )
+                .child(div().flex_1().min_w_0().child(controls))
+                .into_any_element()
+        } else {
+            controls
+        };
         crate::motion::state_enter(
             SharedString::from(format!("reader-open:{}", preview.course.dir.display())),
             root.child(controls)
                 .child(v_flex().flex_1().min_h_0().w_full().child(body)),
         )
+    }
+    fn reader_context_panel(
+        &self,
+        preview: &notes::Preview,
+        frame_index: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut panel = v_flex()
+            .id("reader-context-panel")
+            .w(READER_CONTEXT_PANEL)
+            .h_full()
+            .min_h_0()
+            .flex_shrink_0()
+            .gap_3()
+            .py_3()
+            .pr_4()
+            .border_r_1()
+            .border_color(color(HAIRLINE))
+            .child(semantic_label(
+                "reader-context-title",
+                "当前画面",
+                icons::image(),
+            ));
+        let Some(index) = frame_index else {
+            if self.reader_ui.data_loading {
+                panel = panel.child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(crate::motion::spinner("reader-context-loading", cx))
+                        .child(theme::accessible_text(
+                            "reader-context-loading-label",
+                            "正在读取截图…",
+                        )),
+                );
+            }
+            return panel.into_any_element();
+        };
+        let Some(frame) = self.reader_ui.frames.get(index) else {
+            return panel.into_any_element();
+        };
+        let Some(path) = frame.path.clone() else {
+            return panel.into_any_element();
+        };
+        let label = frame_label(&preview.course.title, frame, index);
+        let aspect_ratio = if frame.width > 0 && frame.height > 0 {
+            frame.width as f32 / frame.height as f32
+        } else {
+            16. / 9.
+        };
+        let timestamp = frame.seconds.map(course2md::render::fmt_ts);
+        let source_link = self
+            .reader_source()
+            .as_ref()
+            .and_then(|source| frame.seconds.and_then(|time| nav::seek_url(source, time)));
+        panel = panel.child(
+            control(("reader-context-image", index))
+                .ghost()
+                .p_0()
+                .w_full()
+                .h_auto()
+                .min_h(px(0.))
+                .border_1()
+                .border_color(color(HAIRLINE))
+                .rounded(RADIUS_SMALL)
+                .aspect_ratio(aspect_ratio)
+                .accessibility_label(format!("放大{label}"))
+                .tooltip("放大截图")
+                .child(
+                    img(path)
+                        .size_full()
+                        .rounded(RADIUS_SMALL)
+                        .object_fit(ObjectFit::Contain)
+                        .with_fallback(|| {
+                            theme::accessible_text(
+                                "failed-reader-context-image",
+                                "这张截图无法读取；对应正文仍可阅读。",
+                            )
+                            .into_any_element()
+                        }),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_reader_image(index, window, cx)
+                })),
+        );
+        panel = panel.child(
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .items_center()
+                .gap_2()
+                .when_some(timestamp, |row, timestamp| {
+                    row.child(
+                        theme::accessible_text("reader-context-time", timestamp)
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(TEXT_AUX)
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(color(GRAY)),
+                    )
+                })
+                .when_some(source_link, |row, url| {
+                    row.child(
+                        quiet(("reader-context-source", index))
+                            .icon(icons::play_arrow())
+                            .label("观看")
+                            .accessibility_label("从当前画面观看原视频")
+                            .tooltip("从此处观看")
+                            .on_click(move |_, _, cx| cx.open_url(&url)),
+                    )
+                }),
+        );
+        panel.into_any_element()
     }
     /// Contents are a reading rail; persistent selection belongs to the row
     /// surface so pointer feedback cannot erase the current chapter.
@@ -4953,7 +5155,10 @@ fn load_reader_data(preview: &notes::Preview) -> ReaderData {
                         section
                             .speech
                             .iter()
-                            .map(|speech| speech.text.as_str())
+                            .flat_map(|speech| {
+                                std::iter::once(speech.text.as_str())
+                                    .chain(speech.translation.as_deref())
+                            })
                             .collect::<Vec<_>>()
                             .join("\n\n")
                     })
@@ -5094,9 +5299,10 @@ fn image_zoom_offset(viewport: f32, old_extent: f32, new_extent: f32, offset: f3
 mod tests {
     use super::{
         ExportFeedback, ExportState, Frame, OfflineVideo, OfflineVideoRequest, PreviewBlock,
-        block_anchor, block_time, capture_reader_position, existing_export_folder,
-        exported_file_label, files_need_reload, frame_excerpt, image_zoom_offset, load_reader_data,
-        matching_frames, nav, note_position_index, processing_notice, restored_reader_offset,
+        block_anchor, block_time, capture_reader_position, contextual_frame_index,
+        existing_export_folder, exported_file_label, files_need_reload, frame_excerpt,
+        image_zoom_offset, load_reader_data, matching_frames, nav, note_position_index,
+        processing_notice, restored_reader_offset,
     };
     use crate::{ConversionOptions, notes::Course, source, workspace};
 
@@ -5185,6 +5391,44 @@ mod tests {
             None,
         );
         assert!(frame_excerpt(&phrase, "Buckmaster").starts_with("…OpenAI said that Buckmaster"));
+    }
+
+    #[test]
+    fn wide_reader_uses_the_frame_for_the_current_section() {
+        let blocks = vec![
+            PreviewBlock::Heading {
+                text: "第一节".into(),
+                anchor: "section-0".into(),
+                seconds: Some(10.),
+            },
+            PreviewBlock::Paragraph {
+                text: "第一节正文".into(),
+                anchor: "paragraph-0".into(),
+            },
+            PreviewBlock::Heading {
+                text: "第二节".into(),
+                anchor: "section-1".into(),
+                seconds: Some(20.),
+            },
+            PreviewBlock::Paragraph {
+                text: "第二节正文".into(),
+                anchor: "paragraph-1".into(),
+            },
+        ];
+        let frame = |section: usize, seconds: f64| Frame {
+            anchor: format!("frame-{section}"),
+            path: Some(format!("frame-{section}.png").into()),
+            seconds: Some(seconds),
+            caption: None,
+            transcript: String::new(),
+            body_anchor: Some(format!("section-{section}")),
+            width: 16,
+            height: 9,
+        };
+        let frames = vec![frame(0, 10.), frame(1, 20.)];
+
+        assert_eq!(contextual_frame_index(&frames, &blocks, 1), Some(0));
+        assert_eq!(contextual_frame_index(&frames, &blocks, 3), Some(1));
     }
 
     fn reading_blocks() -> Vec<PreviewBlock> {
@@ -5574,6 +5818,20 @@ mod tests {
                 .unwrap()
                 .starts_with(&old.dir)
         );
+    }
+
+    #[test]
+    fn reader_image_text_includes_translation() {
+        let root = tempfile::tempdir().unwrap();
+        let course = fixture_version(root.path(), 1, &[10.]);
+        let mut preview = crate::notes::read_preview(course).unwrap();
+        preview.document.as_mut().unwrap().sections[0].speech[0].translation =
+            Some("Translated context".into());
+
+        let data = load_reader_data(&preview);
+
+        assert!(data.frames[0].transcript.contains("10 秒的正文"));
+        assert!(data.frames[0].transcript.contains("Translated context"));
     }
 }
 

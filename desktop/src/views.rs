@@ -23,7 +23,9 @@ fn shell_column_for(page: Page) -> Div {
 
 fn shell_column_width(page: Page) -> AbsoluteLength {
     match page {
-        // 全产品一条内容标尺：工作台/任务/笔记库/阅读共用 COLUMN（设置是侧栏构图，自成一体）
+        // 阅读器在宽屏上增加章节画面；正文行长仍由阅读器自身约束。
+        Page::Result => READER_WIDE_COLUMN.into(),
+        // 工作台/任务/笔记库共用 COLUMN（设置是侧栏构图，自成一体）。
         Page::Settings => rems(SETTINGS_SHELL_WIDTH / 14.).into(),
         _ => COLUMN.into(),
     }

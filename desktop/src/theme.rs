@@ -227,6 +227,8 @@ pub fn task_dialog_top(window: &Window) -> Pixels {
 
 /* ---------- 栏宽（rems，随字号缩放的结构尺寸） ---------- */
 pub const COLUMN: Rems = rems(65.714);
+/// Reader-only wide shell: context image + prose + contents, including two gaps.
+pub const READER_WIDE_COLUMN: Rems = rems(97.);
 pub const TOC_PANEL: Rems = rems(16.);
 
 /* ---------- 字级（rems；14px 为 1rem 基准） ---------- */
