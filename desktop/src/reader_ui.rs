@@ -1473,6 +1473,7 @@ impl Desktop {
         let mut preferences = self.application_edit_base();
         preferences.desktop.library_cards = self.desktop_settings.library_cards;
         preferences.desktop.library_group_folders = self.desktop_settings.library_group_folders;
+        preferences.desktop.library_sort_by_title = self.desktop_settings.library_sort_by_title;
         self.commit_application(preferences, cx);
         cx.notify();
     }
