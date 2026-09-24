@@ -73,6 +73,45 @@ pub(crate) fn library_layout_choice(cards: bool) -> &'static str {
     if cards { "cards" } else { "list" }
 }
 
+fn natural_title_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let left = left.to_lowercase();
+    let right = right.to_lowercase();
+    let (left, right) = (left.as_bytes(), right.as_bytes());
+    let (mut l, mut r) = (0, 0);
+
+    while l < left.len() && r < right.len() {
+        if left[l].is_ascii_digit() && right[r].is_ascii_digit() {
+            let l_end = (l..left.len())
+                .find(|&index| !left[index].is_ascii_digit())
+                .unwrap_or(left.len());
+            let r_end = (r..right.len())
+                .find(|&index| !right[index].is_ascii_digit())
+                .unwrap_or(right.len());
+            let l_number = &left[l..l_end];
+            let r_number = &right[r..r_end];
+            let l_significant = l_number.iter().position(|byte| *byte != b'0').unwrap_or(l_number.len());
+            let r_significant = r_number.iter().position(|byte| *byte != b'0').unwrap_or(r_number.len());
+            let order = l_number[l_significant..]
+                .len()
+                .cmp(&r_number[r_significant..].len())
+                .then_with(|| l_number[l_significant..].cmp(&r_number[r_significant..]))
+                .then_with(|| l_number.len().cmp(&r_number.len()));
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+            (l, r) = (l_end, r_end);
+        } else {
+            let order = left[l].cmp(&right[r]);
+            if order != std::cmp::Ordering::Equal {
+                return order;
+            }
+            l += 1;
+            r += 1;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
 /// 文件夹分区：(保存位置根, 库名, [(文件夹 id, 名称)])。
 pub(crate) type LibrarySection = (std::path::PathBuf, String, Vec<(u64, String)>);
 
@@ -758,7 +797,7 @@ impl Desktop {
                 .collect(),
         };
         let coverage = scope.coverage();
-        let courses: Vec<_> = self
+        let mut courses: Vec<_> = self
             .courses
             .iter()
             .enumerate()
@@ -783,6 +822,9 @@ impl Desktop {
             })
             .map(|(index, course)| (index, course.clone()))
             .collect();
+        if self.desktop_settings.library_sort_by_title {
+            courses.sort_by(|left, right| natural_title_cmp(&left.1.title, &right.1.title));
+        }
         if self.library_recovery_view(&all_access, cx).is_some() {
             items.push(LibraryItem::Recovery);
         }
@@ -1442,6 +1484,7 @@ impl Desktop {
         }
         let group_on = self.desktop_settings.library_group_folders;
         let cards_on = self.desktop_settings.library_cards;
+        let sort_by_title = self.desktop_settings.library_sort_by_title;
         let can_group = self.folder_filter.is_none() && self.library_error.is_none();
         let controls = h_flex()
             .gap_2()
@@ -1490,6 +1533,26 @@ impl Desktop {
                 )
                 .child(self.folder_export_button(id, cx))
             })
+            .child(
+                outline_pill("library-sort-title")
+                    .icon(icons::arrow_up())
+                    .label("按名称")
+                    .selected(sort_by_title)
+                    .tooltip(if sort_by_title {
+                        "恢复按最近修改排序"
+                    } else {
+                        "按笔记名称排序"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.desktop_settings.library_sort_by_title =
+                            !this.desktop_settings.library_sort_by_title;
+                        this.library_list.scroll_to(ListOffset {
+                            item_ix: 0,
+                            offset_in_item: px(0.),
+                        });
+                        this.save_library_presentation(cx);
+                    })),
+            )
             .child(
                 SingleChoiceGroup::new("library-layout", "笔记显示方式")
                     .options([("list", "列表"), ("cards", "卡片")])
@@ -2325,5 +2388,12 @@ mod tests {
         );
         assert_eq!(super::library_layout_choice(false), "list");
         assert_eq!(super::library_layout_choice(true), "cards");
+    }
+
+    #[test]
+    fn title_sort_orders_numbered_notes_naturally() {
+        let mut titles = ["第 10 课", "第 2 课", "第 01 课", "第 1 课"];
+        titles.sort_by(|left, right| super::natural_title_cmp(left, right));
+        assert_eq!(titles, ["第 1 课", "第 01 课", "第 2 课", "第 10 课"]);
     }
 }

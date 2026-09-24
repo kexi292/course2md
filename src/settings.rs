@@ -89,6 +89,7 @@ impl Default for AsrApi {
 pub struct DesktopSettings {
     pub library_cards: bool,
     pub library_group_folders: bool,
+    pub library_sort_by_title: bool,
     pub setup_completed: bool,
     pub system_titlebar: bool,
     pub reduce_motion: bool,
