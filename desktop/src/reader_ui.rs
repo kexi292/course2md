@@ -1168,11 +1168,24 @@ impl NoteFlow {
     /// that reading positions and search jumps resolve against.
     fn item_wrapper(&self, index: usize, content: AnyElement) -> Stateful<Div> {
         let block = note_item_block(self.items[index]);
+        let followed_by_translation = matches!(
+            self.items.get(index + 1),
+            Some(NoteItem::Block(next)) if matches!(
+                &self.preview.blocks[*next],
+                PreviewBlock::Paragraph { anchor, .. } if anchor.ends_with("-translation")
+            )
+        );
         let mut wrapper = div()
             .w_full()
             .min_w_0()
             .flex_shrink_0()
-            .when(index + 1 != self.items.len(), |view| view.mb_3());
+            .when(index + 1 != self.items.len(), |view| {
+                if followed_by_translation {
+                    view.mb_1()
+                } else {
+                    view.mb_3()
+                }
+            });
         if let Some(block) = block {
             let positions = self.item_layout.clone();
             wrapper = wrapper.on_children_prepainted(move |bounds, _, _| {
@@ -1234,6 +1247,9 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                     .text_size(TEXT_TITLE)
                     .font_weight(FontWeight::SEMIBOLD),
             )
+            .when(anchor.ends_with("-translation"), |view| {
+                view.border_l_1().border_color(color(HAIRLINE)).pl_3()
+            })
             .into_any_element(),
         NoteItem::Block(index) => match &preview.blocks[index] {
             PreviewBlock::Heading {
