@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, ensure};
 use gpui_component::button::*;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 /// One row of the virtualized task queue. Task rows carry their index into
@@ -366,7 +366,9 @@ pub(crate) fn task_attention_summary(task: &TaskRecord) -> String {
 /// Rate limiting, timeouts and unknown outcomes must keep their own recovery.
 fn service_configuration_issue(message: &str) -> Option<&'static str> {
     let lower = message.to_ascii_lowercase();
-    if [
+    if lower.contains("content_policy_violation") {
+        Some("AI 服务因内容策略拒绝了正文处理，请改用其他兼容服务补做。")
+    } else if [
         "api key",
         "api_key",
         "unauthorized",
@@ -396,6 +398,29 @@ fn service_configuration_issue(message: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn proofreading_content_policy_rejection(task: &TaskRecord) -> bool {
+    let failed = task
+        .outcomes
+        .get("proofreading")
+        .filter(|outcome| {
+            matches!(
+                outcome.get("status").and_then(|status| status.as_str()),
+                Some("failed" | "partial")
+            )
+        })
+        .and_then(|outcome| outcome.get("message"))
+        .and_then(|message| message.as_str())
+        .is_some_and(|message| message.contains("content_policy_violation"));
+    failed
+        || task.blocked.iter().any(|request| {
+            request
+                .purpose
+                .as_deref()
+                .is_some_and(|purpose| purpose.contains("proof"))
+                && request.message.contains("content_policy_violation")
+        })
 }
 
 fn task_service_repair_reason(task: &TaskRecord) -> Option<&'static str> {
@@ -2088,49 +2113,7 @@ impl Desktop {
         ai_service: String,
         cx: &mut Context<Self>,
     ) -> bool {
-        let result = (|| -> Result<String> {
-            ensure!(
-                self.active_task.as_deref() != Some(&id) || self.job.is_none(),
-                "正在保存当前结果，请等待任务停止后再补做"
-            );
-            let task = self
-                .workspace
-                .as_ref()
-                .and_then(|workspace| workspace.state.task(&id))
-                .context("原任务记录暂时不可用")?;
-            let mut base = task.plan.config.clone();
-            let translation_service = task.plan.translation_service.clone();
-            base.defaults.transcript_source = Some(course2md::config::TranscriptSource::Subtitle);
-            base.llm.enabled &= components.iter().any(|part| part == "proofreading");
-            base.llm.summarize = components.iter().any(|part| part == "summary");
-            base.translation.enabled = components.iter().any(|part| part == "translation")
-                || (base.llm.enabled
-                    && base.llm.note_language == course2md::llm::NoteLanguage::ZhHans);
-            let translation_only = components.iter().all(|part| part == "translation");
-            let config = self.preferences.config_for_refs(
-                &base,
-                &ServiceRefs {
-                    asr: None,
-                    llm: (!translation_only).then(|| ai_service.clone()),
-                    translation: if translation_only {
-                        Some(ai_service.clone())
-                    } else {
-                        translation_service
-                    },
-                },
-            )?;
-            self.workspace
-                .as_mut()
-                .context("任务记录暂时不可用")?
-                .transaction(|state| {
-                    state.reprocess_with_service(
-                        &id,
-                        components,
-                        Vec::new(),
-                        Some((ai_service, config)),
-                    )
-                })
-        })();
+        let result = self.create_reprocess_task_with_service(&id, components, ai_service, false);
         match result {
             Ok(next) => {
                 self.workspace_error = None;
@@ -2146,6 +2129,110 @@ impl Desktop {
                 false
             }
         }
+    }
+
+    fn create_reprocess_task_with_service(
+        &mut self,
+        id: &str,
+        components: Vec<String>,
+        ai_service: String,
+        preserve_selection: bool,
+    ) -> Result<String> {
+        ensure!(
+            self.active_task.as_deref() != Some(id) || self.job.is_none(),
+            "正在保存当前结果，请等待任务停止后再补做"
+        );
+        let task = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.task(id))
+            .context("原任务记录暂时不可用")?;
+        let mut base = task.plan.config.clone();
+        let translation_service = task.plan.translation_service.clone();
+        base.defaults.transcript_source = Some(course2md::config::TranscriptSource::Subtitle);
+        base.llm.enabled &= components.iter().any(|part| part == "proofreading");
+        base.llm.summarize = components.iter().any(|part| part == "summary");
+        base.translation.enabled = components.iter().any(|part| part == "translation")
+            || (base.llm.enabled
+                && base.llm.note_language == course2md::llm::NoteLanguage::ZhHans);
+        let translation_only = components.iter().all(|part| part == "translation");
+        let config = self.preferences.config_for_refs(
+            &base,
+            &ServiceRefs {
+                asr: None,
+                llm: (!translation_only).then(|| ai_service.clone()),
+                translation: if translation_only {
+                    Some(ai_service.clone())
+                } else {
+                    translation_service
+                },
+            },
+        )?;
+        self.workspace
+            .as_mut()
+            .context("任务记录暂时不可用")?
+            .transaction(|state| {
+                let selected = state.selected_task.clone();
+                let next = state.reprocess_with_service(
+                    id,
+                    components,
+                    Vec::new(),
+                    Some((ai_service, config)),
+                )?;
+                if preserve_selection {
+                    state.selected_task = selected;
+                }
+                Ok(next)
+            })
+    }
+
+    fn automatically_reprocess_content_policy(&mut self, task: &TaskRecord) -> Option<String> {
+        if task.handled_by.is_some()
+            || task.artifact.is_none()
+            || !proofreading_content_policy_rejection(task)
+        {
+            return None;
+        }
+        let state = &self.workspace.as_ref()?.state;
+        let mut attempted = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut current = Some(task.id.as_str());
+        while let Some(id) = current {
+            if !visited.insert(id.to_owned()) {
+                break;
+            }
+            let Some(record) = state.task(id) else {
+                break;
+            };
+            if let Some(version) = record
+                .plan
+                .ai_service
+                .as_deref()
+                .and_then(|id| self.preferences.version(id))
+            {
+                attempted.insert(version.service_id.clone());
+            }
+            current = record.parent.as_deref();
+        }
+        let candidates = self
+            .preferences
+            .automatic_ai_fallbacks(&attempted, task.plan.options.vision);
+        for version in candidates {
+            let service_name = version.config.name.clone();
+            let model = version.config.model.clone();
+            if let Ok(next) = self.create_reprocess_task_with_service(
+                &task.id,
+                vec!["proofreading".into()],
+                version.id,
+                true,
+            ) {
+                self.message = Some(format!(
+                    "AI 校对被原服务的内容策略拒绝，已自动改用 {service_name}（{model}）补做"
+                ));
+                return Some(next);
+            }
+        }
+        None
     }
 
     pub fn adjust_task(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -2388,7 +2475,10 @@ impl Desktop {
                         self.open_completed_conversion(Course::from_completed(done), cx);
                     }
                 }
-                self.task_status = task.state.label().into();
+                let automatic_fallback = self.automatically_reprocess_content_policy(&task);
+                self.task_status = automatic_fallback
+                    .map(|_| "已切换 AI 服务补做校对".into())
+                    .unwrap_or_else(|| task.state.label().into());
                 self.transient_task_result = Some((id.to_owned(), std::time::Instant::now()));
             }
             Err(error) => {
@@ -4742,6 +4832,10 @@ mod tests {
                 "服务拒绝了请求参数（HTTP 422），请检查此任务使用的模型与服务设置。",
                 true,
             ),
+            (
+                "服务因内容策略拒绝了此请求。[content_policy_violation]",
+                true,
+            ),
             ("服务请求次数达到限制，请稍后重试。", false),
             ("服务未完成此请求（HTTP 500）。", false),
             ("请求超时，请稍后重试。", false),
@@ -4754,6 +4848,13 @@ mod tests {
                 "{message}"
             );
         }
+        outcomes.proofreading.message =
+            Some("服务因内容策略拒绝了此请求。[content_policy_violation]".into());
+        task.outcomes = serde_json::to_value(&outcomes).unwrap();
+        assert!(super::proofreading_content_policy_rejection(&task));
+        outcomes.proofreading.message = Some("服务请求次数达到限制，请稍后重试。".into());
+        task.outcomes = serde_json::to_value(&outcomes).unwrap();
+        assert!(!super::proofreading_content_policy_rejection(&task));
         outcomes.proofreading.message = Some("服务拒绝凭据".into());
         task.outcomes = serde_json::to_value(&outcomes).unwrap();
         task.blocked.push(crate::workspace::BlockedRequest {

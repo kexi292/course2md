@@ -322,6 +322,8 @@ pub struct ServiceDraft {
     pub protocol: ServiceProtocol,
     pub address: String,
     pub model: String,
+    #[serde(default)]
+    pub supports_vision: bool,
     pub authentication: Authentication,
     pub credential: Option<CredentialRef>,
     /// The variable name is informational. The captured value lives in the vault.
@@ -342,6 +344,7 @@ impl ServiceDraft {
             },
             address: String::new(),
             model: String::new(),
+            supports_vision: false,
             authentication: Authentication::ApiKey,
             credential: None,
             credential_source: None,
@@ -358,6 +361,7 @@ impl ServiceDraft {
             protocol: version.config.protocol,
             address: version.config.endpoint.clone(),
             model: version.config.model.clone(),
+            supports_vision: version.config.supports_vision,
             authentication: version.config.authentication,
             credential: version.config.credential.clone(),
             credential_source: version.config.credential_source.clone(),
@@ -434,6 +438,7 @@ impl ServiceDraft {
             protocol: self.protocol,
             endpoint,
             model: self.model.trim().to_owned(),
+            supports_vision: self.protocol == ServiceProtocol::AiChat && self.supports_vision,
             authentication: self.authentication,
             credential: if self.authentication == Authentication::ApiKey {
                 self.credential.clone()
@@ -463,6 +468,8 @@ pub struct ServiceConfiguration {
     /// A normalized, complete request URL, never an address containing credentials.
     pub endpoint: String,
     pub model: String,
+    #[serde(default)]
+    pub supports_vision: bool,
     pub authentication: Authentication,
     pub credential: Option<CredentialRef>,
     pub credential_source: Option<String>,
@@ -853,6 +860,35 @@ impl Store {
             }
         }
         latest
+    }
+    pub fn automatic_ai_fallbacks(
+        &self,
+        attempted_service_ids: &BTreeSet<ServiceId>,
+        needs_vision: bool,
+    ) -> Vec<ServiceVersion> {
+        let eligible = |version: &ServiceVersion| {
+            version.config.protocol == ServiceProtocol::AiChat
+                && !attempted_service_ids.contains(&version.service_id)
+                && !self.service_retired_in_snapshot(&version.service_id)
+                && (!needs_vision || version.config.supports_vision)
+        };
+        let default = self
+            .services
+            .defaults
+            .llm
+            .as_deref()
+            .and_then(|id| self.version(id))
+            .filter(|version| eligible(version))
+            .cloned();
+        let default_service = default.as_ref().map(|version| version.service_id.as_str());
+        let mut versions: Vec<_> = self
+            .latest_versions()
+            .into_values()
+            .filter(|version| eligible(version))
+            .filter(|version| Some(version.service_id.as_str()) != default_service)
+            .collect();
+        versions.sort_by_key(|version| std::cmp::Reverse((version.saved_at, version.number)));
+        default.into_iter().chain(versions).collect()
     }
     pub fn version(&self, id: &str) -> Option<&ServiceVersion> {
         self.services.versions.get(id)
@@ -1821,6 +1857,40 @@ mod tests {
         store
             .save_service_draft(draft, Some(Secret::new("test-only-secret")))
             .unwrap()
+    }
+
+    #[test]
+    fn vision_capability_is_backward_compatible_and_filters_automatic_fallbacks() {
+        let (_directory, mut store) = isolated();
+        let current = complete_draft(&mut store, "current-model");
+        let current = store
+            .publish_service(&current.id, BindingScope::CurrentTask)
+            .unwrap();
+
+        let mut visual = complete_draft(&mut store, "deepseek-flash");
+        visual.supports_vision = true;
+        let visual = store
+            .save_service_draft(visual, None)
+            .and_then(|draft| store.publish_service(&draft.id, BindingScope::Defaults))
+            .unwrap();
+        let text_only = complete_draft(&mut store, "text-only");
+        store
+            .publish_service(&text_only.id, BindingScope::CurrentTask)
+            .unwrap();
+
+        let attempted = BTreeSet::from([current.service_id]);
+        let candidates = store.automatic_ai_fallbacks(&attempted, true);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, visual.id);
+        assert!(candidates[0].config.supports_vision);
+
+        let mut legacy = serde_json::to_value(&visual.config).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("supports_vision");
+        let legacy: ServiceConfiguration = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.supports_vision);
     }
 
     #[test]

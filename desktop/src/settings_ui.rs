@@ -2928,6 +2928,25 @@ impl Desktop {
                     )),
             ),
         );
+        if protocol == ServiceProtocol::AiChat {
+            view = view.child(self.setting_preference(
+                icons::image(),
+                "支持视觉输入",
+                "此服务和模型可以接收截图或图片",
+                Switch::new("service-supports-vision")
+                    .checked(editor.draft.supports_vision)
+                    .disabled(awaiting_binding)
+                    .on_click(cx.listener(|this, value, _, cx| {
+                        if let Some(editor) = &mut this.settings_ui.editor {
+                            editor.draft.supports_vision = *value;
+                            editor.saved_configuration = None;
+                            editor.status = None;
+                            editor.save_failed = false;
+                        }
+                        cx.notify();
+                    })),
+            ));
+        }
         if editor.target.is_some() {
             view = view.child(
                 self.setting_preference(

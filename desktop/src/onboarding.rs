@@ -2890,6 +2890,7 @@ mod tests {
             protocol: ServiceProtocol::AiChat,
             endpoint: "https://example.test/v1/chat/completions".into(),
             model: "model-a".into(),
+            supports_vision: true,
             authentication: Authentication::None,
             credential: None,
             credential_source: None,
