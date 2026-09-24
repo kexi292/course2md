@@ -312,7 +312,7 @@ pub fn bind_work_dir(work_dir: &Path, binding: &serde_json::Value) -> Result<()>
         let old: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)
             .context("任务进度身份损坏，原文件已保留 / Task identity is damaged")?;
         anyhow::ensure!(
-            old == *binding,
+            old == *binding || added_cloud_asr_fallback_is_compatible(&old, binding),
             "任务来源或参数与已保存进度不一致，原进度已保留 / Task inputs changed; create a new task instead of reusing this work directory"
         );
     } else {
@@ -323,6 +323,61 @@ pub fn bind_work_dir(work_dir: &Path, binding: &serde_json::Value) -> Result<()>
         crate::checkpoint::atomic_write(&path, &serde_json::to_vec_pretty(binding)?)?;
     }
     Ok(())
+}
+
+fn added_cloud_asr_fallback_is_compatible(
+    old: &serde_json::Value,
+    new: &serde_json::Value,
+) -> bool {
+    if old
+        .pointer("/config/provider")
+        .and_then(|value| value.as_str())
+        != Some("api")
+        || new
+            .pointer("/config/provider")
+            .and_then(|value| value.as_str())
+            != Some("api")
+        || old
+            .pointer("/config/asr_fallback_provider")
+            .is_some_and(|value| !value.is_null())
+        || !matches!(
+            new.pointer("/config/asr_fallback_provider")
+                .and_then(|value| value.as_str()),
+            Some("cpu" | "gpu" | "coreml" | "npu")
+        )
+    {
+        return false;
+    }
+    let Some(new_config) = new.get("config").and_then(|value| value.as_object()) else {
+        return false;
+    };
+    let mut upgraded = old.clone();
+    let Some(config) = upgraded
+        .get_mut("config")
+        .and_then(|value| value.as_object_mut())
+    else {
+        return false;
+    };
+    for field in [
+        "asr_fallback_provider",
+        "asr_model",
+        "model_dir",
+        "threads",
+        "gpu_layers",
+        "mmproj_offload",
+    ] {
+        match new_config.get(field) {
+            Some(value) => {
+                config.insert(field.into(), value.clone());
+            }
+            None => {
+                config.remove(field);
+            }
+        }
+    }
+    // Keep the immutable comparison explicit: the fields above are the only
+    // values the desktop adds when upgrading an old cloud task for local fallback.
+    upgraded == *new
 }
 
 pub async fn run(request: Request) -> Result<()> {
@@ -426,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_cloud_fallback_keeps_legacy_work_identity() {
+    fn local_task_cannot_add_a_cloud_fallback_to_its_identity() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg =
             crate::options::resolve("video.mp4".into(), &Default::default(), &Default::default())
@@ -440,6 +495,33 @@ mod tests {
         let enabled = serde_json::json!({"config": cfg});
         assert!(enabled["config"].get("asr_fallback_provider").is_some());
         assert!(bind_work_dir(dir.path(), &enabled).is_err());
+    }
+
+    #[test]
+    fn old_cloud_task_can_add_only_local_fallback_runtime_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            crate::options::resolve("video.mp4".into(), &Default::default(), &Default::default())
+                .unwrap();
+        cfg.provider = crate::config::AsrProvider::Api;
+        let legacy = serde_json::json!({"title":"same", "config": cfg});
+        bind_work_dir(dir.path(), &legacy).unwrap();
+
+        cfg.asr_fallback_provider = Some(crate::config::AsrProvider::Gpu);
+        cfg.asr_model = Some("qwen3-1.7b".into());
+        cfg.model_dir = "current-models".into();
+        cfg.threads = 6;
+        cfg.gpu_layers = 99;
+        cfg.mmproj_offload = false;
+        let upgraded = serde_json::json!({"title":"same", "config": cfg});
+        bind_work_dir(dir.path(), &upgraded).unwrap();
+
+        let mut changed = upgraded.clone();
+        changed["title"] = "different".into();
+        assert!(bind_work_dir(dir.path(), &changed).is_err());
+        changed = upgraded;
+        changed["config"]["max_speech"] = 19.0.into();
+        assert!(bind_work_dir(dir.path(), &changed).is_err());
     }
 
     #[test]
