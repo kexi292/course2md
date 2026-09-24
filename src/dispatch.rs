@@ -122,8 +122,25 @@ impl Failure {
     }
 }
 
-fn rejection_message(status: u16, details: Option<&str>) -> String {
-    let generic = match status {
+fn content_policy_violation(value: Option<&Value>) -> bool {
+    let Some(error) = value.and_then(|value| value.get("error")) else {
+        return false;
+    };
+    ["type", "code"].into_iter().any(|field| {
+        error
+            .get(field)
+            .and_then(Value::as_str)
+            .map(|value| value.trim().replace([' ', '-'], "_").to_ascii_lowercase())
+            .as_deref()
+            == Some("content_policy_violation")
+    })
+}
+
+fn rejection_message(status: u16, value: Option<&Value>, details: Option<&str>) -> String {
+    let generic = if content_policy_violation(value) {
+        "服务因内容策略拒绝了此请求，可尝试其他兼容的 AI 服务。 / The service rejected this request due to its content policy; another compatible AI service may accept it. [content_policy_violation]".into()
+    } else {
+        match status {
         401 => "服务未接受此任务保存的凭据，请检查对应服务的 API Key。 / The service rejected the saved credentials; check the API key for that service.".into(),
         403 => "此任务使用的凭据没有访问该服务或模型的权限。 / The credentials used by this task cannot access that service or model.".into(),
         404 => "服务未找到此任务指定的接口或模型，请检查服务地址和模型。 / The service does not have the endpoint or model this task names; check the base URL and model.".into(),
@@ -131,7 +148,8 @@ fn rejection_message(status: u16, details: Option<&str>) -> String {
         400 | 422 => {
             format!("服务拒绝了请求参数（HTTP {status}），请检查此任务使用的模型与服务设置。 / The service rejected the request parameters (HTTP {status}); check the model and service settings for this task.")
         }
-        _ => format!("服务未完成此请求（HTTP {status}）。 / The service did not complete this request (HTTP {status})."),
+            _ => format!("服务未完成此请求（HTTP {status}）。 / The service did not complete this request (HTTP {status})."),
+        }
     };
     match details {
         Some(details) if !details.is_empty() => format!("{generic} [{details}]"),
@@ -707,6 +725,7 @@ impl Ledger {
                 rejects_response_format(response.status, value.as_ref().ok());
             receipt.message = Some(rejection_message(
                 response.status,
+                value.as_ref().ok(),
                 provider_error_details(
                     value.as_ref().ok(),
                     response.provider_request_id.as_deref(),
@@ -729,6 +748,7 @@ impl Ledger {
                 receipt.state = State::Failed;
                 receipt.message = Some(rejection_message(
                     response.status,
+                    value.as_ref().ok(),
                     provider_error_details(
                         value.as_ref().ok(),
                         response.provider_request_id.as_deref(),
@@ -835,26 +855,18 @@ pub fn json_request_described(
         unsupported_response_format: false,
     })?;
     if !(200..300).contains(&response.status) {
+        let value = serde_json::from_slice::<Value>(&response.body).ok();
         return Err(Failure {
             status: Some(response.status),
             retryable: response.status == 429 || response.status >= 500,
             uncertain: false,
             message: rejection_message(
                 response.status,
-                provider_error_details(
-                    serde_json::from_slice::<Value>(&response.body)
-                        .ok()
-                        .as_ref(),
-                    response.provider_request_id.as_deref(),
-                )
-                .as_deref(),
+                value.as_ref(),
+                provider_error_details(value.as_ref(), response.provider_request_id.as_deref())
+                    .as_deref(),
             ),
-            unsupported_response_format: rejects_response_format(
-                response.status,
-                serde_json::from_slice::<Value>(&response.body)
-                    .ok()
-                    .as_ref(),
-            ),
+            unsupported_response_format: rejects_response_format(response.status, value.as_ref()),
         });
     }
     let value = serde_json::from_slice(&response.body).map_err(Failure::local)?;
@@ -969,6 +981,24 @@ mod tests {
             500,
             Some(&serde_json::json!({"error":{"message":"response_format is unsupported"}}))
         ));
+    }
+
+    #[test]
+    fn content_policy_rejection_is_not_reported_as_a_credential_failure() {
+        let policy = serde_json::json!({
+            "error": {
+                "message": "input rejected",
+                "type": "content policy violation"
+            }
+        });
+        let message = rejection_message(403, Some(&policy), None);
+        assert!(message.contains("content_policy_violation"));
+        assert!(message.contains("内容策略"));
+        assert!(!message.contains("凭据没有访问"));
+
+        let ordinary = rejection_message(403, Some(&serde_json::json!({})), None);
+        assert!(ordinary.contains("凭据没有访问"));
+        assert!(!ordinary.contains("content_policy_violation"));
     }
 
     #[test]
