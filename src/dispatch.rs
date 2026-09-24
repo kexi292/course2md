@@ -1033,7 +1033,7 @@ mod tests {
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 1024];
-            stream.read(&mut request).unwrap();
+            assert!(stream.read(&mut request).unwrap() > 0);
             stream
                 .write_all(
                     b"HTTP/1.1 400 Bad Request\r\nContent-Length: 2\r\nX-DashScope-Request-Id: provider-123\r\nConnection: close\r\n\r\n{}",

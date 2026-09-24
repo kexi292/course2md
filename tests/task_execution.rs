@@ -1111,7 +1111,7 @@ fn proofreading_resend_continues_unsent_summary_without_repeating_source_work() 
     assert!(first.status.success(), "{first_events:#?}");
     assert!(first_events.iter().any(|event| event["type"] == "stage"));
     assert_eq!(mock.calls.load(Ordering::SeqCst), 3);
-    let mut receipts = course2md::dispatch::receipts(&original.work_dir).unwrap();
+    let receipts = course2md::dispatch::receipts(&original.work_dir).unwrap();
     assert_eq!(receipts.len(), 2);
     let receipt = receipts
         .iter()
