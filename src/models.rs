@@ -23,7 +23,13 @@ pub mod status;
 pub fn normalize_apple_model(s: &str) -> Result<String> {
     let s = s.trim().to_ascii_lowercase();
     match s.as_str() {
-        "" | "qwen" | "qwen3" | "1.7" | "1.7b" | "qwen3-1.7b" | "qwen3-asr-1.7b"
+        ""
+        | "qwen"
+        | "qwen3"
+        | "1.7"
+        | "1.7b"
+        | "qwen3-1.7b"
+        | "qwen3-asr-1.7b"
         | "qwen3-asr-1.7b-q8_0.gguf" => Ok("qwen3-1.7b".into()),
         "0.6" | "0.6b" | "qwen3-0.6b" | "qwen3-asr-0.6b" => Ok("qwen3-0.6b".into()),
         "whisper" | "whisper-large-v3-turbo" => Ok("whisper".into()),
@@ -64,7 +70,9 @@ pub async fn ensure_cache(
             }
             #[cfg(not(apple_native))]
             {
-                Err(anyhow::anyhow!("此程序未包含 Apple 原生识别运行时 / This build does not include the Apple native transcription runtime"))
+                Err(anyhow::anyhow!(
+                    "此程序未包含 Apple 原生识别运行时 / This build does not include the Apple native transcription runtime"
+                ))
             }
         }
         AsrProvider::Npu => {
@@ -111,14 +119,18 @@ pub async fn prepare(
             }
             #[cfg(not(apple_native))]
             {
-                Err(anyhow::anyhow!("此转换程序未包含 Apple 原生识别运行时 / This build does not include the Apple native transcription runtime"))
+                Err(anyhow::anyhow!(
+                    "此转换程序未包含 Apple 原生识别运行时 / This build does not include the Apple native transcription runtime"
+                ))
             }
         }
         AsrProvider::Npu => {
             let model = crate::npu::resolve_npu_model(Some(model));
             tokio::task::spawn_blocking(move || crate::npu::prepare_npu_model(&model))
                 .await
-                .context("NPU 模型准备进程未完成 / NPU model preparation process did not complete")?
+                .context(
+                    "NPU 模型准备进程未完成 / NPU model preparation process did not complete",
+                )?
         }
         AsrProvider::Api => unreachable!(),
     };
@@ -129,7 +141,9 @@ pub async fn prepare(
     let loaded = result.is_ok() && matches!(provider, AsrProvider::Coreml | AsrProvider::Npu);
     let error = result.as_ref().err().map(|error| format!("{error:#}"));
     if let Err(error) = status::record_result(&after, loaded, error) {
-        tracing::warn!("模型检查结果暂时无法保存 / Could not save the model check result: {error:#}");
+        tracing::warn!(
+            "模型检查结果暂时无法保存 / Could not save the model check result: {error:#}"
+        );
     }
     result?;
     crate::progress::stage("model/prepare", "done");

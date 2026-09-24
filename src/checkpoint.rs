@@ -97,7 +97,9 @@ impl Checkpoint {
         };
 
         let identity_matches = Self::stored_identity(&identity_path).map(|stored| {
-            let ok = stored.as_ref() == Some(identity);
+            let ok = stored.as_ref().is_some_and(|stored| {
+                stored == identity || added_api_fallback_is_compatible(stored, identity)
+            });
             if !ok {
                 match stored {
                     Some(old) => tracing::info!(
@@ -141,7 +143,12 @@ impl Checkpoint {
                     // 保留既有内容（partial resume），显式不 truncate
                     .truncate(false)
                     .open(&path)
-                    .with_context(|| format!("打开 checkpoint {0} / Failed to open checkpoint {0}", path.display()))?;
+                    .with_context(|| {
+                        format!(
+                            "打开 checkpoint {0} / Failed to open checkpoint {0}",
+                            path.display()
+                        )
+                    })?;
                 let file_len = f.metadata().map(|m| m.len()).unwrap_or(0);
                 if loaded.valid_len < file_len {
                     // 打开写入句柄前把文件截断到最后一个完整行：
@@ -155,8 +162,12 @@ impl Checkpoint {
                     // 末行是合法 JSON 但缺尾换行（手改文件）：先补换行再追加
                     use std::io::Seek as _;
                     f.seek(std::io::SeekFrom::End(0))?;
-                    f.write_all(b"\n")
-                        .with_context(|| format!("补换行 {0} / Failed to append newline to {0}", path.display()))?;
+                    f.write_all(b"\n").with_context(|| {
+                        format!(
+                            "补换行 {0} / Failed to append newline to {0}",
+                            path.display()
+                        )
+                    })?;
                 }
                 // 非 append 句柄：后续 record 前定位到文件尾（单写者进程，一次即可）
                 use std::io::Seek as _;
@@ -176,11 +187,11 @@ impl Checkpoint {
         if !path.is_file() {
             return Ok(None);
         }
-        let s =
-            std::fs::read_to_string(path).with_context(|| format!("读取 {0} / Failed to read {0}", path.display()))?;
-        Ok(Some(
-            serde_json::from_str(&s).context("checkpoint 身份文件损坏 / checkpoint identity file is corrupted")?,
-        ))
+        let s = std::fs::read_to_string(path)
+            .with_context(|| format!("读取 {0} / Failed to read {0}", path.display()))?;
+        Ok(Some(serde_json::from_str(&s).context(
+            "checkpoint 身份文件损坏 / checkpoint identity file is corrupted",
+        )?))
     }
 
     fn clear(path: &Path, done_path: &Path, identity_path: &Path) -> Result<()> {
@@ -201,8 +212,12 @@ impl Checkpoint {
             .tempdir_in(&history)?
             .keep();
         for file in old {
-            std::fs::rename(file, archive.join(file.file_name().unwrap()))
-                .with_context(|| format!("无法保留旧识别进度 {0} / Cannot preserve previous transcription progress {0}", file.display()))?;
+            std::fs::rename(file, archive.join(file.file_name().unwrap())).with_context(|| {
+                format!(
+                    "无法保留旧识别进度 {0} / Cannot preserve previous transcription progress {0}",
+                    file.display()
+                )
+            })?;
         }
         Ok(())
     }
@@ -217,8 +232,8 @@ impl Checkpoint {
                 needs_newline: false,
             });
         }
-        let content =
-            std::fs::read_to_string(path).with_context(|| format!("读取 {0} / Failed to read {0}", path.display()))?;
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("读取 {0} / Failed to read {0}", path.display()))?;
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
         let last_idx = lines.len().saturating_sub(1);
         let mut out: Vec<TranscriptEvent> = vec![];
@@ -297,21 +312,34 @@ impl Checkpoint {
         };
         if self.file.is_none() {
             if let Some(dir) = self.path.parent() {
-                std::fs::create_dir_all(dir)
-                    .with_context(|| format!("创建 checkpoint 目录 {0} / Failed to create checkpoint directory {0}", dir.display()))?;
+                std::fs::create_dir_all(dir).with_context(|| {
+                    format!(
+                        "创建 checkpoint 目录 {0} / Failed to create checkpoint directory {0}",
+                        dir.display()
+                    )
+                })?;
             }
             self.file = Some(
                 std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&self.path)
-                    .with_context(|| format!("打开 checkpoint {0} / Failed to open checkpoint {0}", self.path.display()))?,
+                    .with_context(|| {
+                        format!(
+                            "打开 checkpoint {0} / Failed to open checkpoint {0}",
+                            self.path.display()
+                        )
+                    })?,
             );
         }
         let line = serde_json::to_string(&ev)?;
         if let Some(f) = &mut self.file {
-            writeln!(f, "{line}")
-                .with_context(|| format!("写 checkpoint {0} / Failed to write checkpoint {0}", self.path.display()))?;
+            writeln!(f, "{line}").with_context(|| {
+                format!(
+                    "写 checkpoint {0} / Failed to write checkpoint {0}",
+                    self.path.display()
+                )
+            })?;
             f.flush()
                 .with_context(|| format!("flush checkpoint {}", self.path.display()))?;
         }
@@ -331,6 +359,18 @@ impl Checkpoint {
     }
 }
 
+fn added_api_fallback_is_compatible(old: &AsrIdentity, new: &AsrIdentity) -> bool {
+    old.schema_version == new.schema_version
+        && old.provider == "api"
+        && new.provider == old.provider
+        && old.max_speech == new.max_speech
+        && !old.model.contains(":fallback=")
+        && new
+            .model
+            .strip_prefix(&old.model)
+            .is_some_and(|suffix| suffix.starts_with(":fallback="))
+}
+
 /// 小文件原子写：tmp → fsync → rename，避免崩溃留下半截文件。
 /// 保证级别：崩溃安全（文件本体已 fsync 后才 rename）；
 /// 不含掉电场景下父目录的 fsync（极端掉电时目录项本身可能未落盘）。
@@ -339,7 +379,12 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    std::fs::create_dir_all(dir).with_context(|| format!("创建目录 {0} / Failed to create directory {0}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| {
+        format!(
+            "创建目录 {0} / Failed to create directory {0}",
+            dir.display()
+        )
+    })?;
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(bytes)
         .with_context(|| format!("写 {0} / Failed to write {0}", path.display()))?;
@@ -434,6 +479,21 @@ mod tests {
         let cp = Checkpoint::open(&d, true, &identity("whisper")).unwrap();
         assert!(!cp.is_done(0.0, 2.0), "换模型后旧 chunk 必须作废");
         assert!(cp.events().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn adding_api_fallback_preserves_cloud_progress() {
+        let d = tmpdir("api-fallback");
+        let old = AsrIdentity::new("api", "endpoint:mode:model", 20.0);
+        let mut cp = Checkpoint::open(&d, true, &old).unwrap();
+        cp.record(0.0, 2.0, "云端结果").unwrap();
+        drop(cp);
+
+        let upgraded = AsrIdentity::new("api", "endpoint:mode:model:fallback=cpu:qwen3-1.7b", 20.0);
+        let cp = Checkpoint::open(&d, true, &upgraded).unwrap();
+        assert!(cp.is_done(0.0, 2.0));
+        assert_eq!(cp.events()[0].text, "云端结果");
         let _ = std::fs::remove_dir_all(&d);
     }
 

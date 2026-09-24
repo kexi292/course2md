@@ -310,7 +310,9 @@ pub fn prepare_cache(model: &str) -> Result<()> {
             "{}",
             CStr::from_bytes_until_nul(&error)
                 .map(|error| error.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "Apple 模型缓存准备失败 / Apple model cache preparation failed".into())
+                .unwrap_or_else(|_| {
+                    "Apple 模型缓存准备失败 / Apple model cache preparation failed".into()
+                })
         );
     }
     Ok(())
@@ -350,7 +352,8 @@ pub fn run_coreml(
     ensure_metallib()?;
     tracing::info!(model, "loading cached Apple native ASR");
     crate::progress::stage("model/apple", "start");
-    let asr = CoremlAsr::load(model).context("CoreML 模型加载失败 / CoreML model loading failed")?;
+    let asr =
+        CoremlAsr::load(model).context("CoreML 模型加载失败 / CoreML model loading failed")?;
     crate::progress::stage("model/apple", "done");
     tracing::info!(
         secs = format_args!("{:.1}", t0.elapsed().as_secs_f64()),

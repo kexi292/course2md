@@ -193,8 +193,8 @@ fn concrete_url(info: &ExtractorInfo) -> Option<String> {
 /// Parse one metadata response from a subtitle-enabled, flat-playlist extraction.
 /// Successful extraction can still contain explicit subtitle permission warnings.
 pub fn parse_online_probe(bytes: &[u8], input: &str, diagnostics: &str) -> Result<OnlineProbe> {
-    let info: ExtractorInfo =
-        serde_json::from_slice(bytes).context("无法读取视频信息，请重新读取 / Cannot read video info; probe again")?;
+    let info: ExtractorInfo = serde_json::from_slice(bytes)
+        .context("无法读取视频信息，请重新读取 / Cannot read video info; probe again")?;
     if info.kind == "multi_video" {
         return Ok(OnlineProbe::Unresolved {
             message: "这个来源由多个媒体片段组成，暂时无法确认完整的视频范围。请选择本地完整视频。 / This source consists of multiple media segments, so the full video range cannot be confirmed yet. Choose a complete local video."
@@ -428,20 +428,30 @@ pub fn local_content_identity(
     use sha2::{Digest, Sha256};
     use std::io::Read;
     use std::sync::atomic::Ordering;
-    let mut file = std::fs::File::open(path)
-        .with_context(|| format!("无法读取视频文件 {0} / Cannot read video file {0}", path.display()))?;
+    let mut file = std::fs::File::open(path).with_context(|| {
+        format!(
+            "无法读取视频文件 {0} / Cannot read video file {0}",
+            path.display()
+        )
+    })?;
     let before = file.metadata()?;
     let mut hash = Sha256::new();
     let mut buffer = vec![0; 1024 * 1024];
     loop {
-        ensure!(!cancel.load(Ordering::Relaxed), "已取消读取视频 / Video reading cancelled");
+        ensure!(
+            !cancel.load(Ordering::Relaxed),
+            "已取消读取视频 / Video reading cancelled"
+        );
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
         }
         hash.update(&buffer[..count]);
     }
-    ensure!(!cancel.load(Ordering::Relaxed), "已取消读取视频 / Video reading cancelled");
+    ensure!(
+        !cancel.load(Ordering::Relaxed),
+        "已取消读取视频 / Video reading cancelled"
+    );
     let after = file.metadata()?;
     ensure!(
         before.len() == after.len() && before.modified().ok() == after.modified().ok(),
@@ -467,7 +477,9 @@ pub async fn probe_video(url: &str) -> Result<OnlineVideo> {
     match probe_online(url).await? {
         OnlineProbe::Video { video } => Ok(video),
         OnlineProbe::Collection { .. } => {
-            anyhow::bail!("这个链接包含多个视频，请选择具体单集后生成笔记 / This link contains multiple videos; choose a specific episode before generating notes")
+            anyhow::bail!(
+                "这个链接包含多个视频，请选择具体单集后生成笔记 / This link contains multiple videos; choose a specific episode before generating notes"
+            )
         }
         OnlineProbe::Unresolved { message } => anyhow::bail!("{message}"),
     }
@@ -515,15 +527,21 @@ pub async fn fetch_subtitle(video: &OnlineVideo, out_dir: &Path) -> Result<Optio
                 "zh",
                 video.original_language.as_deref(),
             );
-            let track = tracks.first().context("字幕列表为空，请重新读取字幕 / Subtitle list is empty; probe subtitles again")?;
+            let track = tracks.first().context(
+                "字幕列表为空，请重新读取字幕 / Subtitle list is empty; probe subtitles again",
+            )?;
             fetch_selected_subtitle(&video.meta.webpage_url, &video.identity, track, out_dir)
                 .await
                 .map(Some)
         }
         SubtitleEvidence::Failed { message } => {
-            anyhow::bail!("字幕未读取成功，尚不能确认是否可用 / Subtitles were not read successfully, so availability cannot be confirmed yet: {message}")
+            anyhow::bail!(
+                "字幕未读取成功，尚不能确认是否可用 / Subtitles were not read successfully, so availability cannot be confirmed yet: {message}"
+            )
         }
-        SubtitleEvidence::Unchecked => anyhow::bail!("尚未检查字幕，请重新读取视频信息 / Subtitles not checked yet; probe the video info again"),
+        SubtitleEvidence::Unchecked => anyhow::bail!(
+            "尚未检查字幕，请重新读取视频信息 / Subtitles not checked yet; probe the video info again"
+        ),
         SubtitleEvidence::NoneFound | SubtitleEvidence::Unsupported { .. } => Ok(None),
     }
 }
@@ -607,7 +625,9 @@ pub async fn fetch_selected_subtitle(
                 video.identity == source_identity,
                 "视频来源发生变化，请重新读取并选择字幕 / The video source changed; probe again and reselect the subtitle"
             ),
-            _ => anyhow::bail!("无法确认字幕对应的视频，请重新读取 / Cannot confirm the video for the subtitle; probe again"),
+            _ => anyhow::bail!(
+                "无法确认字幕对应的视频，请重新读取 / Cannot confirm the video for the subtitle; probe again"
+            ),
         }
         let path = crate::subtitle::pick_subtitle_file(temp.path())
             .context("所选字幕没有下载成功，请重新读取字幕或明确选择其他文字来源 / The selected subtitle was not downloaded; probe subtitles again or explicitly choose another text source")?;
@@ -773,7 +793,10 @@ async fn run_output(cmd: &mut Command) -> Result<std::process::Output> {
         let stderr = String::from_utf8_lossy(&out.stderr);
         if let Some(delay) = bilibili_retry_delay(&stderr, retries) {
             retries += 1;
-            tracing::warn!(retries, "Bilibili HTTP 412，等待后重试 / Bilibili HTTP 412; retrying after a wait");
+            tracing::warn!(
+                retries,
+                "Bilibili HTTP 412，等待后重试 / Bilibili HTTP 412; retrying after a wait"
+            );
             tokio::time::sleep(delay).await;
             continue;
         }

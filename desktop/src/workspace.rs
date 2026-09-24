@@ -790,6 +790,11 @@ impl State {
             intent != Intent::Run || !matches!(task.state, TaskState::Running | TaskState::Pausing),
             "这项任务正在处理当前操作"
         );
+        if intent == Intent::Run {
+            // Paused and attention-needed tasks are checked lazily when the user
+            // resumes them, keeping their historical receipts out of cold start.
+            reconcile_receipts(task)?;
+        }
         ensure!(
             intent != Intent::Run
                 || !task
@@ -798,6 +803,26 @@ impl State {
                     .any(|request| request.reason == "uncertain"),
             "仍有请求结果尚未确认，请查看请求范围后选择是否重新发送"
         );
+        if intent == Intent::Run {
+            let local_fallback = task
+                .plan
+                .config
+                .defaults
+                .asr_fallback_provider
+                .is_some();
+            for receipt in course2md::dispatch::receipts(&task.work_dir)?.into_iter().filter(
+                |receipt| {
+                    !local_fallback
+                        && receipt.state == course2md::dispatch::State::Rejected
+                        && receipt.purpose == "transcription"
+                        && receipt.http_status != Some(429)
+                },
+            ) {
+                if !task.resend.contains(&receipt.request_id) {
+                    task.resend.push(receipt.request_id);
+                }
+            }
+        }
         task.intent = intent;
         task.updated = now();
         task.state = match intent {
@@ -1635,13 +1660,23 @@ impl Workspace {
         };
         state.recover();
         for task in &mut state.tasks {
+            // Only tasks that can start automatically need a cold-start receipt
+            // check. Paused/attention-needed tasks reconcile when the user resumes
+            // them; terminal tasks reconcile in their explicit reprocess path.
+            let needs_receipt_reconciliation = task.state == TaskState::Queued
+                && task.intent == Intent::Run
+                && task.handled_by.is_none();
             let result = state
                 .libraries
                 .iter()
                 .find(|location| location.id == task.plan.library_id)
                 .map(|location| reconcile_artifact(task, location))
                 .unwrap_or(Ok(()))
-                .and_then(|_| reconcile_receipts(task));
+                .and_then(|_| {
+                    needs_receipt_reconciliation
+                        .then(|| reconcile_receipts(task))
+                        .unwrap_or(Ok(()))
+                });
             if let Err(error) = result {
                 task.state = TaskState::NeedsAttention;
                 task.error = Some(format!("请求记录暂时无法读取，尚未发送新请求：{error:#}"));
@@ -2471,6 +2506,90 @@ mod tests {
         assert!(failed.unread);
     }
 
+    #[test]
+    fn resuming_a_paused_task_reconciles_deferred_receipts_before_queueing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        let task = ws.state.task_mut(&id).unwrap();
+        task.state = TaskState::Paused;
+        task.intent = Intent::Pause;
+        write_unknown(task, 1);
+        ws.save().unwrap();
+        drop(ws);
+
+        let mut reopened = test_workspace(dir.path());
+        let task = reopened.state.task(&id).unwrap();
+        assert_eq!(task.state, TaskState::Paused);
+        assert!(task.blocked.is_empty());
+
+        let error = reopened
+            .transaction(|state| state.set_intent(&id, Intent::Run))
+            .unwrap_err();
+        assert!(error.to_string().contains("仍有请求结果尚未确认"));
+        assert_eq!(reopened.state.task(&id).unwrap().state, TaskState::Paused);
+        assert!(reopened.state.task(&id).unwrap().blocked.is_empty());
+    }
+
+    #[test]
+    fn resuming_authorizes_rejected_transcription_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        let task = ws.state.task_mut(&id).unwrap();
+        task.state = TaskState::NeedsAttention;
+        task.intent = Intent::Pause;
+        let transcription = write_receipt(
+            task,
+            "transcription-request",
+            "transcription",
+            1,
+            course2md::dispatch::State::Rejected,
+            Some(400),
+        );
+        write_receipt(
+            task,
+            "proofreading-request",
+            "proofreading",
+            1,
+            course2md::dispatch::State::Rejected,
+            Some(400),
+        );
+
+        ws.state.set_intent(&id, Intent::Run).unwrap();
+
+        let task = ws.state.task(&id).unwrap();
+        assert_eq!(task.state, TaskState::Queued);
+        assert_eq!(task.resend, vec![transcription]);
+
+        let mut fallback_plan = plan(&ws.state.default_library);
+        fallback_plan.config.defaults.asr_fallback_provider =
+            Some(course2md::config::AsrProvider::Cpu);
+        let fallback_id = ws.state.enqueue(fallback_plan, None).unwrap().0;
+        let fallback_task = ws.state.task_mut(&fallback_id).unwrap();
+        fallback_task.state = TaskState::NeedsAttention;
+        fallback_task.intent = Intent::Pause;
+        write_receipt(
+            fallback_task,
+            "fallback-transcription-request",
+            "transcription",
+            1,
+            course2md::dispatch::State::Rejected,
+            Some(400),
+        );
+
+        ws.state.set_intent(&fallback_id, Intent::Run).unwrap();
+        assert!(ws.state.task(&fallback_id).unwrap().resend.is_empty());
+    }
+
     fn test_workspace(dir: &Path) -> Workspace {
         Workspace::open_at(
             dir.join("workspace.json"),
@@ -2551,22 +2670,41 @@ mod tests {
     }
 
     fn write_unknown(task: &TaskRecord, attempt: u32) -> String {
-        let id = format!("stable-request.{attempt}");
+        write_receipt(
+            task,
+            "stable-request",
+            "proofreading",
+            attempt,
+            course2md::dispatch::State::Uncertain,
+            None,
+        )
+    }
+
+    fn write_receipt(
+        task: &TaskRecord,
+        stable_id: &str,
+        purpose: &str,
+        attempt: u32,
+        state: course2md::dispatch::State,
+        http_status: Option<u16>,
+    ) -> String {
+        let id = format!("{stable_id}.{attempt}");
         let receipt = course2md::dispatch::Receipt {
             schema: 1,
-            stable_id: "stable-request".into(),
-            logical_id: "stable-request".into(),
+            stable_id: stable_id.into(),
+            logical_id: stable_id.into(),
             task_id: String::new(),
-            stage: "proofreading".into(),
+            stage: purpose.into(),
             segment_start: None,
             segment_end: None,
+            provider_request_id: None,
             request_id: id.clone(),
-            purpose: "proofreading".into(),
+            purpose: purpose.into(),
             description: "校对 00:00–00:20 的文字".into(),
             service_version: "version-a".into(),
             attempt,
-            state: course2md::dispatch::State::Uncertain,
-            http_status: None,
+            state,
+            http_status,
             response: None,
             message: Some("连接断开 / connection lost".into()),
             unsupported_response_format: false,
@@ -2575,7 +2713,7 @@ mod tests {
         };
         std::fs::create_dir_all(task.work_dir.join("requests")).unwrap();
         std::fs::write(
-            task.work_dir.join("requests/stable-request.json"),
+            task.work_dir.join("requests").join(format!("{stable_id}.json")),
             serde_json::to_vec(&receipt).unwrap(),
         )
         .unwrap();
@@ -2707,6 +2845,7 @@ mod tests {
                 stage: "summary".into(),
                 segment_start: None,
                 segment_end: None,
+                provider_request_id: None,
                 request_id: "summary-request.1".into(),
                 purpose: "summary".into(),
                 description: "生成摘要".into(),
@@ -2795,6 +2934,34 @@ mod tests {
         assert_eq!(task.state, TaskState::Complete);
         assert_eq!(task.artifact.as_ref(), Some(&version));
         assert!(restored.state.next_task().is_none());
+    }
+
+    #[test]
+    fn startup_defers_terminal_receipts_but_explicit_reconcile_still_checks_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let id = ws
+            .state
+            .enqueue(plan(&ws.state.default_library), None)
+            .unwrap()
+            .0;
+        let version = publish_note(&ws.state, &id, false);
+        let task = ws.state.task_mut(&id).unwrap();
+        task.state = TaskState::Complete;
+        task.artifact = Some(version);
+        write_unknown(task, 1);
+        ws.save().unwrap();
+        drop(ws);
+
+        let mut reopened = test_workspace(dir.path());
+        let task = reopened.state.task(&id).unwrap();
+        assert_eq!(task.state, TaskState::Complete);
+        assert!(task.blocked.is_empty());
+
+        reconcile_receipts(reopened.state.task_mut(&id).unwrap()).unwrap();
+        let task = reopened.state.task(&id).unwrap();
+        assert_eq!(task.state, TaskState::Uncertain);
+        assert_eq!(task.blocked.len(), 1);
     }
 
     #[test]
@@ -3006,7 +3173,10 @@ mod tests {
         .unwrap();
         std::fs::write(
             config_dir.join("config.toml"),
-            format!("[defaults]\nout = {}\n[desktop]\nsetup_completed = true\n", serde_json::to_string(&root.join("library")).unwrap()),
+            format!(
+                "[defaults]\nout = {}\n[desktop]\nsetup_completed = true\n",
+                serde_json::to_string(&root.join("library")).unwrap()
+            ),
         )
         .unwrap();
         for (name, uncertain) in [("翻译确认失败", false), ("翻译结果待确认", true)] {

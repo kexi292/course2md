@@ -175,12 +175,9 @@ impl Desktop {
         // inspect() 会对数 GB 的模型文件做同步 SHA-256，必须离开 executor；
         // 见 crate::spawn_blocking_io 的说明
         let work = crate::spawn_blocking_io(move || {
-            let result = course2md::models::status::inspect(
-                request.provider,
-                &request.model,
-                &request.root,
-            )
-            .map_err(|error| format!("{error:#}"));
+            let result =
+                course2md::models::status::inspect(request.provider, &request.model, &request.root)
+                    .map_err(|error| format!("{error:#}"));
             let directories = result
                 .as_ref()
                 .ok()
@@ -505,21 +502,21 @@ impl Desktop {
                 )
             } else {
                 match status.state {
-                CacheState::Missing => (BadgeKind::Neutral, "待下载", "首次识别时自动准备。"),
-                CacheState::Partial => (
-                    BadgeKind::Warning,
-                    "待准备",
-                    "尚未下载完整，继续准备会复用已有文件。",
-                ),
-                CacheState::Cached => (BadgeKind::Success, "已下载", "尚未验证加载。"),
-                CacheState::Loaded => {
-                    (BadgeKind::Success, "已验证可加载", "验证后模型文件未改变。")
-                }
-                CacheState::Unsupported => (
-                    BadgeKind::Warning,
-                    "不支持",
-                    "这种识别方式不支持当前模型。原选择保留，请明确选择支持的模型。",
-                ),
+                    CacheState::Missing => (BadgeKind::Neutral, "待下载", "首次识别时自动准备。"),
+                    CacheState::Partial => (
+                        BadgeKind::Warning,
+                        "待准备",
+                        "尚未下载完整，继续准备会复用已有文件。",
+                    ),
+                    CacheState::Cached => (BadgeKind::Success, "已下载", "尚未验证加载。"),
+                    CacheState::Loaded => {
+                        (BadgeKind::Success, "已验证可加载", "验证后模型文件未改变。")
+                    }
+                    CacheState::Unsupported => (
+                        BadgeKind::Warning,
+                        "不支持",
+                        "这种识别方式不支持当前模型。原选择保留，请明确选择支持的模型。",
+                    ),
                 }
             };
             view = view.child(settings_status_row(
@@ -640,7 +637,10 @@ impl Desktop {
                                 row.child(
                                     settings_value(
                                         SharedString::from(format!("model-cached-size-{key}")),
-                                        format!("缓存占用 {}", crate::activity::bytes(status.bytes)),
+                                        format!(
+                                            "缓存占用 {}",
+                                            crate::activity::bytes(status.bytes)
+                                        ),
                                     )
                                     .text_size(TEXT_AUX)
                                     .text_color(color(MUTED)),
@@ -800,7 +800,8 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Div {
         let request = self.default_model_request();
-        let mut current = settings_detail_group("model-diagnostic-default", icons::storage(), "默认识别模型");
+        let mut current =
+            settings_detail_group("model-diagnostic-default", icons::storage(), "默认识别模型");
         if request.provider == AsrProvider::Api {
             current = current.child(crate::settings_ui::setting_surface().child(
                 settings_detail_row(
@@ -827,15 +828,14 @@ impl Desktop {
             && active.key() != request.key()
         {
             view = view.child(
-                settings_detail_group("other-active-model", icons::storage(), "正在准备的模型").child(
-                    self.model_readiness_panel(
+                settings_detail_group("other-active-model", icons::storage(), "正在准备的模型")
+                    .child(self.model_readiness_panel(
                         active.provider,
                         Some(&active.model),
                         &active.root,
                         window,
                         cx,
-                    ),
-                ),
+                    )),
             );
         }
         if let Some((message, error)) = &self.settings_ui.model_diagnostics.result {
@@ -867,7 +867,12 @@ impl Desktop {
             );
             if self.settings_ui.model_diagnostics.details {
                 view = view.child(
-                    settings_detail_group("model-preparation-log-heading", icons::task(), "准备日志").child(
+                    settings_detail_group(
+                        "model-preparation-log-heading",
+                        icons::task(),
+                        "准备日志",
+                    )
+                    .child(
                         settings_value(
                             "model-preparation-log",
                             self.logs.iter().cloned().collect::<Vec<_>>().join("\n"),
@@ -884,7 +889,8 @@ impl Desktop {
         let Some(environment) = &self.environment else {
             return v_flex();
         };
-        let mut hardware = settings_detail_group("model-hardware-heading", icons::computer(), "设备与运行时");
+        let mut hardware =
+            settings_detail_group("model-hardware-heading", icons::computer(), "设备与运行时");
         for (id, label, value) in [
             ("cpu-device", "CPU 架构", std::env::consts::ARCH),
             (
@@ -985,7 +991,8 @@ impl Desktop {
                                 move |this, _, _, cx| {
                                     let mut value = this.generation_edit_base();
                                     value.select_provider(Some(provider));
-                                    value.options.asr_model = Some(course2md::config::DEFAULT_ASR_MODEL.into());
+                                    value.options.asr_model =
+                                        Some(course2md::config::DEFAULT_ASR_MODEL.into());
                                     if this.commit_generation(value, cx) {
                                         this.refresh_model_diagnostics(cx);
                                     }

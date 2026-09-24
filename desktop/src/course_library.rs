@@ -1030,7 +1030,8 @@ impl Desktop {
                 } else {
                     ("library-list", id)
                 },
-                element)
+                element,
+            )
         } else {
             element.into_any_element()
         }
@@ -1403,23 +1404,22 @@ impl Desktop {
                 group = group.icon(option.value.clone(), icons::folder());
             }
         }
-        group
-            .on_change(cx.listener({
-                let options = options.clone();
-                move |this, value: &SharedString, _, cx| {
-                    let Some(option) = options.iter().find(|option| option.value == value.as_ref())
-                    else {
-                        return;
-                    };
-                    this.library_root = option.root.clone();
-                    if let Some(organization) = this.library_indexes.get(&option.root) {
-                        this.library = organization.clone();
-                    }
-                    this.folder_filter = option.folder;
-                    this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
-                    cx.notify();
+        group.on_change(cx.listener({
+            let options = options.clone();
+            move |this, value: &SharedString, _, cx| {
+                let Some(option) = options.iter().find(|option| option.value == value.as_ref())
+                else {
+                    return;
+                };
+                this.library_root = option.root.clone();
+                if let Some(organization) = this.library_indexes.get(&option.root) {
+                    this.library = organization.clone();
                 }
-            }))
+                this.folder_filter = option.folder;
+                this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
+                cx.notify();
+            }
+        }))
     }
 
     pub(super) fn library_controls_visible(&self, cx: &App) -> bool {
@@ -1504,13 +1504,13 @@ impl Desktop {
                 row.child(
                     div().ml_4().child(
                         SingleChoiceGroup::new("library-grouping", "笔记分组方式")
-                        .options([("flat", "平铺"), ("group", "分组")])
-                        .selected(if group_on { "group" } else { "flat" })
-                        .on_change(cx.listener(|this, value: &SharedString, _, cx| {
-                            this.desktop_settings.library_group_folders =
-                                value.as_ref() == "group";
-                            this.save_library_presentation(cx);
-                        })),
+                            .options([("flat", "平铺"), ("group", "分组")])
+                            .selected(if group_on { "group" } else { "flat" })
+                            .on_change(cx.listener(|this, value: &SharedString, _, cx| {
+                                this.desktop_settings.library_group_folders =
+                                    value.as_ref() == "group";
+                                this.save_library_presentation(cx);
+                            })),
                     ),
                 )
             });
@@ -1670,15 +1670,13 @@ impl Desktop {
         let collection_id = courses.first().map(|(index, _)| *index).unwrap_or(0);
         let collection = v_flex().w_full();
         if !self.desktop_settings.library_cards || layout.stacked {
-            let rows = v_flex()
-                .gap_2()
-                .children(courses.iter().map(|(index, course)| {
-                    self.library_list_row(index, course, layout, cx)
-                }));
+            let rows = v_flex().gap_2().children(
+                courses
+                    .iter()
+                    .map(|(index, course)| self.library_list_row(index, course, layout, cx)),
+            );
             return if animate {
-                collection.child(crate::motion::enter(
-                    ("library-list", collection_id),
-                    rows))
+                collection.child(crate::motion::enter(("library-list", collection_id), rows))
             } else {
                 collection.child(rows)
             };
@@ -1689,9 +1687,7 @@ impl Desktop {
                 .map(|row| self.library_card_row(row, layout, cx)),
         );
         if animate {
-            collection.child(crate::motion::enter(
-                ("library-grid", collection_id),
-                cards))
+            collection.child(crate::motion::enter(("library-grid", collection_id), cards))
         } else {
             collection.child(cards)
         }
@@ -1813,13 +1809,21 @@ impl Desktop {
                                         .child(
                                             outline_pill(("read-card-action", *index))
                                                 .icon(IconName::BookOpen)
-                                                .label(if self.course_has_reading_position(course) {
-                                                    "继续阅读"
-                                                } else {
-                                                    "阅读笔记"
-                                                })
-                                                .loading(self.opening_course.as_ref() == Some(&course.dir))
-                                                .disabled(self.opening_course.as_ref() == Some(&course.dir))
+                                                .label(
+                                                    if self.course_has_reading_position(course) {
+                                                        "继续阅读"
+                                                    } else {
+                                                        "阅读笔记"
+                                                    },
+                                                )
+                                                .loading(
+                                                    self.opening_course.as_ref()
+                                                        == Some(&course.dir),
+                                                )
+                                                .disabled(
+                                                    self.opening_course.as_ref()
+                                                        == Some(&course.dir),
+                                                )
                                                 .on_click({
                                                     let course = course.clone();
                                                     cx.listener(move |this, _, _, cx| {
@@ -1845,7 +1849,9 @@ impl Desktop {
         cx: &mut Context<Self>,
     ) -> Div {
         let mut read = h_flex().w_full().min_w_0().items_center().gap(px(12.));
-        if !layout.stacked && let Some(thumbnail) = &course.thumbnail {
+        if !layout.stacked
+            && let Some(thumbnail) = &course.thumbnail
+        {
             read = read.child(
                 img(thumbnail.clone())
                     .w(rems(6.857))

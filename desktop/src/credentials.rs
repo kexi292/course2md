@@ -247,7 +247,12 @@ impl FileCredentialVault {
     }
 
     fn refuse_if_unreadable(&self) -> Result<()> {
-        if let Some(error) = self.load_error.lock().map_err(|_| anyhow!("暂时无法访问凭据"))?.as_ref() {
+        if let Some(error) = self
+            .load_error
+            .lock()
+            .map_err(|_| anyhow!("暂时无法访问凭据"))?
+            .as_ref()
+        {
             bail!(
                 "凭据文件无法读取（{}），为避免覆盖丢失已暂停写入；请修复或备份后删除该文件重试：{}",
                 error,
@@ -294,7 +299,10 @@ impl CredentialVault for FileCredentialVault {
             .values
             .lock()
             .map_err(|_| anyhow!("暂时无法保存凭据"))?;
-        values.insert(reference.clone(), Zeroizing::new(secret.expose().to_owned()));
+        values.insert(
+            reference.clone(),
+            Zeroizing::new(secret.expose().to_owned()),
+        );
         if let Err(error) = self.persist(&values) {
             values.remove(&reference);
             return Err(error);
@@ -411,12 +419,20 @@ mod tests {
     fn file_vault_starts_empty_when_file_is_missing_or_corrupt() {
         let directory = tempfile::tempdir().unwrap();
         let missing = FileCredentialVault::new(directory.path().join("missing.json"));
-        assert!(missing.resolve("credential-00000000-0000-0000-0000-000000000000").is_err());
+        assert!(
+            missing
+                .resolve("credential-00000000-0000-0000-0000-000000000000")
+                .is_err()
+        );
 
         let corrupt = directory.path().join("corrupt.json");
         std::fs::write(&corrupt, b"not json").unwrap();
         let vault = FileCredentialVault::new(&corrupt);
-        assert!(vault.resolve("credential-00000000-0000-0000-0000-000000000000").is_err());
+        assert!(
+            vault
+                .resolve("credential-00000000-0000-0000-0000-000000000000")
+                .is_err()
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -428,7 +444,11 @@ mod tests {
         let vault = FileCredentialVault::new(&corrupt);
         // 损坏文件存在期间：写入与删除都必须拒绝，不得静默覆盖丢密钥
         assert!(vault.insert(Secret::new("test-only-key")).is_err());
-        assert!(vault.remove("credential-00000000-0000-0000-0000-000000000000").is_err());
+        assert!(
+            vault
+                .remove("credential-00000000-0000-0000-0000-000000000000")
+                .is_err()
+        );
         assert_eq!(std::fs::read(&corrupt).unwrap(), b"not json");
     }
 }

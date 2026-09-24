@@ -278,7 +278,8 @@ impl Desktop {
                                 cx.notify();
                             })),
                     ),
-            )))
+            ),
+        ))
     }
     fn page_title(&self) -> String {
         match self.page {
@@ -305,7 +306,9 @@ impl Desktop {
             .child(
                 theme::page_heading(
                     "page-title",
-                    icons::book_open().size(px(24.)).text_color(color(ACCENT_STRONG)),
+                    icons::book_open()
+                        .size(px(24.))
+                        .text_color(color(ACCENT_STRONG)),
                     self.page_title(),
                 )
                 .flex_1()
@@ -327,6 +330,7 @@ impl Desktop {
 
 impl Render for Desktop {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::startup_first_render();
         theme::apply_preference(&self.preferences.application().appearance, window, cx);
         theme::apply_scale(self.preferences.application().font_scale, window, cx);
         if self.onboarding.active {
@@ -474,7 +478,8 @@ impl Render for Desktop {
                                             })),
                                     )
                                 }),
-                        )))
+                        ),
+                ))
             })
             .when_some(self.message.clone(), |v, message| {
                 let completed = message.starts_with("笔记已生成");
@@ -511,7 +516,8 @@ impl Render for Desktop {
                                         cx.notify();
                                     })),
                             ),
-                    )))
+                    ),
+                ))
             })
             .child(
                 div()

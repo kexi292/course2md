@@ -335,17 +335,20 @@ pub(super) fn settings_section(id: impl Into<ElementId>, title: &'static str, ic
     )
 }
 
-pub(super) fn settings_detail_group(id: impl Into<ElementId>, icon: Icon, title: &'static str) -> Div {
+pub(super) fn settings_detail_group(
+    id: impl Into<ElementId>,
+    icon: Icon,
+    title: &'static str,
+) -> Div {
     v_flex().w_full().min_w_0().gap_3().child(
         h_flex()
             .min_w_0()
             .items_center()
             .gap_2()
             .child(
-                icon
-                .size(rems(20. / 14.))
-                .flex_shrink_0()
-                .text_color(color(MUTED)),
+                icon.size(rems(20. / 14.))
+                    .flex_shrink_0()
+                    .text_color(color(MUTED)),
             )
             .child(field_label(id, title).role(Role::Heading).min_w_0()),
     )
@@ -814,7 +817,9 @@ impl Desktop {
             };
         let header = theme::page_heading(
             "settings-page-title",
-            icons::settings().size(px(24.)).text_color(color(ACCENT_STRONG)),
+            icons::settings()
+                .size(px(24.))
+                .text_color(color(ACCENT_STRONG)),
             "设置",
         )
         .flex_shrink_0();
@@ -964,9 +969,9 @@ impl Desktop {
                     ),
             )
             .when(!editing_service, |panel| {
-                panel.child(
-                    crate::backend::vertical_scrollbar(&self.scrolls[Page::Settings as usize]),
-                )
+                panel.child(crate::backend::vertical_scrollbar(
+                    &self.scrolls[Page::Settings as usize],
+                ))
             });
         let body = div()
             .flex()
@@ -1098,7 +1103,7 @@ impl Desktop {
             icons::microphone(),
             "识别方式",
             if provider == "api" {
-                "视频声音会发送到所选语音服务。"
+                "视频声音会发送到所选语音服务；服务明确拒绝的片段会改用本机识别。"
             } else {
                 "在这台电脑上识别，课程声音不会上传。"
             },
@@ -1113,12 +1118,8 @@ impl Desktop {
                 })),
         ));
         if provider == "api" {
-            recognition = recognition.child(self.service_picker(
-                ServicePurpose::Speech,
-                false,
-                false,
-                cx,
-            ));
+            recognition =
+                recognition.child(self.service_picker(ServicePurpose::Speech, false, false, cx));
         } else {
             recognition =
                 recognition
@@ -1155,13 +1156,23 @@ impl Desktop {
                                 .selected(provider.to_owned())
                                 .on_change(cx.listener(|this, id: &SharedString, _, cx| {
                                     let mut next = this.generation_edit_base();
-                                    next.select_provider(match id.as_ref() {
+                                    let selected = match id.as_ref() {
                                         "coreml" => Some(course2md::config::AsrProvider::Coreml),
                                         "gpu" => Some(course2md::config::AsrProvider::Gpu),
                                         "cpu" => Some(course2md::config::AsrProvider::Cpu),
                                         "npu" => Some(course2md::config::AsrProvider::Npu),
                                         _ => None,
-                                    });
+                                    };
+                                    let fallback_enabled =
+                                        next.options.asr_fallback_provider.is_some();
+                                    next.select_provider(selected);
+                                    if fallback_enabled {
+                                        next.options.asr_fallback_provider = Some(
+                                            selected.unwrap_or_else(|| {
+                                                this.recommended_local_provider()
+                                            }),
+                                        );
+                                    }
                                     this.commit_generation(next, cx);
                                 })),
                         ),
@@ -1178,34 +1189,30 @@ impl Desktop {
             ));
         }
         let mut note_content = group("note-content-settings", "笔记内容").child(settings_row(
-                "note-language-label",
-                icons::article(),
-                "笔记核心语言",
-                "非简体中文正文会保留原文，并在每段后附简体中文。截图保持原样。",
-                self.setting_choices("default-note-language", "笔记核心语言")
-                    .options([("source", "跟随原文"), ("zh-hans", "简体中文")])
-                    .full_width()
-                    .selected(match value.note_language {
-                        course2md::llm::NoteLanguage::Source => "source",
-                        course2md::llm::NoteLanguage::ZhHans => "zh-hans",
-                    })
-                    .on_change(cx.listener(|this, selected: &SharedString, _, cx| {
-                        let mut next = this.generation_edit_base();
-                        next.note_language = if selected.as_ref() == "zh-hans" {
-                            course2md::llm::NoteLanguage::ZhHans
-                        } else {
-                            course2md::llm::NoteLanguage::Source
-                        };
-                        this.commit_generation(next, cx);
-                    })),
-            ));
+            "note-language-label",
+            icons::article(),
+            "笔记核心语言",
+            "非简体中文正文会保留原文，并在每段后附简体中文。截图保持原样。",
+            self.setting_choices("default-note-language", "笔记核心语言")
+                .options([("source", "跟随原文"), ("zh-hans", "简体中文")])
+                .full_width()
+                .selected(match value.note_language {
+                    course2md::llm::NoteLanguage::Source => "source",
+                    course2md::llm::NoteLanguage::ZhHans => "zh-hans",
+                })
+                .on_change(cx.listener(|this, selected: &SharedString, _, cx| {
+                    let mut next = this.generation_edit_base();
+                    next.note_language = if selected.as_ref() == "zh-hans" {
+                        course2md::llm::NoteLanguage::ZhHans
+                    } else {
+                        course2md::llm::NoteLanguage::Source
+                    };
+                    this.commit_generation(next, cx);
+                })),
+        ));
         if value.note_language == course2md::llm::NoteLanguage::ZhHans {
-            note_content = note_content.child(self.service_picker(
-                ServicePurpose::Ai,
-                false,
-                true,
-                cx,
-            ));
+            note_content =
+                note_content.child(self.service_picker(ServicePurpose::Ai, false, true, cx));
         }
         let mut ai = group("ai-default-settings", "AI 文字处理与摘要")
             .child(self.service_picker(ServicePurpose::Ai, false, false, cx))
@@ -1352,7 +1359,12 @@ impl Desktop {
                     .gap_2()
                     .child(
                         self.setting_choices("ai-retry-attempts", "自动重试次数")
-                            .options([("1", "不自动重试"), ("3", "3 次"), ("5", "5 次"), ("7", "7 次")])
+                            .options([
+                                ("1", "不自动重试"),
+                                ("3", "3 次"),
+                                ("5", "5 次"),
+                                ("7", "7 次"),
+                            ])
                             .selected(value.ai_retry_attempts.to_string())
                             .on_change(cx.listener(|this, selected: &SharedString, _, cx| {
                                 if let Ok(attempts) = selected.parse() {
@@ -1466,8 +1478,7 @@ impl Desktop {
         let picker = if models.len() == 1 {
             // 只有一个可选模型时不是「选择器」：展示静态值，不伪装可选择（settings#2）
             let (_, label) = models[0];
-            settings_value("default-local-model-single", label.to_owned())
-                .into_any_element()
+            settings_value("default-local-model-single", label.to_owned()).into_any_element()
         } else if models.len() > 3 {
             let current = selected.to_owned();
             let label = models
@@ -1533,9 +1544,17 @@ impl Desktop {
                     .gap_2()
                     .items_center()
                     .child(
-                        (if settled { icons::info() } else { icons::warning() })
-                            .size(rems(16. / 14.))
-                            .text_color(color(if settled { MUTED } else { WARNING })),
+                        (if settled {
+                            icons::info()
+                        } else {
+                            icons::warning()
+                        })
+                        .size(rems(16. / 14.))
+                        .text_color(color(if settled {
+                            MUTED
+                        } else {
+                            WARNING
+                        })),
                     )
                     .child(
                         text("model-readiness-conclusion", conclusion)
@@ -2215,32 +2234,34 @@ impl Desktop {
             );
         }
         controls = controls.child(
-            control((
-                "configure-service",
-                service_index,
-            ))
-            .icon(icons::settings())
-            .ghost()
-            .label(if translation {
-                "管理 AI 服务"
-            } else {
-                match (purpose, editor_version.is_some()) {
-                (ServicePurpose::Speech, true) => "编辑",
-                (ServicePurpose::Speech, false) => "添加语音服务",
-                (ServicePurpose::Ai, true) => "编辑",
-                (ServicePurpose::Ai, false) => "添加 AI 服务",
-                }
-            })
-            .self_start()
-            .on_click(cx.listener(move |this, _, window, cx| {
-                if translation {
-                    this.select_settings_tab(1, window, cx);
-                } else if current_task {
-                    this.open_task_service_editor(purpose, window, cx)
+            control(("configure-service", service_index))
+                .icon(icons::settings())
+                .ghost()
+                .label(if translation {
+                    "管理 AI 服务"
                 } else {
-                    this.open_settings_service_editor(purpose, editor_version.clone(), window, cx);
-                }
-            })),
+                    match (purpose, editor_version.is_some()) {
+                        (ServicePurpose::Speech, true) => "编辑",
+                        (ServicePurpose::Speech, false) => "添加语音服务",
+                        (ServicePurpose::Ai, true) => "编辑",
+                        (ServicePurpose::Ai, false) => "添加 AI 服务",
+                    }
+                })
+                .self_start()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if translation {
+                        this.select_settings_tab(1, window, cx);
+                    } else if current_task {
+                        this.open_task_service_editor(purpose, window, cx)
+                    } else {
+                        this.open_settings_service_editor(
+                            purpose,
+                            editor_version.clone(),
+                            window,
+                            cx,
+                        );
+                    }
+                })),
         );
         view = view.child(controls);
         if current_task
@@ -2258,12 +2279,9 @@ impl Desktop {
                     .gap_2()
                     .items_center()
                     .child(
-                        text(
-                            ("service-only-this-note", service_index),
-                            "仅用于这次笔记",
-                        )
-                        .text_sm()
-                        .text_color(color(MUTED)),
+                        text(("service-only-this-note", service_index), "仅用于这次笔记")
+                            .text_sm()
+                            .text_color(color(MUTED)),
                     )
                     .child(
                         control(("inherit-default-service", service_index))
@@ -2279,10 +2297,7 @@ impl Desktop {
         if let Some((message, true, _)) = self.settings_ui.feedback.get(&PreferenceGroup::Services)
         {
             view = view.child(
-                text(
-                    ("task-service-error", service_index),
-                    message.clone(),
-                )
+                text(("task-service-error", service_index), message.clone())
                     .text_sm()
                     .text_color(color(DANGER)),
             );
@@ -2308,7 +2323,8 @@ impl Desktop {
                 },
                 if translation {
                     "仅用于生成逐段简体中文译文；可以选择低成本模型。"
-                } else if purpose == ServicePurpose::Ai && !self.preferences.generation().needs_ai() {
+                } else if purpose == ServicePurpose::Ai && !self.preferences.generation().needs_ai()
+                {
                     "开启校对或摘要后，文字会发送到所选服务。"
                 } else if purpose == ServicePurpose::Ai {
                     "校对与摘要会把文字发送到所选服务。"
@@ -2414,21 +2430,23 @@ impl Desktop {
             cx.notify();
             return;
         };
-        let translation = components.iter().all(|component| component == "translation");
+        let translation = components
+            .iter()
+            .all(|component| component == "translation");
         let draft = (if translation {
             &task.plan.translation_service
         } else {
             &task.plan.ai_service
         })
-            .as_deref()
-            .and_then(|id| self.preferences.version(id))
-            .filter(|version| {
-                !self
-                    .preferences
-                    .service_retired_in_snapshot(&version.service_id)
-            })
-            .map(ServiceDraft::from_version)
-            .unwrap_or_else(|| ServiceDraft::new(ServicePurpose::Ai));
+        .as_deref()
+        .and_then(|id| self.preferences.version(id))
+        .filter(|version| {
+            !self
+                .preferences
+                .service_retired_in_snapshot(&version.service_id)
+        })
+        .map(ServiceDraft::from_version)
+        .unwrap_or_else(|| ServiceDraft::new(ServicePurpose::Ai));
         self.open_service_draft(draft, None, Some((task_id, components)), window, cx);
     }
     fn open_settings_service_editor(
@@ -2676,66 +2694,77 @@ impl Desktop {
             )
             .when(protocol.purpose() == ServicePurpose::Speech, |view| {
                 view.child(
-                v_flex()
-                    .gap_2()
-                    .child(setting_label("service-protocol-heading", icons::cloud(), "接口类型"))
-                    .child(
-                        self.setting_choices("service-protocol", "服务接口类型")
-                            .options(
-                                [
-                                    ServiceProtocol::SpeechTranscriptions,
-                                    ServiceProtocol::SpeechChat,
-                                    ServiceProtocol::SpeechDashscopeFunAsrFlash,
-                                    ServiceProtocol::AiChat,
-                                ]
-                                .into_iter()
-                                .filter(|candidate| candidate.purpose() == protocol.purpose())
-                                .map(|candidate| {
-                                    (candidate.label(), service_protocol_label(candidate))
-                                }),
-                            )
-                            .selected(protocol.label())
-                            .disabled(awaiting_binding)
-                            .on_change(cx.listener(move |this, selected: &SharedString, window, cx| {
-                                let Some(candidate) = [
-                                    ServiceProtocol::SpeechTranscriptions,
-                                    ServiceProtocol::SpeechChat,
-                                    ServiceProtocol::SpeechDashscopeFunAsrFlash,
-                                    ServiceProtocol::AiChat,
-                                ]
-                                .into_iter()
-                                .find(|candidate| candidate.label() == selected.as_ref()) else {
-                                    return;
-                                };
-                                if let Some(editor) = &mut this.settings_ui.editor {
-                                    editor.draft.select_protocol(candidate);
-                                    editor.models.invalidate();
-                                    editor.errors.clear();
-                                    editor.evidence = None;
-                                    editor.saved_configuration = None;
-                                }
-                                if candidate == ServiceProtocol::SpeechDashscopeFunAsrFlash
-                                    && this.settings_ui.inputs[&EditField::Model]
-                                        .read(cx)
-                                        .value()
-                                        .trim()
-                                        .is_empty()
-                                {
-                                    this.settings_ui.inputs[&EditField::Model].update(
-                                        cx,
-                                        |input, cx| {
-                                            input.set_value(
-                                                "fun-asr-flash-2026-06-15",
-                                                window,
-                                                cx,
-                                            )
+                    v_flex()
+                        .gap_2()
+                        .child(setting_label(
+                            "service-protocol-heading",
+                            icons::cloud(),
+                            "接口类型",
+                        ))
+                        .child(
+                            self.setting_choices("service-protocol", "服务接口类型")
+                                .options(
+                                    [
+                                        ServiceProtocol::SpeechTranscriptions,
+                                        ServiceProtocol::SpeechChat,
+                                        ServiceProtocol::SpeechDashscopeFunAsrFlash,
+                                        ServiceProtocol::AiChat,
+                                    ]
+                                    .into_iter()
+                                    .filter(|candidate| candidate.purpose() == protocol.purpose())
+                                    .map(|candidate| {
+                                        (candidate.label(), service_protocol_label(candidate))
+                                    }),
+                                )
+                                .selected(protocol.label())
+                                .disabled(awaiting_binding)
+                                .on_change(
+                                    cx.listener(
+                                        move |this, selected: &SharedString, window, cx| {
+                                            let Some(candidate) = [
+                                                ServiceProtocol::SpeechTranscriptions,
+                                                ServiceProtocol::SpeechChat,
+                                                ServiceProtocol::SpeechDashscopeFunAsrFlash,
+                                                ServiceProtocol::AiChat,
+                                            ]
+                                            .into_iter()
+                                            .find(|candidate| {
+                                                candidate.label() == selected.as_ref()
+                                            }) else {
+                                                return;
+                                            };
+                                            if let Some(editor) = &mut this.settings_ui.editor {
+                                                editor.draft.select_protocol(candidate);
+                                                editor.models.invalidate();
+                                                editor.errors.clear();
+                                                editor.evidence = None;
+                                                editor.saved_configuration = None;
+                                            }
+                                            if candidate
+                                                == ServiceProtocol::SpeechDashscopeFunAsrFlash
+                                                && this.settings_ui.inputs[&EditField::Model]
+                                                    .read(cx)
+                                                    .value()
+                                                    .trim()
+                                                    .is_empty()
+                                            {
+                                                this.settings_ui.inputs[&EditField::Model].update(
+                                                    cx,
+                                                    |input, cx| {
+                                                        input.set_value(
+                                                            "fun-asr-flash-2026-06-15",
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    },
+                                                );
+                                            }
+                                            cx.notify();
                                         },
-                                    );
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            )
+                                    ),
+                                ),
+                        ),
+                )
             })
             .child(self.setting_field(EditField::Address, "服务地址", cx));
         if protocol == ServiceProtocol::SpeechDashscopeFunAsrFlash {
@@ -2760,7 +2789,11 @@ impl Desktop {
         view = view.child(
             v_flex()
                 .gap_2()
-                .child(setting_label("service-auth-heading", icons::shield(), "认证方式"))
+                .child(setting_label(
+                    "service-auth-heading",
+                    icons::shield(),
+                    "认证方式",
+                ))
                 .child(
                     div().w_full().max_w(rems(560. / 14.)).min_w_0().child(
                         self.setting_choices("service-auth-mode", "服务认证方式")
@@ -2792,10 +2825,9 @@ impl Desktop {
         );
         if auth == Authentication::ApiKey {
             view = view.child(self.setting_field(EditField::Key, "API Key", cx));
-            for (index, name) in
-                preferences::Store::available_environment_credentials(protocol)
-                    .into_iter()
-                    .enumerate()
+            for (index, name) in preferences::Store::available_environment_credentials(protocol)
+                .into_iter()
+                .enumerate()
             {
                 view = view.child(
                     control(("capture-environment-key", index))
@@ -2896,6 +2928,25 @@ impl Desktop {
                     )),
             ),
         );
+        if protocol == ServiceProtocol::AiChat {
+            view = view.child(self.setting_preference(
+                icons::image(),
+                "支持视觉输入",
+                "此服务和模型可以接收截图或图片",
+                Switch::new("service-supports-vision")
+                    .checked(editor.draft.supports_vision)
+                    .disabled(awaiting_binding)
+                    .on_click(cx.listener(|this, value, _, cx| {
+                        if let Some(editor) = &mut this.settings_ui.editor {
+                            editor.draft.supports_vision = *value;
+                            editor.saved_configuration = None;
+                            editor.status = None;
+                            editor.save_failed = false;
+                        }
+                        cx.notify();
+                    })),
+            ));
+        }
         if editor.target.is_some() {
             view = view.child(
                 self.setting_preference(
@@ -2914,9 +2965,10 @@ impl Desktop {
                 ),
             );
         }
-        let mut testing = settings_detail_group("service-test-heading", icons::science(), "检查服务")
-            .flex_shrink_0()
-            .pt_2();
+        let mut testing =
+            settings_detail_group("service-test-heading", icons::science(), "检查服务")
+                .flex_shrink_0()
+                .pt_2();
         if protocol == ServiceProtocol::AiChat {
             testing = testing.child(
                 div().w_full().max_w(rems(560. / 14.)).min_w_0().child(
@@ -3075,7 +3127,8 @@ impl Desktop {
                     "service-test-result-{}-{:?}",
                     evidence.tested_at, evidence.outcome
                 )),
-                result));
+                result,
+            ));
         }
         view = view.child(testing);
         if let Some(status) = &editor.status
@@ -4071,7 +4124,8 @@ impl Desktop {
                             .min_w_0()
                             .text_size(TEXT_BODY)
                             .text_color(color(if error { DANGER } else { MUTED })),
-                    )));
+                    ),
+            ));
             let has_pending = match group {
                 PreferenceGroup::Generation => self.settings_ui.pending_generation.is_some(),
                 PreferenceGroup::Application => self.settings_ui.pending_application.is_some(),
@@ -4551,7 +4605,8 @@ impl Desktop {
         );
         let mut details = v_flex().w_full().min_w_0().gap_6().pt_3();
         if let Some(e) = &self.environment {
-            let mut programs = settings_detail_group("diagnostic-programs-heading", icons::computer(), "所需程序");
+            let mut programs =
+                settings_detail_group("diagnostic-programs-heading", icons::computer(), "所需程序");
             let needs_llama = matches!(
                 self.preferences
                     .generation()

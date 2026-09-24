@@ -211,6 +211,9 @@ pub struct PipelineConfig {
     pub roi: Option<Roi>,
     pub threads: i32,
     pub provider: AsrProvider,
+    /// 本机回退仅用于云端明确拒绝的片段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asr_fallback_provider: Option<AsrProvider>,
     pub max_speech: f32,
     pub formats: Vec<OutputFormat>,
     pub model_dir: PathBuf,
@@ -778,6 +781,7 @@ mod tests {
             roi: None,
             threads: DEFAULT_THREADS,
             provider: AsrProvider::Gpu,
+            asr_fallback_provider: None,
             max_speech: DEFAULT_MAX_SPEECH,
             formats: vec![OutputFormat::Md],
             model_dir: "/tmp/m".into(),

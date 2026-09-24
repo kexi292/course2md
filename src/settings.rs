@@ -19,6 +19,8 @@ pub struct Defaults {
     pub roi: Option<String>,
     pub threads: Option<i32>,
     pub provider: Option<crate::config::AsrProvider>,
+    /// 云端明确拒绝（HTTP 400/422）时使用的本机后端；None 表示不回退。
+    pub asr_fallback_provider: Option<crate::config::AsrProvider>,
     /// coreml 后端的模型：qwen3-1.7b（默认）| qwen3-0.6b | whisper（首次使用可交互选择）
     pub asr_model: Option<String>,
     /// 转写来源：auto（字幕优先）| subtitle | asr
@@ -193,6 +195,8 @@ const TEMPLATE: &str = r#"# course2md 配置 / Configuration
 # api: 云端识别，需要 API 密钥 / cloud transcription, requires an API key
 # 留空自动选择后端；course2md doctor 查看可用性 / Leave unset for automatic selection; check with course2md doctor
 #provider = "gpu"
+# 云端以 HTTP 400/422 明确拒绝音频时，改用指定本机后端；其他错误不自动重发
+#asr_fallback_provider = "cpu"
 # GPU 卸载层数（0–99）；核显不稳定时可降低 / GPU offload layers; lower on unstable integrated GPUs
 #gpu_layers = 99
 # 将多模态 projector 放到 GPU；false 留在 CPU / Offload projector to GPU; false keeps it on CPU
@@ -303,6 +307,12 @@ pub fn print_effective(cfg: &ConfigFile) {
         d.provider
             .map(|p| p.to_string())
             .unwrap_or_else(|| "(自动选择 / automatic)".into())
+    );
+    println!(
+        "  asr_fallback_provider: {}",
+        d.asr_fallback_provider
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into())
     );
     println!("  slide_mode     : {}", d.slide_mode.unwrap_or_default());
     println!(

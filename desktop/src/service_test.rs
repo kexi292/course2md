@@ -162,14 +162,15 @@ impl Transport for HttpTransport {
             Err(ureq::Error::Transport(_)) => return Err(TransportFailure::Unknown),
         };
         let status = response.status();
-        let body = crate::bounded_http::read_bounded(response, MAX_RESPONSE).map_err(|error| {
-            match error {
-                crate::bounded_http::BoundedReadError::TooLarge => {
-                    TransportFailure::ResponseTooLarge(status)
-                }
-                crate::bounded_http::BoundedReadError::Network(_) => TransportFailure::Unknown,
-            }
-        })?;
+        let body =
+            crate::bounded_http::read_bounded(response, MAX_RESPONSE).map_err(
+                |error| match error {
+                    crate::bounded_http::BoundedReadError::TooLarge => {
+                        TransportFailure::ResponseTooLarge(status)
+                    }
+                    crate::bounded_http::BoundedReadError::Network(_) => TransportFailure::Unknown,
+                },
+            )?;
         Ok(HttpResponse { status, body })
     }
 }
@@ -576,6 +577,7 @@ mod tests {
             protocol: ServiceProtocol::AiChat,
             endpoint: "https://example.test/v1/chat/completions".into(),
             model: "fixture-model".into(),
+            supports_vision: true,
             authentication: Authentication::None,
             credential: None,
             credential_source: None,
@@ -832,6 +834,7 @@ mod tests {
             protocol: ServiceProtocol::SpeechDashscopeFunAsrFlash,
             endpoint: "https://workspace-123.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation".into(),
             model: "fun-asr-flash-2026-06-15".into(),
+            supports_vision: false,
             authentication: Authentication::None,
             credential: None,
             credential_source: None,

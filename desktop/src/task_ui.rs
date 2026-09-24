@@ -8,7 +8,7 @@ use crate::{
 };
 use anyhow::{Context as _, Result, ensure};
 use gpui_component::button::*;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 
 /// One row of the virtualized task queue. Task rows carry their index into
@@ -366,7 +366,9 @@ pub(crate) fn task_attention_summary(task: &TaskRecord) -> String {
 /// Rate limiting, timeouts and unknown outcomes must keep their own recovery.
 fn service_configuration_issue(message: &str) -> Option<&'static str> {
     let lower = message.to_ascii_lowercase();
-    if [
+    if lower.contains("content_policy_violation") {
+        Some("AI 服务因内容策略拒绝了正文处理，请改用其他兼容服务补做。")
+    } else if [
         "api key",
         "api_key",
         "unauthorized",
@@ -396,6 +398,29 @@ fn service_configuration_issue(message: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+fn proofreading_content_policy_rejection(task: &TaskRecord) -> bool {
+    let failed = task
+        .outcomes
+        .get("proofreading")
+        .filter(|outcome| {
+            matches!(
+                outcome.get("status").and_then(|status| status.as_str()),
+                Some("failed" | "partial")
+            )
+        })
+        .and_then(|outcome| outcome.get("message"))
+        .and_then(|message| message.as_str())
+        .is_some_and(|message| message.contains("content_policy_violation"));
+    failed
+        || task.blocked.iter().any(|request| {
+            request
+                .purpose
+                .as_deref()
+                .is_some_and(|purpose| purpose.contains("proof"))
+                && request.message.contains("content_policy_violation")
+        })
 }
 
 fn task_service_repair_reason(task: &TaskRecord) -> Option<&'static str> {
@@ -883,6 +908,14 @@ impl Desktop {
         }
     }
 
+    fn cloud_asr_fallback_provider(&self) -> course2md::config::AsrProvider {
+        self.preferences
+            .generation()
+            .last_local_provider
+            .filter(|provider| *provider != course2md::config::AsrProvider::Api)
+            .unwrap_or_else(|| self.recommended_local_provider())
+    }
+
     pub fn save_current_draft(&mut self, cx: &mut Context<Self>) -> bool {
         if self.draft_loading {
             return true;
@@ -1000,11 +1033,6 @@ impl Desktop {
     }
 
     fn build_plan(&self, validation: PlanValidation) -> Result<TaskPlan> {
-        self.ordinary_preferences_ready_for_submit()?;
-        ensure!(
-            !self.preference_defaults_pending,
-            "默认设置已保存，当前视频的选项尚未同步。请重试保存输入记录。"
-        );
         let workspace = self.workspace.as_ref().context("输入与任务记录尚未恢复")?;
         let draft = workspace.state.draft().context("当前输入尚未准备好")?;
         ensure!(
@@ -1028,6 +1056,22 @@ impl Desktop {
             "当前字幕尚未确认，请重新读取字幕，或明确选择其他文字来源"
         );
         let source = draft.source.clone().context("请先读取并确认视频")?;
+        self.build_plan_for_source(validation, draft, source)
+    }
+
+    fn build_plan_for_source(
+        &self,
+        validation: PlanValidation,
+        draft: &workspace::Draft,
+        source: crate::source::Source,
+    ) -> Result<TaskPlan> {
+        self.ordinary_preferences_ready_for_submit()?;
+        ensure!(
+            !self.preference_defaults_pending,
+            "默认设置已保存，当前视频的选项尚未同步。请重试保存输入记录。"
+        );
+        ensure!(!draft.input.is_empty(), "请先选择一个视频");
+        let workspace = self.workspace.as_ref().context("输入与任务记录尚未恢复")?;
         let environment = self
             .environment
             .as_ref()
@@ -1106,34 +1150,53 @@ impl Desktop {
                 .provider
                 .unwrap_or_else(|| self.recommended_local_provider());
             use course2md::config::AsrProvider;
-            match provider {
-                AsrProvider::Coreml => ensure!(
-                    environment.apple,
-                    "Apple 原生识别组件不可用。请选择其他本机识别方式，或在设置中检查应用组件。"
-                ),
-                AsrProvider::Gpu => ensure!(
-                    environment.llama && environment.gpu.is_some(),
-                    "没有检测到可用的 GPU 识别引擎。请选择 CPU 或其他本机识别方式。"
-                ),
-                AsrProvider::Cpu => ensure!(
-                    environment.llama,
-                    "CPU 识别引擎尚未安装。请在设置的应用与诊断中查看安装方法。"
-                ),
-                AsrProvider::Npu => ensure!(
-                    environment.npu,
-                    "没有检测到可用的 Intel NPU 识别环境。请选择其他本机识别方式。"
-                ),
-                AsrProvider::Api => (),
+            enable_cloud_asr_fallback(
+                &mut config,
+                self.cloud_asr_fallback_provider(),
+                None,
+            );
+            let check_local_provider = |provider| -> Result<()> {
+                match provider {
+                    AsrProvider::Coreml => ensure!(
+                        environment.apple,
+                        "Apple 原生识别组件不可用。请选择其他本机识别方式，或在设置中检查应用组件。"
+                    ),
+                    AsrProvider::Gpu => ensure!(
+                        environment.llama && environment.gpu.is_some(),
+                        "没有检测到可用的 GPU 识别引擎。请选择 CPU 或其他本机识别方式。"
+                    ),
+                    AsrProvider::Cpu => ensure!(
+                        environment.llama,
+                        "CPU 识别引擎尚未安装。请在设置的应用与诊断中查看安装方法。"
+                    ),
+                    AsrProvider::Npu => ensure!(
+                        environment.npu,
+                        "没有检测到可用的 Intel NPU 识别环境。请选择其他本机识别方式。"
+                    ),
+                    AsrProvider::Api => (),
+                }
+                Ok(())
+            };
+            check_local_provider(provider)?;
+            if provider == AsrProvider::Api
+                && let Some(fallback) = config.defaults.asr_fallback_provider
+            {
+                check_local_provider(fallback)?;
             }
             config.defaults.provider = Some(provider);
-            if provider != AsrProvider::Api
+            let model_provider = config
+                .defaults
+                .asr_fallback_provider
+                .filter(|_| provider == AsrProvider::Api)
+                .unwrap_or(provider);
+            if model_provider != AsrProvider::Api
                 && config
                     .defaults
                     .asr_model
                     .as_deref()
                     .is_none_or(|model| model.trim().is_empty())
             {
-                config.defaults.asr_model = Some(if provider == AsrProvider::Npu {
+                config.defaults.asr_model = Some(if model_provider == AsrProvider::Npu {
                     course2md::npu::resolve_npu_model(None)
                 } else {
                     course2md::config::DEFAULT_ASR_MODEL.into()
@@ -1301,6 +1364,171 @@ impl Desktop {
             }
         }
         cx.notify();
+    }
+
+    pub(super) fn start_batch_import(&mut self, folder: u64, cx: &mut Context<Self>) {
+        let Some(batch) = &mut self.batch_import else {
+            return;
+        };
+        let Some(mut draft) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.draft())
+            .cloned()
+        else {
+            self.message = Some("当前输入暂不可用，批量处理尚未开始".into());
+            self.batch_import = None;
+            return;
+        };
+        draft.online = false;
+        draft.folder = Some(folder);
+        draft.subtitle = None;
+        draft.retry_of = None;
+        draft.submitted_task = None;
+        batch.folder = Some(folder);
+        batch.draft = Some(draft);
+        self.advance_batch_import(cx);
+    }
+
+    fn advance_batch_import(&mut self, cx: &mut Context<Self>) {
+        if self.batch_cancel.is_some() {
+            return;
+        }
+        let Some(batch) = &mut self.batch_import else {
+            return;
+        };
+        if batch.next >= batch.files.len() {
+            let batch = self.batch_import.take().expect("batch exists");
+            let failed = batch.failures.len();
+            let failures = batch
+                .failures
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("；");
+            self.message = Some(if failed == 0 {
+                format!("已将 {} 个视频加入任务队列", batch.queued)
+            } else {
+                format!(
+                    "已将 {} 个视频加入任务队列，{} 个视频未能读取：{}{}",
+                    batch.queued,
+                    failed,
+                    failures,
+                    if failed > 3 {
+                        format!("；另有 {} 个", failed - 3)
+                    } else {
+                        String::new()
+                    }
+                )
+            });
+            if self.page == Page::New
+                && let Some(id) = batch.first_task
+            {
+                self.select_task(&id, cx);
+                self.navigate(Page::Task, cx);
+            }
+            self.start_next_task(cx);
+            cx.notify();
+            return;
+        }
+        let path = batch.files[batch.next].clone();
+        batch.next += 1;
+        batch.current = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned());
+        let source_mode = batch
+            .draft
+            .as_ref()
+            .map(|draft| draft.options.source_mode)
+            .unwrap_or_default();
+        let preferred = self
+            .preferences
+            .generation()
+            .preferred_subtitle_languages
+            .clone();
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.batch_cancel = Some(cancel.clone());
+        self.preview_workers += 1;
+        let task = crate::spawn_blocking_io(move || {
+            crate::source::prepare_local_batch(path, source_mode, &preferred, cancel)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task
+                .recv()
+                .await
+                .unwrap_or_else(|_| Err(anyhow::anyhow!("视频读取线程意外结束")));
+            let _ = this.update(cx, |this, cx| {
+                this.preview_workers = this.preview_workers.saturating_sub(1);
+                this.batch_cancel = None;
+                this.finish_batch_item(result, cx);
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn finish_batch_item(
+        &mut self,
+        result: anyhow::Result<crate::source::Source>,
+        cx: &mut Context<Self>,
+    ) {
+        let current = self
+            .batch_import
+            .as_ref()
+            .and_then(|batch| batch.current.clone())
+            .unwrap_or_else(|| "视频".into());
+        let result = result.and_then(|source| {
+            let mut draft = self
+                .batch_import
+                .as_ref()
+                .and_then(|batch| batch.draft.clone())
+                .context("批量任务设置已丢失")?;
+            draft.input = source.input.clone();
+            draft.title = source.title.clone();
+            draft.source = Some(source.clone());
+            self.build_plan_for_source(PlanValidation::Submission, &draft, source)
+        });
+        match result {
+            Ok(plan) => {
+                let queued = self
+                    .workspace
+                    .as_mut()
+                    .context("任务记录暂不可用")
+                    .and_then(|workspace| workspace.transaction(|state| state.enqueue(plan, None)));
+                match queued {
+                    Ok((id, true)) => {
+                        if let Some(batch) = &mut self.batch_import {
+                            batch.queued += 1;
+                            batch.first_task.get_or_insert(id);
+                        }
+                        self.start_next_task(cx);
+                    }
+                    Ok((_, false)) => {
+                        if let Some(batch) = &mut self.batch_import {
+                            batch.failures.push(format!("{current}（已有任务）"));
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(batch) = &mut self.batch_import {
+                            batch.failures.push(format!(
+                                "{current}（{}）",
+                                error.to_string().lines().next().unwrap_or("读取失败")
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(error) => {
+                if let Some(batch) = &mut self.batch_import {
+                    batch.failures.push(format!(
+                        "{current}（{}）",
+                        error.to_string().lines().next().unwrap_or("读取失败")
+                    ));
+                }
+            }
+        }
+        self.advance_batch_import(cx);
     }
 
     fn request_for(
@@ -1604,10 +1832,20 @@ impl Desktop {
             cx.notify();
             return;
         }
+        let fallback = (intent == Intent::Run).then(|| {
+            (
+                self.cloud_asr_fallback_provider(),
+                self.preferences.defaults_config().defaults,
+            )
+        });
         let Some(workspace) = &mut self.workspace else {
             return;
         };
         match workspace.transaction(|state| {
+            if let Some((provider, defaults)) = &fallback {
+                let task = state.task_mut(&id).context("任务记录不存在")?;
+                enable_cloud_asr_fallback(&mut task.plan.config, *provider, Some(defaults));
+            }
             state.set_intent(&id, intent)?;
             if active && intent != Intent::Run {
                 state.task_mut(&id).context("任务记录不存在")?.state = TaskState::Pausing;
@@ -1750,7 +1988,12 @@ impl Desktop {
     }
 
     fn resend_stage(&mut self, id: String, stage: &'static str, cx: &mut Context<Self>) {
-        let Some(task) = self.workspace.as_ref().and_then(|w| w.state.task(&id)).cloned() else {
+        let Some(task) = self
+            .workspace
+            .as_ref()
+            .and_then(|w| w.state.task(&id))
+            .cloned()
+        else {
             return;
         };
         let requests: Vec<_> = task
@@ -1758,9 +2001,15 @@ impl Desktop {
             .iter()
             .filter(|b| b.reason == "uncertain")
             .filter(|b| match stage {
-                "proofreading" => b.purpose.as_deref().is_some_and(|p| p == "proofreading" || p == "llm"),
+                "proofreading" => b
+                    .purpose
+                    .as_deref()
+                    .is_some_and(|p| p == "proofreading" || p == "llm"),
                 "translation" => b.purpose.as_deref() == Some("translation"),
-                "summary" => b.purpose.as_deref().is_some_and(|p| p == "summary" || p == "summarize"),
+                "summary" => b
+                    .purpose
+                    .as_deref()
+                    .is_some_and(|p| p == "summary" || p == "summarize"),
                 _ => false,
             })
             .filter_map(|b| b.request_id.clone())
@@ -1864,49 +2113,7 @@ impl Desktop {
         ai_service: String,
         cx: &mut Context<Self>,
     ) -> bool {
-        let result = (|| -> Result<String> {
-            ensure!(
-                self.active_task.as_deref() != Some(&id) || self.job.is_none(),
-                "正在保存当前结果，请等待任务停止后再补做"
-            );
-            let task = self
-                .workspace
-                .as_ref()
-                .and_then(|workspace| workspace.state.task(&id))
-                .context("原任务记录暂时不可用")?;
-            let mut base = task.plan.config.clone();
-            let translation_service = task.plan.translation_service.clone();
-            base.defaults.transcript_source = Some(course2md::config::TranscriptSource::Subtitle);
-            base.llm.enabled &= components.iter().any(|part| part == "proofreading");
-            base.llm.summarize = components.iter().any(|part| part == "summary");
-            base.translation.enabled = components.iter().any(|part| part == "translation")
-                || (base.llm.enabled
-                    && base.llm.note_language == course2md::llm::NoteLanguage::ZhHans);
-            let translation_only = components.iter().all(|part| part == "translation");
-            let config = self.preferences.config_for_refs(
-                &base,
-                &ServiceRefs {
-                    asr: None,
-                    llm: (!translation_only).then(|| ai_service.clone()),
-                    translation: if translation_only {
-                        Some(ai_service.clone())
-                    } else {
-                        translation_service
-                    },
-                },
-            )?;
-            self.workspace
-                .as_mut()
-                .context("任务记录暂时不可用")?
-                .transaction(|state| {
-                    state.reprocess_with_service(
-                        &id,
-                        components,
-                        Vec::new(),
-                        Some((ai_service, config)),
-                    )
-                })
-        })();
+        let result = self.create_reprocess_task_with_service(&id, components, ai_service, false);
         match result {
             Ok(next) => {
                 self.workspace_error = None;
@@ -1922,6 +2129,110 @@ impl Desktop {
                 false
             }
         }
+    }
+
+    fn create_reprocess_task_with_service(
+        &mut self,
+        id: &str,
+        components: Vec<String>,
+        ai_service: String,
+        preserve_selection: bool,
+    ) -> Result<String> {
+        ensure!(
+            self.active_task.as_deref() != Some(id) || self.job.is_none(),
+            "正在保存当前结果，请等待任务停止后再补做"
+        );
+        let task = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.state.task(id))
+            .context("原任务记录暂时不可用")?;
+        let mut base = task.plan.config.clone();
+        let translation_service = task.plan.translation_service.clone();
+        base.defaults.transcript_source = Some(course2md::config::TranscriptSource::Subtitle);
+        base.llm.enabled &= components.iter().any(|part| part == "proofreading");
+        base.llm.summarize = components.iter().any(|part| part == "summary");
+        base.translation.enabled = components.iter().any(|part| part == "translation")
+            || (base.llm.enabled
+                && base.llm.note_language == course2md::llm::NoteLanguage::ZhHans);
+        let translation_only = components.iter().all(|part| part == "translation");
+        let config = self.preferences.config_for_refs(
+            &base,
+            &ServiceRefs {
+                asr: None,
+                llm: (!translation_only).then(|| ai_service.clone()),
+                translation: if translation_only {
+                    Some(ai_service.clone())
+                } else {
+                    translation_service
+                },
+            },
+        )?;
+        self.workspace
+            .as_mut()
+            .context("任务记录暂时不可用")?
+            .transaction(|state| {
+                let selected = state.selected_task.clone();
+                let next = state.reprocess_with_service(
+                    id,
+                    components,
+                    Vec::new(),
+                    Some((ai_service, config)),
+                )?;
+                if preserve_selection {
+                    state.selected_task = selected;
+                }
+                Ok(next)
+            })
+    }
+
+    fn automatically_reprocess_content_policy(&mut self, task: &TaskRecord) -> Option<String> {
+        if task.handled_by.is_some()
+            || task.artifact.is_none()
+            || !proofreading_content_policy_rejection(task)
+        {
+            return None;
+        }
+        let state = &self.workspace.as_ref()?.state;
+        let mut attempted = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut current = Some(task.id.as_str());
+        while let Some(id) = current {
+            if !visited.insert(id.to_owned()) {
+                break;
+            }
+            let Some(record) = state.task(id) else {
+                break;
+            };
+            if let Some(version) = record
+                .plan
+                .ai_service
+                .as_deref()
+                .and_then(|id| self.preferences.version(id))
+            {
+                attempted.insert(version.service_id.clone());
+            }
+            current = record.parent.as_deref();
+        }
+        let candidates = self
+            .preferences
+            .automatic_ai_fallbacks(&attempted, task.plan.options.vision);
+        for version in candidates {
+            let service_name = version.config.name.clone();
+            let model = version.config.model.clone();
+            if let Ok(next) = self.create_reprocess_task_with_service(
+                &task.id,
+                vec!["proofreading".into()],
+                version.id,
+                true,
+            ) {
+                self.message = Some(format!(
+                    "AI 校对被原服务的内容策略拒绝，已自动改用 {service_name}（{model}）补做"
+                ));
+                return Some(next);
+            }
+        }
+        None
     }
 
     pub fn adjust_task(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -2164,7 +2475,10 @@ impl Desktop {
                         self.open_completed_conversion(Course::from_completed(done), cx);
                     }
                 }
-                self.task_status = task.state.label().into();
+                let automatic_fallback = self.automatically_reprocess_content_policy(&task);
+                self.task_status = automatic_fallback
+                    .map(|_| "已切换 AI 服务补做校对".into())
+                    .unwrap_or_else(|| task.state.label().into());
                 self.transient_task_result = Some((id.to_owned(), std::time::Instant::now()));
             }
             Err(error) => {
@@ -3073,23 +3387,61 @@ impl Desktop {
                         "正在保存当前结果，完成后可以选择重新发送。",
                     ))
                 })
-                .children(["proofreading", "translation", "summary"].into_iter().filter_map(|stage| {
-                    let requests: Vec<_> = uncertain.iter().filter(|blocked| match stage {
-                        "proofreading" => blocked.purpose.as_deref().is_some_and(|p| p == "proofreading" || p == "llm"),
-                        "translation" => blocked.purpose.as_deref() == Some("translation"),
-                        _ => blocked.purpose.as_deref().is_some_and(|p| p == "summary" || p == "summarize"),
-                    }).filter_map(|blocked| blocked.request_id.as_ref()).collect();
-                    if requests.is_empty() { return None; }
-                    let label = match stage { "proofreading" => "仅补充校对", "translation" => "仅补充翻译", _ => "仅补充摘要" };
-                    Some(primary_pill(SharedString::from(format!("resend-{id}-{stage}")))
-                        .self_start().icon(icons::refresh()).label(format!("{label}（{} 个结果待确认）", requests.len()))
+                .children(
+                    ["proofreading", "translation", "summary"]
+                        .into_iter()
+                        .filter_map(|stage| {
+                            let requests: Vec<_> = uncertain
+                                .iter()
+                                .filter(|blocked| match stage {
+                                    "proofreading" => blocked
+                                        .purpose
+                                        .as_deref()
+                                        .is_some_and(|p| p == "proofreading" || p == "llm"),
+                                    "translation" => {
+                                        blocked.purpose.as_deref() == Some("translation")
+                                    }
+                                    _ => blocked
+                                        .purpose
+                                        .as_deref()
+                                        .is_some_and(|p| p == "summary" || p == "summarize"),
+                                })
+                                .filter_map(|blocked| blocked.request_id.as_ref())
+                                .collect();
+                            if requests.is_empty() {
+                                return None;
+                            }
+                            let label = match stage {
+                                "proofreading" => "仅补充校对",
+                                "translation" => "仅补充翻译",
+                                _ => "仅补充摘要",
+                            };
+                            Some(
+                                primary_pill(SharedString::from(format!("resend-{id}-{stage}")))
+                                    .self_start()
+                                    .icon(icons::refresh())
+                                    .label(format!("{label}（{} 个结果待确认）", requests.len()))
+                                    .disabled(active)
+                                    .on_click(cx.listener({
+                                        let id = id.clone();
+                                        move |this, _, _, cx| {
+                                            this.resend_stage(id.clone(), stage, cx)
+                                        }
+                                    })),
+                            )
+                        }),
+                )
+                .child(
+                    primary_pill(SharedString::from(format!("resend-all-{id}")))
+                        .self_start()
+                        .icon(icons::refresh())
+                        .label("高级：重新发送全部待确认内容")
                         .disabled(active)
-                        .on_click(cx.listener({ let id = id.clone(); move |this, _, _, cx| this.resend_stage(id.clone(), stage, cx) })))
-                }))
-                .child(primary_pill(SharedString::from(format!("resend-all-{id}")))
-                    .self_start().icon(icons::refresh()).label("高级：重新发送全部待确认内容")
-                    .disabled(active)
-                    .on_click(cx.listener({ let id = id.clone(); move |this, _, _, cx| this.resend_uncertain(id.clone(), cx) }))),
+                        .on_click(cx.listener({
+                            let id = id.clone();
+                            move |this, _, _, cx| this.resend_uncertain(id.clone(), cx)
+                        })),
+                ),
         )
     }
 
@@ -3727,13 +4079,43 @@ fn task_stage_order(stage: &str) -> usize {
 }
 
 fn validate_plan_config(source: &str, config: &course2md::settings::ConfigFile) -> Result<()> {
-    let resolved = course2md::options::resolve(source.to_owned(), &Default::default(), config)?;
+    let mut resolved = course2md::options::resolve(source.to_owned(), &Default::default(), config)?;
     resolved.validate()?;
     if resolved.transcript_source != course2md::config::TranscriptSource::Subtitle {
         // Credentials belong to the service vault, not this static model/provider check.
         resolved.validate_asr_with_auth(false, false)?;
+        if resolved.provider == course2md::config::AsrProvider::Api
+            && let Some(fallback) = resolved.asr_fallback_provider
+        {
+            resolved.provider = fallback;
+            resolved.validate_asr_with_auth(false, false)?;
+        }
     }
     Ok(())
+}
+
+fn enable_cloud_asr_fallback(
+    config: &mut course2md::settings::ConfigFile,
+    provider: course2md::config::AsrProvider,
+    local_defaults: Option<&course2md::settings::Defaults>,
+) -> bool {
+    use course2md::config::AsrProvider;
+    if config.defaults.provider != Some(AsrProvider::Api)
+        || config.defaults.asr_fallback_provider.is_some()
+    {
+        return false;
+    }
+    config.defaults.asr_fallback_provider = Some(provider);
+    if let Some(defaults) = local_defaults {
+        config.defaults.asr_model = defaults.asr_model.clone();
+        config.defaults.model_dir = Some(course2md::config::model_dir_from(
+            defaults.model_dir.as_deref(),
+        ));
+        config.defaults.threads = defaults.threads;
+        config.defaults.gpu_layers = defaults.gpu_layers;
+        config.defaults.mmproj_offload = defaults.mmproj_offload;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -4324,6 +4706,45 @@ mod tests {
         config.defaults.asr_model = Some("qwen3-0.6b".into());
         config.defaults.transcript_source = Some(TranscriptSource::Asr);
         validate_plan_config("video.mp4", &config).unwrap();
+
+        config.defaults.provider = Some(AsrProvider::Api);
+        config.defaults.asr_fallback_provider = Some(AsrProvider::Cpu);
+        config.defaults.asr_model = Some("whisper".into());
+        assert!(validate_plan_config("video.mp4", &config).is_err());
+        config.defaults.asr_model = Some("qwen3-1.7b".into());
+        validate_plan_config("video.mp4", &config).unwrap();
+    }
+
+    #[test]
+    fn automatic_cloud_fallback_uses_current_local_runtime_settings() {
+        use course2md::config::AsrProvider;
+        let mut config = course2md::settings::ConfigFile::default();
+        config.defaults.provider = Some(AsrProvider::Api);
+        config.defaults.model_dir = Some("old-models".into());
+        let defaults = course2md::settings::Defaults {
+            model_dir: Some("current-models".into()),
+            asr_model: Some("qwen3-1.7b".into()),
+            threads: Some(6),
+            ..Default::default()
+        };
+
+        assert!(super::enable_cloud_asr_fallback(
+            &mut config,
+            AsrProvider::Cpu,
+            Some(&defaults)
+        ));
+        assert_eq!(
+            config.defaults.asr_fallback_provider,
+            Some(AsrProvider::Cpu)
+        );
+        assert_eq!(
+            config.defaults.model_dir,
+            Some(course2md::config::model_dir_from(Some(
+                std::path::Path::new("current-models")
+            )))
+        );
+        assert_eq!(config.defaults.asr_model.as_deref(), Some("qwen3-1.7b"));
+        assert_eq!(config.defaults.threads, Some(6));
     }
 
     #[test]
@@ -4411,6 +4832,10 @@ mod tests {
                 "服务拒绝了请求参数（HTTP 422），请检查此任务使用的模型与服务设置。",
                 true,
             ),
+            (
+                "服务因内容策略拒绝了此请求。[content_policy_violation]",
+                true,
+            ),
             ("服务请求次数达到限制，请稍后重试。", false),
             ("服务未完成此请求（HTTP 500）。", false),
             ("请求超时，请稍后重试。", false),
@@ -4423,6 +4848,13 @@ mod tests {
                 "{message}"
             );
         }
+        outcomes.proofreading.message =
+            Some("服务因内容策略拒绝了此请求。[content_policy_violation]".into());
+        task.outcomes = serde_json::to_value(&outcomes).unwrap();
+        assert!(super::proofreading_content_policy_rejection(&task));
+        outcomes.proofreading.message = Some("服务请求次数达到限制，请稍后重试。".into());
+        task.outcomes = serde_json::to_value(&outcomes).unwrap();
+        assert!(!super::proofreading_content_policy_rejection(&task));
         outcomes.proofreading.message = Some("服务拒绝凭据".into());
         task.outcomes = serde_json::to_value(&outcomes).unwrap();
         task.blocked.push(crate::workspace::BlockedRequest {

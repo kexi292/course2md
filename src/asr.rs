@@ -93,19 +93,47 @@ pub async fn run(cfg: &PipelineConfig, wav: &std::path::Path) -> Result<Vec<Tran
         let max_speech = effective_api_max_speech(cfg.asr_api.mode, cfg.max_speech);
         let endpoint = crate::config::asr_endpoint(&cfg.asr_api)?;
         // Endpoint, protocol and effective chunk boundaries all affect reusable output.
-        let model_id = format!(
-            "{}:{}:{}",
-            endpoint,
-            cfg.asr_api.mode,
-            cfg.asr_api.model
-        );
+        let fallback = cfg
+            .asr_fallback_provider
+            .filter(|provider| *provider != AsrProvider::Api);
+        let model_id = match fallback {
+            Some(provider) => format!(
+                "{}:{}:{}:fallback={}:{}",
+                endpoint,
+                cfg.asr_api.mode,
+                cfg.asr_api.model,
+                provider,
+                cfg.asr_model.as_deref().unwrap_or("")
+            ),
+            None => format!("{}:{}:{}", endpoint, cfg.asr_api.mode, cfg.asr_api.model),
+        };
         let id = AsrIdentity::new("api", &model_id, max_speech);
         let api = cfg.asr_api.clone();
-        let wav = wav.to_path_buf();
-        return run_with_cp(cfg, &id, move |cp| {
-            run_api(&api, &wav, max_speech as f64, cp)
+        let cloud_wav = wav.to_path_buf();
+        let cloud = run_with_cp(cfg, &id, move |cp| {
+            run_api(&api, &cloud_wav, max_speech as f64, cp)
         })
         .await;
+        let cloud_error = match cloud {
+            Ok(events) => return Ok(events),
+            Err(error) => error,
+        };
+        let Some((provider, status)) = fallback.zip(cloud_rejection_status(&cloud_error)) else {
+            return Err(cloud_error);
+        };
+        tracing::warn!(
+            status,
+            fallback_provider = %provider,
+            "cloud ASR rejected audio; continuing unfinished segments locally"
+        );
+        let cloud_message = format!("{cloud_error:#}");
+        return run_local_fallback(cfg, wav, &id, provider, max_speech)
+            .await
+            .with_context(|| {
+                format!(
+                    "云端拒绝后，本机语音识别也失败 / Local transcription also failed after cloud rejection. Cloud error: {cloud_message}"
+                )
+            });
     }
     if cfg.provider == AsrProvider::Npu {
         let model = crate::npu::resolve_npu_model(cfg.asr_model.as_deref());
@@ -162,6 +190,81 @@ pub async fn run(cfg: &PipelineConfig, wav: &std::path::Path) -> Result<Vec<Tran
         run_blocking(&wav, &model, &mmproj, offload, threads, max_speech, cp)
     })
     .await
+}
+
+fn cloud_rejection_status(error: &anyhow::Error) -> Option<u16> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<crate::dispatch::Failure>())
+        .and_then(|failure| match failure.status {
+            Some(status @ (400 | 422)) if !failure.uncertain => Some(status),
+            _ => None,
+        })
+}
+
+async fn run_local_fallback(
+    cfg: &PipelineConfig,
+    wav: &Path,
+    identity: &crate::checkpoint::AsrIdentity,
+    provider: crate::config::AsrProvider,
+    max_speech: f32,
+) -> Result<Vec<TranscriptEvent>> {
+    use crate::config::AsrProvider;
+    match provider {
+        AsrProvider::Api => {
+            anyhow::bail!("本机回退不能使用云端后端 / Cloud API is not a local fallback")
+        }
+        AsrProvider::Npu => {
+            let model = crate::npu::resolve_npu_model(cfg.asr_model.as_deref());
+            let wav = wav.to_path_buf();
+            run_with_cp(cfg, identity, move |cp| {
+                crate::npu::run_npu(&model, &wav, max_speech as f64, cp)
+            })
+            .await
+        }
+        AsrProvider::Coreml => {
+            #[cfg(apple_native)]
+            {
+                let model = crate::apple::resolve_model(
+                    cfg.asr_model
+                        .as_deref()
+                        .filter(|model| !model.trim().is_empty()),
+                )?;
+                let wav = wav.to_path_buf();
+                return run_with_cp(cfg, identity, move |cp| {
+                    let tmp = crate::runtime::TempWorkDir::new("asr")?;
+                    crate::apple::run_coreml(&wav, max_speech as f64, &model, tmp.path(), cp)
+                })
+                .await;
+            }
+            #[cfg(not(apple_native))]
+            anyhow::bail!(
+                "此构建不含 Apple 识别后端 / This build does not include Apple transcription"
+            )
+        }
+        AsrProvider::Gpu | AsrProvider::Cpu => {
+            let llama = crate::models::ensure_llama_or_download(&cfg.model_dir).await?;
+            let offload = OffloadOpts {
+                provider,
+                gpu_layers: cfg.gpu_layers,
+                mmproj_offload: cfg.mmproj_offload,
+            };
+            let threads = cfg.threads;
+            let wav = wav.to_path_buf();
+            run_with_cp(cfg, identity, move |cp| {
+                run_blocking(
+                    &wav,
+                    &llama.model,
+                    &llama.mmproj,
+                    offload,
+                    threads,
+                    max_speech,
+                    cp,
+                )
+            })
+            .await
+        }
+    }
 }
 
 const DASHSCOPE_MAX_SPEECH: f32 = 225.0;
@@ -529,7 +632,10 @@ fn post_bytes_retry(
     let mut delay = RETRY_BACKOFF_BASE;
     for attempt in 1..=MAX_ATTEMPTS {
         crate::dispatch::check_control()?;
+        let fallback = serde_json::json!({"payload_sha256": crate::execution::digest(body)});
+        let scope = identity.unwrap_or(&fallback);
         let send = || {
+            let started = Instant::now();
             let request = agent.post(url).set("Content-Type", content_type);
             let request = if let Some(key) = key.filter(|key| !key.is_empty()) {
                 request.set("Authorization", &format!("Bearer {key}"))
@@ -541,13 +647,29 @@ fn post_bytes_retry(
             } else {
                 request
             };
-            crate::dispatch::receive(request.send_bytes(body))
+            let result = crate::dispatch::receive(request.send_bytes(body));
+            if key.is_some() {
+                crate::dispatch::record_request_diagnostic(
+                    "asr",
+                    "transcription",
+                    url,
+                    scope,
+                    serde_json::json!({
+                        "type":"asr_http_attempt", "transport_attempt":attempt,
+                        "duration_ms":started.elapsed().as_millis(),
+                        "request_bytes":body.len(), "content_type":content_type,
+                        "status":result.as_ref().ok().map(|response|response.status),
+                        "response_bytes":result.as_ref().ok().map(|response|response.body.len()),
+                        "provider_request_id":result.as_ref().ok().and_then(|response|response.provider_request_id.as_deref()),
+                        "definitely_unsent":result.as_ref().err().map(|error|error.definitely_unsent),
+                    }),
+                );
+            }
+            result
         };
         // No key argument means the private local model server, not a cloud API.
         // Cloud no-auth mode still passes Some("") and gets a durable request receipt.
         let result = if key.is_some() {
-            let fallback = serde_json::json!({"payload_sha256": crate::execution::digest(body)});
-            let scope = identity.unwrap_or(&fallback);
             let description = match (
                 scope["segment_start"].as_f64(),
                 scope["segment_end"].as_f64(),
@@ -583,7 +705,10 @@ fn post_bytes_retry(
                     status: Some(response.status),
                     retryable: response.status == 429 || response.status >= 500,
                     uncertain: false,
-                    message: format!("本机识别请求失败（HTTP {0}） / Local transcription request failed (HTTP {0})", response.status),
+                    message: format!(
+                        "本机识别请求失败（HTTP {0}） / Local transcription request failed (HTTP {0})",
+                        response.status
+                    ),
                     unsupported_response_format: false,
                 }),
                 Err(error) => Err(crate::dispatch::Failure {
@@ -628,6 +753,37 @@ fn transcribe_api(t: &ApiTarget, chunk: &Path, seg: Seg, wav: &Path) -> Result<O
     let bytes = std::fs::read(chunk)
         .with_context(|| format!("读取音频片段 / Reading audio segment: {}", chunk.display()))?;
     let identity = serde_json::json!({"model":t.model,"mode":t.mode,"audio_sha256":crate::execution::digest(&bytes),"segment_start":seg.start,"segment_end":seg.end,"cut_start":seg.cut_start,"cut_end":seg.cut_end});
+    let (rms_dbfs, max_window_rms_dbfs) = Energy::load(chunk).ok().map_or((None, None), |energy| {
+        let dbfs = |amplitude: f32| (amplitude > 0.0).then(|| 20.0 * amplitude.log10());
+        let rms = (!energy.rms.is_empty()).then(|| {
+            (energy.rms.iter().map(|value| value * value).sum::<f32>() / energy.rms.len() as f32)
+                .sqrt()
+        });
+        (
+            rms.and_then(dbfs),
+            energy
+                .rms
+                .iter()
+                .copied()
+                .max_by(f32::total_cmp)
+                .and_then(dbfs),
+        )
+    });
+    crate::dispatch::record_request_diagnostic(
+        "asr",
+        "transcription",
+        t.url,
+        &identity,
+        serde_json::json!({
+            "type":"asr_chunk", "mode":t.mode,
+            "segment_start":seg.start, "segment_end":seg.end,
+            "speech_duration_ms":((seg.end-seg.start)*1000.0).round() as u64,
+            "cut_start":seg.cut_start, "cut_end":seg.cut_end,
+            "cut_duration_ms":((seg.cut_end-seg.cut_start)*1000.0).round() as u64,
+            "audio_bytes":bytes.len(), "rms_dbfs":rms_dbfs,
+            "max_window_rms_dbfs":max_window_rms_dbfs,
+        }),
+    );
     let v = match t.mode {
         crate::settings::AsrApiMode::Transcriptions => {
             let (content_type, body) = transcription_form(t.model, &bytes);
@@ -764,9 +920,7 @@ fn validate_api_response(
             chat_content_has_text(value),
             "语音服务响应缺少文字，不能当作静音 / Speech response is missing text"
         ),
-        crate::settings::AsrApiMode::DashscopeFunAsrFlash => {
-            dashscope_text(value).map(|_| ())?
-        }
+        crate::settings::AsrApiMode::DashscopeFunAsrFlash => dashscope_text(value).map(|_| ())?,
     }
     Ok(())
 }
@@ -832,9 +986,12 @@ pub fn gpu_devices(bin: &Path) -> Result<Vec<String>> {
         .stdout(stdout.try_clone()?)
         .stderr(stderr);
     let mut child = crate::runtime::ManagedChild::spawn("llama-server", &mut cmd)?;
-    let status = child
-        .wait_within(Duration::from_secs(15))
-        .map_err(|_| anyhow::anyhow!("llama-server GPU 检测超时 / llama-server GPU detection timed out. {}", GPU_SETUP_HINT))?;
+    let status = child.wait_within(Duration::from_secs(15)).map_err(|_| {
+        anyhow::anyhow!(
+            "llama-server GPU 检测超时 / llama-server GPU detection timed out. {}",
+            GPU_SETUP_HINT
+        )
+    })?;
     anyhow::ensure!(
         status.success(),
         "llama-server --list-devices 执行失败，请更新 llama.cpp 并检查驱动 / llama-server --list-devices failed; update llama.cpp and check the driver. {}",
@@ -1052,19 +1209,28 @@ fn transcribe_file(client: &ureq::Agent, base: &str, wav: &Path) -> Result<Strin
     let choice = &v["choices"][0];
     if choice.is_null() {
         // 协议错误才失败：响应缺少 choices
-        anyhow::bail!("本地识别响应缺少 choices / Local transcription response missing choices: {v}");
+        anyhow::bail!(
+            "本地识别响应缺少 choices / Local transcription response missing choices: {v}"
+        );
     }
     // 空文本按无语音处理（与云端 transcribe_api 的 Ok(None) 同语义）：
     // VAD 切出的近静音段在 llama-server 上常返回空，不该把整次 ASR 判死
-    Ok(choice["message"]["content"].as_str().unwrap_or("").to_string())
+    Ok(choice["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string())
 }
 
 pub(crate) fn ffmpeg_vad(wav: &Path, max_speech: f32) -> Result<Vec<Seg>> {
     // stdin 关闭 + 超时强制 kill：ffmpeg 在 GUI/管道 stdin 上可能挂死（issue 审查）
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-hide_banner", "-nostdin", "-i"])
-        .arg(wav)
-        .args(["-af", SILENCEDETECT_AF, "-f", "null", "-"]);
+    cmd.args(["-hide_banner", "-nostdin", "-i"]).arg(wav).args([
+        "-af",
+        SILENCEDETECT_AF,
+        "-f",
+        "null",
+        "-",
+    ]);
     let out = crate::runtime::run_bounded("ffmpeg", &mut cmd, VAD_TIMEOUT)?;
     if !out.status.success() {
         anyhow::bail!(
@@ -1343,14 +1509,21 @@ fn invert_silence(dur: f64, sil: &[(f64, f64)]) -> Vec<(f64, f64)> {
 pub fn cut_wav(src: &Path, start: f64, end: f64, dest: &Path) -> Result<()> {
     let dur = (end - start).max(0.05);
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-ss"])
-        .arg(format!("{start:.3}"))
-        .arg("-t")
-        .arg(format!("{dur:.3}"))
-        .arg("-i")
-        .arg(src)
-        .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
-        .arg(dest);
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-y",
+        "-ss",
+    ])
+    .arg(format!("{start:.3}"))
+    .arg("-t")
+    .arg(format!("{dur:.3}"))
+    .arg("-i")
+    .arg(src)
+    .args(["-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le"])
+    .arg(dest);
     let out = crate::runtime::run_bounded("ffmpeg", &mut cmd, CUT_TIMEOUT)?;
     if !out.status.success() {
         anyhow::bail!("无法切分音频 / ffmpeg could not split audio");
@@ -1360,6 +1533,39 @@ pub fn cut_wav(src: &Path, start: f64, end: f64, dest: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn cloud_failure(status: Option<u16>, uncertain: bool) -> anyhow::Error {
+        anyhow::Error::new(crate::dispatch::Failure {
+            status,
+            retryable: false,
+            uncertain,
+            message: "fixture".into(),
+            unsupported_response_format: false,
+        })
+        .context("cloud transcription")
+    }
+
+    #[test]
+    fn local_fallback_only_accepts_explicit_audio_rejections() {
+        assert_eq!(
+            super::cloud_rejection_status(&cloud_failure(Some(400), false)),
+            Some(400)
+        );
+        assert_eq!(
+            super::cloud_rejection_status(&cloud_failure(Some(422), false)),
+            Some(422)
+        );
+        for status in [None, Some(401), Some(403), Some(429), Some(500)] {
+            assert_eq!(
+                super::cloud_rejection_status(&cloud_failure(status, false)),
+                None
+            );
+        }
+        assert_eq!(
+            super::cloud_rejection_status(&cloud_failure(Some(400), true)),
+            None
+        );
+    }
+
     #[test]
     fn gpu_probe_distinguishes_devices_from_cpu_only_and_unknown_output() {
         assert!(
@@ -1374,7 +1580,13 @@ mod tests {
         let devices = super::parse_gpu_devices("Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n  MTL0: Apple M3 Max (110100 MiB, 110100 MiB free)\n").unwrap();
         assert_eq!(devices.len(), 1);
         assert!(devices[0].contains("Apple M3 Max"));
-        assert!(super::parse_gpu_devices("Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n").unwrap().is_empty());
+        assert!(
+            super::parse_gpu_devices(
+                "Available devices:\n  BLAS: Accelerate (0 MiB, 0 MiB free)\n"
+            )
+            .unwrap()
+            .is_empty()
+        );
         assert!(super::parse_gpu_devices("unknown option --list-devices").is_err());
     }
 
@@ -1444,15 +1656,15 @@ mod tests {
             " first "
         );
         assert_eq!(
-            dashscope_text(&serde_json::json!({"output":{"output":{"sentence":{"text":"second"}}}})).unwrap(),
+            dashscope_text(
+                &serde_json::json!({"output":{"output":{"sentence":{"text":"second"}}}})
+            )
+            .unwrap(),
             "second"
         );
         assert!(dashscope_text(&serde_json::json!({"output":{}})).is_err());
         assert_eq!(
-            effective_api_max_speech(
-                crate::settings::AsrApiMode::DashscopeFunAsrFlash,
-                600.0
-            ),
+            effective_api_max_speech(crate::settings::AsrApiMode::DashscopeFunAsrFlash, 600.0),
             225.0
         );
     }

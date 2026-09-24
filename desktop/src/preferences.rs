@@ -190,6 +190,11 @@ impl GenerationPreferences {
             }
         } else {
             self.last_local_provider = provider;
+            if self.options.asr_fallback_provider.is_some()
+                && let Some(provider) = provider
+            {
+                self.options.asr_fallback_provider = Some(provider);
+            }
         }
         self.options.provider = provider;
     }
@@ -218,8 +223,7 @@ impl GenerationPreferences {
         config.llm.enabled = self.ai_proofread;
         config.llm.summarize = self.ai_summary;
         config.llm.note_language = self.note_language;
-        config.translation.enabled =
-            self.note_language == course2md::llm::NoteLanguage::ZhHans;
+        config.translation.enabled = self.note_language == course2md::llm::NoteLanguage::ZhHans;
         config.llm.vision = self.effective_vision();
         config.llm.prompt = self.prompt.clone();
         config.llm.concurrency = self.ai_concurrency;
@@ -276,9 +280,9 @@ pub enum ServiceProtocol {
 impl ServiceProtocol {
     pub fn purpose(self) -> ServicePurpose {
         match self {
-            Self::SpeechTranscriptions
-            | Self::SpeechChat
-            | Self::SpeechDashscopeFunAsrFlash => ServicePurpose::Speech,
+            Self::SpeechTranscriptions | Self::SpeechChat | Self::SpeechDashscopeFunAsrFlash => {
+                ServicePurpose::Speech
+            }
             Self::AiChat => ServicePurpose::Ai,
         }
     }
@@ -296,9 +300,7 @@ impl ServiceProtocol {
         match self {
             Self::SpeechTranscriptions => "/audio/transcriptions",
             Self::SpeechChat | Self::AiChat => "/chat/completions",
-            Self::SpeechDashscopeFunAsrFlash => {
-                "/services/aigc/multimodal-generation/generation"
-            }
+            Self::SpeechDashscopeFunAsrFlash => "/services/aigc/multimodal-generation/generation",
         }
     }
 }
@@ -320,6 +322,8 @@ pub struct ServiceDraft {
     pub protocol: ServiceProtocol,
     pub address: String,
     pub model: String,
+    #[serde(default)]
+    pub supports_vision: bool,
     pub authentication: Authentication,
     pub credential: Option<CredentialRef>,
     /// The variable name is informational. The captured value lives in the vault.
@@ -340,6 +344,7 @@ impl ServiceDraft {
             },
             address: String::new(),
             model: String::new(),
+            supports_vision: false,
             authentication: Authentication::ApiKey,
             credential: None,
             credential_source: None,
@@ -356,6 +361,7 @@ impl ServiceDraft {
             protocol: version.config.protocol,
             address: version.config.endpoint.clone(),
             model: version.config.model.clone(),
+            supports_vision: version.config.supports_vision,
             authentication: version.config.authentication,
             credential: version.config.credential.clone(),
             credential_source: version.config.credential_source.clone(),
@@ -432,6 +438,7 @@ impl ServiceDraft {
             protocol: self.protocol,
             endpoint,
             model: self.model.trim().to_owned(),
+            supports_vision: self.protocol == ServiceProtocol::AiChat && self.supports_vision,
             authentication: self.authentication,
             credential: if self.authentication == Authentication::ApiKey {
                 self.credential.clone()
@@ -461,6 +468,8 @@ pub struct ServiceConfiguration {
     /// A normalized, complete request URL, never an address containing credentials.
     pub endpoint: String,
     pub model: String,
+    #[serde(default)]
+    pub supports_vision: bool,
     pub authentication: Authentication,
     pub credential: Option<CredentialRef>,
     pub credential_source: Option<String>,
@@ -851,6 +860,35 @@ impl Store {
             }
         }
         latest
+    }
+    pub fn automatic_ai_fallbacks(
+        &self,
+        attempted_service_ids: &BTreeSet<ServiceId>,
+        needs_vision: bool,
+    ) -> Vec<ServiceVersion> {
+        let eligible = |version: &ServiceVersion| {
+            version.config.protocol == ServiceProtocol::AiChat
+                && !attempted_service_ids.contains(&version.service_id)
+                && !self.service_retired_in_snapshot(&version.service_id)
+                && (!needs_vision || version.config.supports_vision)
+        };
+        let default = self
+            .services
+            .defaults
+            .llm
+            .as_deref()
+            .and_then(|id| self.version(id))
+            .filter(|version| eligible(version))
+            .cloned();
+        let default_service = default.as_ref().map(|version| version.service_id.as_str());
+        let mut versions: Vec<_> = self
+            .latest_versions()
+            .into_values()
+            .filter(|version| eligible(version))
+            .filter(|version| Some(version.service_id.as_str()) != default_service)
+            .collect();
+        versions.sort_by_key(|version| std::cmp::Reverse((version.saved_at, version.number)));
+        default.into_iter().chain(versions).collect()
     }
     pub fn version(&self, id: &str) -> Option<&ServiceVersion> {
         self.services.versions.get(id)
@@ -1351,9 +1389,7 @@ impl Store {
             config.asr_api.mode = match version.config.protocol {
                 ServiceProtocol::SpeechTranscriptions => AsrApiMode::Transcriptions,
                 ServiceProtocol::SpeechChat => AsrApiMode::Chat,
-                ServiceProtocol::SpeechDashscopeFunAsrFlash => {
-                    AsrApiMode::DashscopeFunAsrFlash
-                }
+                ServiceProtocol::SpeechDashscopeFunAsrFlash => AsrApiMode::DashscopeFunAsrFlash,
                 ServiceProtocol::AiChat => unreachable!(),
             };
         }
@@ -1824,6 +1860,40 @@ mod tests {
     }
 
     #[test]
+    fn vision_capability_is_backward_compatible_and_filters_automatic_fallbacks() {
+        let (_directory, mut store) = isolated();
+        let current = complete_draft(&mut store, "current-model");
+        let current = store
+            .publish_service(&current.id, BindingScope::CurrentTask)
+            .unwrap();
+
+        let mut visual = complete_draft(&mut store, "deepseek-flash");
+        visual.supports_vision = true;
+        let visual = store
+            .save_service_draft(visual, None)
+            .and_then(|draft| store.publish_service(&draft.id, BindingScope::Defaults))
+            .unwrap();
+        let text_only = complete_draft(&mut store, "text-only");
+        store
+            .publish_service(&text_only.id, BindingScope::CurrentTask)
+            .unwrap();
+
+        let attempted = BTreeSet::from([current.service_id]);
+        let candidates = store.automatic_ai_fallbacks(&attempted, true);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, visual.id);
+        assert!(candidates[0].config.supports_vision);
+
+        let mut legacy = serde_json::to_value(&visual.config).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("supports_vision");
+        let legacy: ServiceConfiguration = serde_json::from_value(legacy).unwrap();
+        assert!(!legacy.supports_vision);
+    }
+
+    #[test]
     fn local_engine_choice_survives_online_service_and_restart() {
         for provider in [
             None,
@@ -1847,6 +1917,18 @@ mod tests {
             assert_eq!(restored.options.provider, provider);
             assert_eq!(restored.options.asr_model.as_deref(), Some("qwen3-1.7b"));
         }
+    }
+
+    #[test]
+    fn enabled_cloud_fallback_tracks_an_explicit_local_engine() {
+        let mut preferences = GenerationPreferences::default();
+        preferences.options.provider = Some(AsrProvider::Api);
+        preferences.options.asr_fallback_provider = Some(AsrProvider::Cpu);
+        preferences.select_provider(Some(AsrProvider::Gpu));
+        assert_eq!(
+            preferences.options.asr_fallback_provider,
+            Some(AsrProvider::Gpu)
+        );
     }
 
     #[test]

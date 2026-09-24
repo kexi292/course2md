@@ -457,7 +457,6 @@ fn help(id: impl Into<ElementId>, value: impl Into<SharedString>) -> Div {
     theme::supporting_info(id, value)
 }
 
-
 impl Desktop {
     pub(crate) fn start_onboarding(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.setup_model_job_running() {
@@ -724,9 +723,13 @@ impl Desktop {
             smol::block_on(async move {
                 let mut results = Vec::new();
                 for kind in required {
-                    let evidence =
-                        service_test::test_service(config.clone(), kind, vault.clone(), cancel.clone())
-                            .await;
+                    let evidence = service_test::test_service(
+                        config.clone(),
+                        kind,
+                        vault.clone(),
+                        cancel.clone(),
+                    )
+                    .await;
                     let passed = evidence.outcome == TestOutcome::Passed;
                     results.push((kind, evidence));
                     if !passed || cancel.load(Ordering::Acquire) {
@@ -1178,11 +1181,10 @@ impl Desktop {
                             .pb(px(if compact { 20. } else { 32. }))
                             .child(motion::state_enter(
                                 ("setup-step", number),
-                                scrolling_content)),
+                                scrolling_content,
+                            )),
                     )
-                    .child(
-                        crate::backend::vertical_scrollbar(&self.onboarding.scroll),
-                    ),
+                    .child(crate::backend::vertical_scrollbar(&self.onboarding.scroll)),
             )
             .child(
                 footer
@@ -1668,15 +1670,13 @@ impl Desktop {
                                 ("chat", "音频聊天"),
                                 ("dashscope", "阿里云 Fun-ASR-Flash"),
                             ])
-                            .selected(
-                                match service.draft.protocol {
-                                    preferences::ServiceProtocol::SpeechChat => "chat",
-                                    preferences::ServiceProtocol::SpeechDashscopeFunAsrFlash => {
-                                        "dashscope"
-                                    }
-                                    _ => "transcriptions",
-                                },
-                            )
+                            .selected(match service.draft.protocol {
+                                preferences::ServiceProtocol::SpeechChat => "chat",
+                                preferences::ServiceProtocol::SpeechDashscopeFunAsrFlash => {
+                                    "dashscope"
+                                }
+                                _ => "transcriptions",
+                            })
                             .disabled(busy)
                             .on_change(cx.listener(|this, value: &SharedString, window, cx| {
                                 let protocol = match value.as_ref() {
@@ -1698,11 +1698,7 @@ impl Desktop {
                                     this.onboarding.speech.inputs[&InputField::Model].update(
                                         cx,
                                         |input, cx| {
-                                            input.set_value(
-                                                "fun-asr-flash-2026-06-15",
-                                                window,
-                                                cx,
-                                            )
+                                            input.set_value("fun-asr-flash-2026-06-15", window, cx)
                                         },
                                     );
                                 }
@@ -1963,7 +1959,8 @@ impl Desktop {
                 ));
             body = body.child(motion::state_enter(
                 ("setup-service-feedback", service.test_serial as usize),
-                feedback));
+                feedback,
+            ));
         }
         body
     }
@@ -2515,7 +2512,8 @@ impl Desktop {
                         self.setup_service_action_label(ServicePurpose::Ai, cx),
                         "检查配置" | "重新检查" | "重试保存"
                     ))
-                    || (step == Step::Engine && self.onboarding.provider == Some(AsrProvider::Api)
+                    || (step == Step::Engine
+                        && self.onboarding.provider == Some(AsrProvider::Api)
                         && matches!(
                             self.setup_service_action_label(ServicePurpose::Speech, cx),
                             "检查配置" | "重新检查" | "重试保存"
@@ -2892,6 +2890,7 @@ mod tests {
             protocol: ServiceProtocol::AiChat,
             endpoint: "https://example.test/v1/chat/completions".into(),
             model: "model-a".into(),
+            supports_vision: true,
             authentication: Authentication::None,
             credential: None,
             credential_source: None,

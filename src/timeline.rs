@@ -333,10 +333,8 @@ mod tests {
 
     #[test]
     fn old_transcript_json_without_translation_still_loads() {
-        let event: TranscriptEvent = serde_json::from_str(
-            r#"{"start":0.0,"end":1.0,"text":"hello","raw":null}"#,
-        )
-        .unwrap();
+        let event: TranscriptEvent =
+            serde_json::from_str(r#"{"start":0.0,"end":1.0,"text":"hello","raw":null}"#).unwrap();
         assert_eq!(event.text, "hello");
         assert!(event.translation.is_none());
     }

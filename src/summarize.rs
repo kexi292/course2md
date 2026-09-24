@@ -281,7 +281,10 @@ pub async fn summarize(
         let mut failure = None;
         // Join every started request so its confirmed result is saved, even if a peer failed.
         for handle in handles {
-            match handle.await.context("摘要工作进程中断 / Summary worker interrupted")? {
+            match handle
+                .await
+                .context("摘要工作进程中断 / Summary worker interrupted")?
+            {
                 Ok(summary) => partials.push(summary),
                 Err(error) => {
                     if failure.is_none() {

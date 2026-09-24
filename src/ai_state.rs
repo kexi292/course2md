@@ -49,8 +49,17 @@ mod tests {
 
     #[test]
     fn uncertain_is_automatic_once_then_requires_authorization() {
-        assert_eq!(retry_decision(AttemptState::Uncertain, 1, false), RetryDecision::Automatic);
-        assert_eq!(retry_decision(AttemptState::Uncertain, 2, false), RetryDecision::AuthorizationRequired);
-        assert_eq!(retry_decision(AttemptState::Uncertain, 9, true), RetryDecision::Automatic);
+        assert_eq!(
+            retry_decision(AttemptState::Uncertain, 1, false),
+            RetryDecision::Automatic
+        );
+        assert_eq!(
+            retry_decision(AttemptState::Uncertain, 2, false),
+            RetryDecision::AuthorizationRequired
+        );
+        assert_eq!(
+            retry_decision(AttemptState::Uncertain, 9, true),
+            RetryDecision::Automatic
+        );
     }
 }

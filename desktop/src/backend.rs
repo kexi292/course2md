@@ -494,9 +494,7 @@ fn probe(bin: &Path, args: &[&str], timeout: Duration) -> Option<String> {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => break,
             Ok(Some(_)) => return None,
-            Ok(None) if started.elapsed() < timeout => {
-                thread::sleep(Duration::from_millis(25))
-            }
+            Ok(None) if started.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
