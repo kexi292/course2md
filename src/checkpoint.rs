@@ -97,7 +97,9 @@ impl Checkpoint {
         };
 
         let identity_matches = Self::stored_identity(&identity_path).map(|stored| {
-            let ok = stored.as_ref() == Some(identity);
+            let ok = stored.as_ref().is_some_and(|stored| {
+                stored == identity || added_api_fallback_is_compatible(stored, identity)
+            });
             if !ok {
                 match stored {
                     Some(old) => tracing::info!(
@@ -357,6 +359,18 @@ impl Checkpoint {
     }
 }
 
+fn added_api_fallback_is_compatible(old: &AsrIdentity, new: &AsrIdentity) -> bool {
+    old.schema_version == new.schema_version
+        && old.provider == "api"
+        && new.provider == old.provider
+        && old.max_speech == new.max_speech
+        && !old.model.contains(":fallback=")
+        && new
+            .model
+            .strip_prefix(&old.model)
+            .is_some_and(|suffix| suffix.starts_with(":fallback="))
+}
+
 /// 小文件原子写：tmp → fsync → rename，避免崩溃留下半截文件。
 /// 保证级别：崩溃安全（文件本体已 fsync 后才 rename）；
 /// 不含掉电场景下父目录的 fsync（极端掉电时目录项本身可能未落盘）。
@@ -465,6 +479,21 @@ mod tests {
         let cp = Checkpoint::open(&d, true, &identity("whisper")).unwrap();
         assert!(!cp.is_done(0.0, 2.0), "换模型后旧 chunk 必须作废");
         assert!(cp.events().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn adding_api_fallback_preserves_cloud_progress() {
+        let d = tmpdir("api-fallback");
+        let old = AsrIdentity::new("api", "endpoint:mode:model", 20.0);
+        let mut cp = Checkpoint::open(&d, true, &old).unwrap();
+        cp.record(0.0, 2.0, "云端结果").unwrap();
+        drop(cp);
+
+        let upgraded = AsrIdentity::new("api", "endpoint:mode:model:fallback=cpu:qwen3-1.7b", 20.0);
+        let cp = Checkpoint::open(&d, true, &upgraded).unwrap();
+        assert!(cp.is_done(0.0, 2.0));
+        assert_eq!(cp.events()[0].text, "云端结果");
         let _ = std::fs::remove_dir_all(&d);
     }
 

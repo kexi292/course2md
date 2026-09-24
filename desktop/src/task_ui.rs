@@ -883,6 +883,14 @@ impl Desktop {
         }
     }
 
+    fn cloud_asr_fallback_provider(&self) -> course2md::config::AsrProvider {
+        self.preferences
+            .generation()
+            .last_local_provider
+            .filter(|provider| *provider != course2md::config::AsrProvider::Api)
+            .unwrap_or_else(|| self.recommended_local_provider())
+    }
+
     pub fn save_current_draft(&mut self, cx: &mut Context<Self>) -> bool {
         if self.draft_loading {
             return true;
@@ -1117,6 +1125,11 @@ impl Desktop {
                 .provider
                 .unwrap_or_else(|| self.recommended_local_provider());
             use course2md::config::AsrProvider;
+            enable_cloud_asr_fallback(
+                &mut config,
+                self.cloud_asr_fallback_provider(),
+                None,
+            );
             let check_local_provider = |provider| -> Result<()> {
                 match provider {
                     AsrProvider::Coreml => ensure!(
@@ -1794,10 +1807,20 @@ impl Desktop {
             cx.notify();
             return;
         }
+        let fallback = (intent == Intent::Run).then(|| {
+            (
+                self.cloud_asr_fallback_provider(),
+                self.preferences.defaults_config().defaults,
+            )
+        });
         let Some(workspace) = &mut self.workspace else {
             return;
         };
         match workspace.transaction(|state| {
+            if let Some((provider, defaults)) = &fallback {
+                let task = state.task_mut(&id).context("任务记录不存在")?;
+                enable_cloud_asr_fallback(&mut task.plan.config, *provider, Some(defaults));
+            }
             state.set_intent(&id, intent)?;
             if active && intent != Intent::Run {
                 state.task_mut(&id).context("任务记录不存在")?.state = TaskState::Pausing;
@@ -3981,6 +4004,30 @@ fn validate_plan_config(source: &str, config: &course2md::settings::ConfigFile) 
     Ok(())
 }
 
+fn enable_cloud_asr_fallback(
+    config: &mut course2md::settings::ConfigFile,
+    provider: course2md::config::AsrProvider,
+    local_defaults: Option<&course2md::settings::Defaults>,
+) -> bool {
+    use course2md::config::AsrProvider;
+    if config.defaults.provider != Some(AsrProvider::Api)
+        || config.defaults.asr_fallback_provider.is_some()
+    {
+        return false;
+    }
+    config.defaults.asr_fallback_provider = Some(provider);
+    if let Some(defaults) = local_defaults {
+        config.defaults.asr_model = defaults.asr_model.clone();
+        config.defaults.model_dir = Some(course2md::config::model_dir_from(
+            defaults.model_dir.as_deref(),
+        ));
+        config.defaults.threads = defaults.threads;
+        config.defaults.gpu_layers = defaults.gpu_layers;
+        config.defaults.mmproj_offload = defaults.mmproj_offload;
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -4576,6 +4623,38 @@ mod tests {
         assert!(validate_plan_config("video.mp4", &config).is_err());
         config.defaults.asr_model = Some("qwen3-1.7b".into());
         validate_plan_config("video.mp4", &config).unwrap();
+    }
+
+    #[test]
+    fn automatic_cloud_fallback_uses_current_local_runtime_settings() {
+        use course2md::config::AsrProvider;
+        let mut config = course2md::settings::ConfigFile::default();
+        config.defaults.provider = Some(AsrProvider::Api);
+        config.defaults.model_dir = Some("old-models".into());
+        let defaults = course2md::settings::Defaults {
+            model_dir: Some("current-models".into()),
+            asr_model: Some("qwen3-1.7b".into()),
+            threads: Some(6),
+            ..Default::default()
+        };
+
+        assert!(super::enable_cloud_asr_fallback(
+            &mut config,
+            AsrProvider::Cpu,
+            Some(&defaults)
+        ));
+        assert_eq!(
+            config.defaults.asr_fallback_provider,
+            Some(AsrProvider::Cpu)
+        );
+        assert_eq!(
+            config.defaults.model_dir,
+            Some(course2md::config::model_dir_from(Some(
+                std::path::Path::new("current-models")
+            )))
+        );
+        assert_eq!(config.defaults.asr_model.as_deref(), Some("qwen3-1.7b"));
+        assert_eq!(config.defaults.threads, Some(6));
     }
 
     #[test]

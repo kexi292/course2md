@@ -1103,7 +1103,7 @@ impl Desktop {
             icons::microphone(),
             "识别方式",
             if provider == "api" {
-                "视频声音会发送到所选语音服务。"
+                "视频声音会发送到所选语音服务；服务明确拒绝的片段会改用本机识别。"
             } else {
                 "在这台电脑上识别，课程声音不会上传。"
             },
@@ -1118,26 +1118,8 @@ impl Desktop {
                 })),
         ));
         if provider == "api" {
-            recognition = recognition
-                .child(self.service_picker(ServicePurpose::Speech, false, false, cx))
-                .child(self.setting_preference(
-                    icons::computer(),
-                    "云端拒绝后使用本机识别",
-                    "仅在服务以 HTTP 400/422 明确拒绝音频时回退；连接中断、结果不确定、鉴权失败或限流不会自动重发。",
-                    Switch::new("cloud-asr-local-fallback")
-                        .checked(value.options.asr_fallback_provider.is_some())
-                        .on_click(cx.listener(|this, enabled: &bool, _, cx| {
-                            let mut next = this.generation_edit_base();
-                            let fallback = next
-                                .last_local_provider
-                                .unwrap_or_else(|| this.recommended_local_provider());
-                            next.options.asr_fallback_provider = (*enabled).then_some(fallback);
-                            if *enabled {
-                                next.last_local_provider = Some(fallback);
-                            }
-                            this.commit_generation(next, cx);
-                        })),
-                ));
+            recognition =
+                recognition.child(self.service_picker(ServicePurpose::Speech, false, false, cx));
         } else {
             recognition =
                 recognition
