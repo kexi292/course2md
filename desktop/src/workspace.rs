@@ -160,15 +160,15 @@ impl Draft {
         if !self.overrides.contains(&Override::TextSource) {
             v.source_mode = defaults.source_mode;
         }
-        if !self.overrides.contains(&Override::Proofread) {
-            v.llm = defaults.llm;
+        v.llm = defaults.llm;
+        v.summarize = defaults.summarize;
+        v.vision = defaults.vision;
+        for field in [Override::Proofread, Override::Summary, Override::Vision] {
+            self.overrides.remove(&field);
         }
-        if !self.overrides.contains(&Override::Summary) {
-            v.summarize = defaults.summarize;
-        }
-        if !self.overrides.contains(&Override::Vision) {
-            v.vision = defaults.vision;
-        }
+        self.asr_service = None;
+        self.ai_service = None;
+        self.base_config = None;
         if !self.overrides.contains(&Override::KeepVideo) {
             v.keep_video = defaults.keep_video;
         }
@@ -178,15 +178,6 @@ impl Draft {
         v.resume = true;
     }
 
-    /// Resume inheriting AI processing choices without changing other task choices.
-    pub fn reset_ai_overrides(&mut self, defaults: &ConversionOptions) {
-        self.options.llm = defaults.llm;
-        self.options.summarize = defaults.summarize;
-        self.options.vision = defaults.vision;
-        for field in [Override::Proofread, Override::Summary, Override::Vision] {
-            self.overrides.remove(&field);
-        }
-    }
 }
 
 /// Extra defense at the persistence boundary: even a caller-provided resolved
@@ -624,8 +615,8 @@ impl State {
         true
     }
 
-    /// Replace the current form with a task's options without mutating that task.
-    pub fn adjust_task(&mut self, id: &str) -> Result<()> {
+    /// Reopen the source as a new draft using the latest saved defaults.
+    pub fn adjust_task(&mut self, id: &str, defaults: &ConversionOptions) -> Result<()> {
         let task = self.task(id).context("任务不存在")?.clone();
         ensure!(
             task.handled_by.is_none(),
@@ -641,7 +632,7 @@ impl State {
         let mut draft = Draft::new(
             task.plan.source.online,
             task.plan.library_id.clone(),
-            task.plan.options.clone(),
+            defaults.clone(),
         );
         draft.input = task.plan.source.input.clone();
         draft.source = Some(task.plan.source);
@@ -649,21 +640,7 @@ impl State {
         draft.custom_title = true;
         draft.folder = task.plan.folder;
         draft.subtitle = task.plan.subtitle;
-        draft.asr_service = task.plan.asr_service;
-        draft.ai_service = task.plan.ai_service;
         draft.retry_of = Some(id.to_owned());
-        draft.overrides = [
-            Override::Provider,
-            Override::TextSource,
-            Override::Proofread,
-            Override::Summary,
-            Override::Vision,
-            Override::KeepVideo,
-            Override::Formats,
-        ]
-        .into_iter()
-        .collect();
-        draft.base_config = Some(task.plan.config);
         self.replace_input(draft);
         Ok(())
     }
@@ -1629,7 +1606,7 @@ impl Workspace {
                 }
             }
         } else {
-            let mut initial = State::initial(root.clone(), options);
+            let mut initial = State::initial(root.clone(), options.clone());
             match std::fs::create_dir_all(&root) {
                 Ok(()) => {
                     let marker = root.join(".course2md-library-id");
@@ -1659,6 +1636,11 @@ impl Workspace {
             initial
         };
         state.recover();
+        for draft in &mut state.drafts {
+            if draft.submitted_task.is_none() {
+                draft.inherit(&options);
+            }
+        }
         for task in &mut state.tasks {
             // Only tasks that can start automatically need a cold-start receipt
             // check. Paused/attention-needed tasks reconcile when the user resumes
@@ -1990,11 +1972,12 @@ mod tests {
         let mut defaults = ConversionOptions::default();
         defaults.summarize = true;
         draft.inherit(&defaults);
-        assert!(draft.options.llm && draft.options.summarize);
+        assert!(!draft.options.llm && draft.options.summarize);
+        assert!(!draft.overrides.contains(&Override::Proofread));
     }
 
     #[test]
-    fn resetting_ai_choices_resumes_inheritance_without_changing_other_overrides_or_services() {
+    fn inheriting_defaults_discards_legacy_ai_and_service_overrides() {
         let mut draft = Draft::new(true, "lib".into(), Default::default());
         draft.change_source("current-video".into());
         draft.title = "Current note".into();
@@ -2009,6 +1992,7 @@ mod tests {
         draft.options.vision = true;
         draft.asr_service = Some("fixed-speech-service".into());
         draft.ai_service = Some("fixed-ai-service".into());
+        draft.base_config = Some(ConfigFile::default());
         draft.overrides = [
             Override::Provider,
             Override::TextSource,
@@ -2030,6 +2014,9 @@ mod tests {
         expected.options.llm = false;
         expected.options.summarize = true;
         expected.options.vision = false;
+        expected.asr_service = None;
+        expected.ai_service = None;
+        expected.base_config = None;
         expected.overrides = [
             Override::Provider,
             Override::TextSource,
@@ -2038,7 +2025,8 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        draft.reset_ai_overrides(&defaults);
+        draft.inherit(&defaults);
+        expected.options.resume = true;
         assert_eq!(draft, expected);
 
         let later_defaults = ConversionOptions {
@@ -2179,7 +2167,9 @@ mod tests {
         let restored =
             Workspace::open_at(ws.path.clone(), root.path().to_owned(), Default::default())
                 .unwrap();
-        assert_eq!(restored.state.draft().unwrap(), &expected);
+        let mut restored_expected = expected.clone();
+        restored_expected.inherit(&ConversionOptions::default());
+        assert_eq!(restored.state.draft().unwrap(), &restored_expected);
 
         ws.state.draft_mut().unwrap().submitted_task = Some(task.clone());
         ws.transaction(|state| state.set_input_destination(&target, Some(8), Default::default()))
@@ -2376,7 +2366,13 @@ mod tests {
         b.folder = Some(7);
         b.options.summarize = true;
         let b = b.clone();
-        assert!(ws.state.adjust_task(&id).is_err());
+        let defaults = ConversionOptions {
+            llm: false,
+            summarize: true,
+            vision: false,
+            ..Default::default()
+        };
+        assert!(ws.state.adjust_task(&id, &defaults).is_err());
         assert_eq!(ws.state.draft().unwrap(), &b);
 
         ws.state.task_mut(&id).unwrap().state = TaskState::NeedsAttention;
@@ -2384,22 +2380,23 @@ mod tests {
         assert!(ws.state.next_task().unwrap().plan == original);
         assert_eq!(ws.state.draft().unwrap(), &b);
         ws.state.set_intent(&id, Intent::Pause).unwrap();
-        ws.transaction(|state| state.adjust_task(&id)).unwrap();
+        ws.transaction(|state| state.adjust_task(&id, &defaults))
+            .unwrap();
         let revised = ws.state.draft_mut().unwrap();
-        let options = revised.options.clone();
-        revised.inherit(&ConversionOptions::default());
-        assert_eq!(revised.options, options);
+        assert_eq!(revised.options, defaults);
         assert_eq!(revised.input, original.source.input);
         assert_eq!(revised.source.as_ref(), Some(&original.source));
         assert_eq!(revised.title, original.title);
         assert_eq!(revised.folder, original.folder);
         assert_eq!(revised.library_id, original.library_id);
         assert_eq!(revised.subtitle, original.subtitle);
-        assert_eq!(revised.asr_service, original.asr_service);
-        assert_eq!(revised.ai_service, original.ai_service);
+        assert!(revised.asr_service.is_none());
+        assert!(revised.ai_service.is_none());
         assert_eq!(revised.retry_of.as_deref(), Some(id.as_str()));
-        assert!(revised.base_config.as_ref() == Some(&original.config));
-        let revision = revised.clone();
+        assert!(revised.base_config.is_none());
+        assert!(revised.overrides.is_empty());
+        let mut revision = revised.clone();
+        revision.inherit(&ConversionOptions::default());
         drop(ws);
         let mut reopened = test_workspace(dir.path());
         assert_eq!(reopened.state.draft().unwrap(), &revision);
@@ -2419,7 +2416,7 @@ mod tests {
             reopened.state.enqueue(adjusted, Some(id.clone())).unwrap(),
             (followup, false)
         );
-        assert!(reopened.state.adjust_task(&id).is_err());
+        assert!(reopened.state.adjust_task(&id, &defaults).is_err());
         assert_eq!(reopened.state.drafts.len(), 1);
         assert!(reopened.state.drafts.iter().all(|input| input.id != b.id));
     }

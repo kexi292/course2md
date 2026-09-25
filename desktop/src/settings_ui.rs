@@ -1980,23 +1980,12 @@ impl Desktop {
             )
             .child(self.service_editor_content(true, window, cx))
     }
-    pub fn task_service_picker(&self, purpose: ServicePurpose, cx: &mut Context<Self>) -> Div {
-        self.service_picker(purpose, true, false, cx)
-    }
     pub fn selected_task_service(&self, purpose: ServicePurpose) -> Option<ServiceVersion> {
-        let fixed = self
-            .workspace
-            .as_ref()
-            .and_then(|w| w.state.draft())
-            .and_then(|draft| match purpose {
-                ServicePurpose::Speech => draft.asr_service.clone(),
-                ServicePurpose::Ai => draft.ai_service.clone(),
-            });
         let defaults = self.preferences.default_refs();
-        let id = fixed.or(match purpose {
+        let id = match purpose {
             ServicePurpose::Speech => defaults.asr,
             ServicePurpose::Ai => defaults.llm,
-        })?;
+        }?;
         self.preferences.version(&id).cloned()
     }
     fn service_picker(

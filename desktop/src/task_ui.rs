@@ -1206,12 +1206,7 @@ impl Desktop {
         config.translation.enabled &= !course2md::llm::is_simplified_chinese(
             source.text_language(draft.options.source_mode != 2, draft.subtitle.is_some()),
         );
-        let defaults = self.preferences.default_refs();
-        let refs = ServiceRefs {
-            asr: draft.asr_service.clone().or(defaults.asr),
-            llm: draft.ai_service.clone().or(defaults.llm),
-            translation: defaults.translation,
-        };
+        let refs = self.preferences.default_refs();
         let config = match validation {
             PlanValidation::Preview => self.preferences.config_for_preview(&config, &refs)?,
             PlanValidation::Submission => self.preferences.config_for_refs(&config, &refs)?,
@@ -2247,7 +2242,8 @@ impl Desktop {
         let Some(workspace) = &mut self.workspace else {
             return;
         };
-        let result = workspace.transaction(|state| state.adjust_task(&id));
+        let defaults = ConversionOptions::from_config(&self.preferences.defaults_config());
+        let result = workspace.transaction(|state| state.adjust_task(&id, &defaults));
         match result {
             Ok(()) => {
                 self.following_conversion = None;
