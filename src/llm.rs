@@ -442,6 +442,9 @@ fn section_image_b64(
     if !s.vision {
         return Some(None);
     }
+    if sec.image.trim().is_empty() {
+        return Some(None);
+    }
     let p = frames_root.join(&sec.image);
     if !p.is_file() {
         warn_once(
@@ -1560,6 +1563,33 @@ mod tests {
         assert!(
             sys.contains("\"segments\""),
             "系统提示与 response_format=json_object 同为 segments 对象契约"
+        );
+    }
+
+    #[test]
+    fn vision_without_a_section_image_falls_back_to_text() {
+        let mut settings = test_settings();
+        settings.vision = true;
+        let warned = std::sync::atomic::AtomicBool::new(false);
+        let section = Section {
+            t: 0.0,
+            end: 1.0,
+            image: String::new(),
+            speech: Vec::new(),
+        };
+
+        assert_eq!(
+            section_image_b64(&settings, Path::new("missing-root"), &section, &warned),
+            Some(None)
+        );
+
+        let section = Section {
+            image: "frames/missing.jpg".into(),
+            ..section
+        };
+        assert_eq!(
+            section_image_b64(&settings, Path::new("missing-root"), &section, &warned),
+            None
         );
     }
 

@@ -153,3 +153,34 @@ drawbox=color=gray:t=fill:enable='gte(t,3.5)'";
     assert!(gray.is_some(), "灰页 onset 应为 3.5s 附近，got {ts:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn stable_mode_allows_a_text_only_result() {
+    if !have_ffmpeg() {
+        eprintln!("skip: ffmpeg not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("c2m-text-only-test-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let video = dir.join("synthetic.mp4");
+    let status = Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
+        .args(["-i", "color=c=white:s=1280x720:d=1:r=10"])
+        .arg(&video)
+        .status()
+        .expect("spawn ffmpeg");
+    assert!(status.success());
+
+    let cfg = course2md::config::PipelineConfig {
+        slide_mode: course2md::config::SlideMode::Stable,
+        stable_secs: 2.0,
+        ..test_cfg(&video, &dir)
+    };
+    let frames = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(course2md::scene::run(&cfg, &video))
+        .expect("zero stable slides are a valid text-only result");
+
+    assert!(frames.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}

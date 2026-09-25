@@ -405,16 +405,22 @@ async fn reprocess(
             cfg.media_path()
         };
         match cached_frames(cfg, &media_path).await {
-            Ok(frames) if !frames.is_empty() => {
+            Ok(frames) => {
                 let speech = all_speech(&document.sections);
-                document.sections = timeline::merge(frames, speech, document.meta.duration);
+                document.sections = if frames.is_empty() {
+                    vec![timeline::Section {
+                        t: 0.0,
+                        end: document.meta.duration,
+                        image: String::new(),
+                        speech,
+                    }]
+                } else {
+                    timeline::merge(frames, speech, document.meta.duration)
+                };
                 outcomes.screenshots = Outcome::succeeded();
             }
-            result => {
-                outcomes.screenshots = Outcome::failed(match result {
-                    Err(error) => format!("{error:#}"),
-                    _ => "没有提取到截图 / No screenshots captured".into(),
-                });
+            Err(error) => {
+                outcomes.screenshots = Outcome::failed(format!("{error:#}"));
                 if components.len() == 1 {
                     anyhow::bail!(
                         "截图尚未完成；原笔记保持可用 / Screenshot extraction failed; the original note remains available"
@@ -765,7 +771,7 @@ async fn run_prepared(
             frames
         }
         Ok(_) => {
-            outcomes.screenshots = Outcome::failed("未提取到截图 / No screenshots were captured");
+            outcomes.screenshots = Outcome::succeeded();
             Vec::new()
         }
         Err(error) => {
@@ -942,7 +948,7 @@ async fn cached_frames(cfg: &PipelineConfig, media: &Path) -> Result<Vec<timelin
     if cache_path.is_file() {
         let cache: FramesCache = serde_json::from_slice(&std::fs::read(&cache_path)?)
             .context("截图进度损坏，原文件已保留 / Screenshot checkpoint is damaged")?;
-        if verified_cache_files(&cfg.out_dir, &cache.files) && !cache.frames.is_empty() {
+        if verified_cache_files(&cfg.out_dir, &cache.files) {
             return Ok(cache.frames);
         }
     }

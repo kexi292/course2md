@@ -234,7 +234,6 @@ pub async fn run(cfg: &PipelineConfig, media: &Path) -> Result<Vec<FrameEvent>> 
     crate::progress::stage("scenes/scan", "start");
     let times = sample_timestamps(cfg, media).await?;
     crate::progress::stage("scenes/scan", "done");
-    anyhow::ensure!(!times.is_empty(), "未采样到任何帧 / No frames sampled");
 
     crate::progress::stage("scenes/extract", "start");
     let pb = crate::progress::Bar::new("scenes/extract", times.len() as u64)
