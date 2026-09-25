@@ -3141,17 +3141,31 @@ mod tests {
         original.state = TaskState::Partial;
         original.artifact = Some(translation_version);
         original.outcomes = serde_json::to_value(translation_outcomes).unwrap();
+        let mut repaired_translation = ConfigFile::default();
+        repaired_translation.translation.enabled = true;
+        repaired_translation.translation.base_url = "https://translation.example.test/v1".into();
+        repaired_translation.translation.model = "translation-model".into();
         let retry = ws
             .state
-            .reprocess(&translation_id, vec!["translation".into()], vec![])
+            .reprocess_with_service(
+                &translation_id,
+                vec!["translation".into()],
+                vec![],
+                Some(("translation-v2".into(), repaired_translation)),
+            )
             .unwrap();
         let task = ws.state.task(&retry).unwrap();
         assert!(!task.plan.config.llm.enabled);
         assert_eq!(task.plan.source_language(), Some("en"));
         assert_eq!(
             task.plan.translation_service.as_deref(),
-            Some("translation-v1")
+            Some("translation-v2")
         );
+        assert_eq!(
+            task.plan.config.translation.base_url,
+            "https://translation.example.test/v1"
+        );
+        assert_eq!(task.plan.config.translation.model, "translation-model");
         assert!(matches!(
             &task.plan.operation,
             course2md::execution::Operation::Reprocess { components, .. }

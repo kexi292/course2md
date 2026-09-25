@@ -301,7 +301,8 @@ async fn reprocess(
         crate::llm::validate(&cfg.llm)?;
     }
     if has("translation") {
-        crate::llm::validate(&cfg.translation.as_llm())?;
+        crate::llm::validate(&cfg.translation.as_llm())
+            .context("翻译服务配置不可用 / Translation service configuration is invalid")?;
     }
     if let Some(prior) = prior_work {
         let identity: serde_json::Value =
@@ -661,7 +662,8 @@ async fn run_prepared(
         crate::llm::validate(&cfg.llm)?;
     }
     if cfg.translation.enabled {
-        crate::llm::validate(&cfg.translation.as_llm())?;
+        crate::llm::validate(&cfg.translation.as_llm())
+            .context("翻译服务配置不可用 / Translation service configuration is invalid")?;
     }
     // Subtitle evidence and cloud static validation precede any full media download.
     progress::stage("subtitle", "start");

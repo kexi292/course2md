@@ -2497,8 +2497,15 @@ impl Desktop {
                 return false;
             }
         }
-        let title = if repair_task.is_some() {
-            "修复服务并补做"
+        let translation_repair = repair_task.as_ref().is_some_and(|(_, components)| {
+            components
+                .iter()
+                .all(|component| component == "translation")
+        });
+        let title = if translation_repair {
+            "修复翻译服务并补做"
+        } else if repair_task.is_some() {
+            "修复 AI 服务并补做"
         } else {
             match (draft.protocol.purpose(), target.is_some()) {
                 (ServicePurpose::Speech, true) => "为这次笔记设置语音服务",
@@ -2620,6 +2627,11 @@ impl Desktop {
         let busy = editor.test_running.is_some();
         let awaiting_binding = editor.pending_binding.is_some();
         let configuration_saved = editor.saved_configuration.is_some() || awaiting_binding;
+        let translation_repair = editor.repair_task.as_ref().is_some_and(|(_, components)| {
+            components
+                .iter()
+                .all(|component| component == "translation")
+        });
         let repair_submit_label = if awaiting_binding {
             "重试补做"
         } else if configuration_saved {
@@ -2639,11 +2651,15 @@ impl Desktop {
                     .map(|evidence| (editor.test_kind, evidence.clone()))
             })
         };
-        let test_label = match editor.test_kind {
+        let test_label = if translation_repair {
+            "翻译"
+        } else {
+            match editor.test_kind {
             TestKind::Speech => "语音",
             TestKind::Proofread => "校对",
             TestKind::Summary => "摘要",
             TestKind::Vision => "截图校对",
+            }
         };
         let test_outcome_unknown = editor
             .evidence
@@ -2658,7 +2674,9 @@ impl Desktop {
             .overflow_y_scroll()
             .track_scroll(&editor.scroll)
             .role(if inline { Role::Group } else { Role::Dialog })
-            .aria_label(if protocol.purpose() == ServicePurpose::Speech {
+            .aria_label(if translation_repair {
+                "设置翻译服务"
+            } else if protocol.purpose() == ServicePurpose::Speech {
                 "设置语音服务"
             } else {
                 "设置 AI 服务"
@@ -2670,7 +2688,16 @@ impl Desktop {
         view = view.child(
             text(
                 "service-editor-scope",
-                if editor.repair_task.is_some() {
+                if translation_repair {
+                    if configuration_saved {
+                        format!(
+                            "翻译服务配置已保存。点击「{repair_submit_label}」后才重新发送这篇笔记未完成的翻译；默认服务保持不变。"
+                        )
+                    } else {
+                        "在下方确认翻译服务地址与模型。仅保存不会开始补做；默认服务保持不变。"
+                            .to_owned()
+                    }
+                } else if editor.repair_task.is_some() {
                     if configuration_saved {
                         format!(
                             "配置已保存。点击「{repair_submit_label}」后才重新发送这篇笔记的失败部分；默认服务保持不变。"
@@ -2766,7 +2793,15 @@ impl Desktop {
                         ),
                 )
             })
-            .child(self.setting_field(EditField::Address, "服务地址", cx));
+            .child(self.setting_field(
+                EditField::Address,
+                if translation_repair {
+                    "翻译服务地址"
+                } else {
+                    "服务地址"
+                },
+                cx,
+            ));
         if protocol == ServiceProtocol::SpeechDashscopeFunAsrFlash {
             view = view.child(
                 theme::supporting_info(

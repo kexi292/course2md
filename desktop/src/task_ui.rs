@@ -2099,7 +2099,7 @@ impl Desktop {
             components.retain(|component| component == "translation");
         }
         if components.is_empty() {
-            self.message = Some("这份笔记没有需要修复的正文处理或摘要".into());
+            self.message = Some("这份笔记没有需要修复的正文处理、翻译或摘要".into());
             cx.notify();
             return;
         }
@@ -3027,27 +3027,32 @@ impl Desktop {
                         .text_sm(),
                     );
                 }
-                let repairable =
-                    task_component_failures(task, path)
-                        .iter()
-                        .any(|(component, _, _)| {
-                            matches!(
-                                component.as_str(),
-                                "proofreading" | "translation" | "summary"
-                            )
-                        });
+                let failures = task_component_failures(task, path);
+                let repairable = failures.iter().any(|(component, _, _)| {
+                    matches!(
+                        component.as_str(),
+                        "proofreading" | "translation" | "summary"
+                    )
+                });
+                let translation_repair = failures
+                    .iter()
+                    .any(|(component, _, _)| component == "translation");
                 if repairable && uncertain.is_empty() && task.handled_by.is_none() {
                     let repair_id = id.clone();
                     actions = actions.child(
                         outline_pill(SharedString::from(format!("repair-ai-task-{id}")))
                             .icon(icons::settings())
-                            .label("修复 AI 服务并补做")
+                            .label(if translation_repair {
+                                "修复翻译服务并补做"
+                            } else {
+                                "修复 AI 服务并补做"
+                            })
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.repair_task_service(repair_id.clone(), window, cx);
                             })),
                     );
                 }
-                for (component, label, outcome) in task_component_failures(task, path) {
+                for (component, label, outcome) in failures {
                     let unknown_component = uncertain.iter().any(|request| {
                         let purpose = request.purpose.as_deref().unwrap_or_default();
                         (component == "proofreading" && purpose.contains("proof"))
@@ -3843,10 +3848,17 @@ impl Desktop {
                 )
             }) {
                 let repair_id = id.clone();
+                let translation_repair = partial_failures
+                    .iter()
+                    .any(|(component, _, _)| component == "translation");
                 actions = actions.child(
                     outline_pill(SharedString::from(format!("box-repair-ai-{id}")))
                         .icon(icons::settings())
-                        .label("修复 AI 服务并补做")
+                        .label(if translation_repair {
+                            "修复翻译服务并补做"
+                        } else {
+                            "修复 AI 服务并补做"
+                        })
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.repair_task_service(repair_id.clone(), window, cx);
                         })),
