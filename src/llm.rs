@@ -1024,6 +1024,10 @@ fn validate_chat_response(
         value.get("error").is_none_or(serde_json::Value::is_null),
         "AI 服务返回错误内容 / AI service returned an error"
     );
+    anyhow::ensure!(
+        value["choices"][0]["finish_reason"].as_str() != Some("content_filter"),
+        "服务因内容策略未返回正文，可尝试其他兼容的 AI 服务。 / The service returned no content because of its content policy; another compatible AI service may accept it. [content_policy_violation]"
+    );
     let content = value["choices"][0]["message"]["content"]
         .as_str()
         .filter(|s| !s.trim().is_empty())
@@ -1304,6 +1308,25 @@ pub fn print_status(cfg: &crate::settings::ConfigFile) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_filter_finish_is_classified_for_service_fallback() {
+        let settings = test_settings();
+        let body = build_chat_body(&settings, &[(0, "ordinary course text")], None).unwrap();
+        let value = serde_json::json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {"content": ""}
+            }],
+            "usage": {"completion_tokens": 0}
+        });
+
+        let error = validate_chat_response(&value, &body, "proofreading").unwrap_err();
+        assert!(
+            error.to_string().contains("content_policy_violation"),
+            "{error:#}"
+        );
+    }
 
     #[test]
     fn translation_response_requires_field_but_accepts_null_and_preserves_source() {
