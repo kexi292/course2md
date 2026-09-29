@@ -1247,9 +1247,6 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                     .text_size(TEXT_TITLE)
                     .font_weight(FontWeight::SEMIBOLD),
             )
-            .when(anchor.ends_with("-translation"), |view| {
-                view.border_l_1().border_color(color(HAIRLINE)).pl_3()
-            })
             .into_any_element(),
         NoteItem::Block(index) => match &preview.blocks[index] {
             PreviewBlock::Heading {
@@ -1358,6 +1355,9 @@ fn render_note_item(flow: &NoteFlow, item_ix: usize, window: &mut Window) -> Any
                 flow.highlight_runs(index),
                 flow.search_target(index),
             )
+            .when(anchor.ends_with("-translation"), |view| {
+                view.border_l_1().border_color(color(HAIRLINE)).pl_3()
+            })
             .into_any_element(),
             PreviewBlock::Image(path) => {
                 let frame_index = flow.frame_index_by_path.get(path).copied();

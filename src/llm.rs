@@ -442,6 +442,9 @@ fn section_image_b64(
     if !s.vision {
         return Some(None);
     }
+    if sec.image.trim().is_empty() {
+        return Some(None);
+    }
     let p = frames_root.join(&sec.image);
     if !p.is_file() {
         warn_once(
@@ -1021,6 +1024,10 @@ fn validate_chat_response(
         value.get("error").is_none_or(serde_json::Value::is_null),
         "AI 服务返回错误内容 / AI service returned an error"
     );
+    anyhow::ensure!(
+        value["choices"][0]["finish_reason"].as_str() != Some("content_filter"),
+        "服务因内容策略未返回正文，可尝试其他兼容的 AI 服务。 / The service returned no content because of its content policy; another compatible AI service may accept it. [content_policy_violation]"
+    );
     let content = value["choices"][0]["message"]["content"]
         .as_str()
         .filter(|s| !s.trim().is_empty())
@@ -1303,6 +1310,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn content_filter_finish_is_classified_for_service_fallback() {
+        let settings = test_settings();
+        let body = build_chat_body(&settings, &[(0, "ordinary course text")], None).unwrap();
+        let value = serde_json::json!({
+            "choices": [{
+                "finish_reason": "content_filter",
+                "message": {"content": ""}
+            }],
+            "usage": {"completion_tokens": 0}
+        });
+
+        let error = validate_chat_response(&value, &body, "proofreading").unwrap_err();
+        assert!(
+            error.to_string().contains("content_policy_violation"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
     fn translation_response_requires_field_but_accepts_null_and_preserves_source() {
         let settings = TranslationSettings::default().as_llm();
         let body = build_chat_body(&settings, &[(0, "中文")], None).unwrap();
@@ -1560,6 +1586,33 @@ mod tests {
         assert!(
             sys.contains("\"segments\""),
             "系统提示与 response_format=json_object 同为 segments 对象契约"
+        );
+    }
+
+    #[test]
+    fn vision_without_a_section_image_falls_back_to_text() {
+        let mut settings = test_settings();
+        settings.vision = true;
+        let warned = std::sync::atomic::AtomicBool::new(false);
+        let section = Section {
+            t: 0.0,
+            end: 1.0,
+            image: String::new(),
+            speech: Vec::new(),
+        };
+
+        assert_eq!(
+            section_image_b64(&settings, Path::new("missing-root"), &section, &warned),
+            Some(None)
+        );
+
+        let section = Section {
+            image: "frames/missing.jpg".into(),
+            ..section
+        };
+        assert_eq!(
+            section_image_b64(&settings, Path::new("missing-root"), &section, &warned),
+            None
         );
     }
 
