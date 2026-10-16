@@ -434,7 +434,10 @@ fn summarize_version(
     artifact::validate_version(dir, &base)?;
     let document: artifact::Document =
         serde_json::from_slice(&std::fs::read(dir.join(&base.document))?)?;
-    if document.summary.is_some() && !force {
+    if let Some(summary) = &document.summary
+        && !force
+    {
+        export_summary(out, &document.meta.title, summary)?;
         if !progress::is_quiet() {
             println!(
                 "已有摘要，笔记保持不变 / Summary already exists: {}",
@@ -478,7 +481,15 @@ fn summarize_version(
         version_id: task_id,
         course_dir,
     };
-    if artifact::published(&target)?.is_some() {
+    if let Some(manifest) = artifact::published(&target)? {
+        let saved: artifact::Document = serde_json::from_slice(&std::fs::read(
+            target.version_dir().join(&manifest.document),
+        )?)?;
+        let summary = saved
+            .summary
+            .as_ref()
+            .context("已保存的摘要缺失 / Saved summary is missing")?;
+        export_summary(out, &saved.meta.title, summary)?;
         if !progress::is_quiet() {
             println!(
                 "摘要已保存 / Summary already saved: {}",
@@ -505,19 +516,30 @@ fn summarize_version(
         &[],
         outcomes,
     ))?;
-    if let Some(out) = out {
-        std::fs::create_dir_all(out)?;
-        let file = out.join(format!(
-            "{}.html",
-            config::sanitize_component(&document.meta.title)
-        ));
-        course2md::portable::export(&target.version_dir(), config::OutputFormat::Html, &file)?;
-    }
+    export_summary(out, &document.meta.title, &summary)?;
     if !progress::is_quiet() {
         println!(
             "摘要已作为新版笔记保存 / Summary saved as a new note version: {}",
             target.version_dir().display()
         );
+    }
+    Ok(())
+}
+
+fn export_summary(
+    out: Option<&std::path::Path>,
+    title: &str,
+    summary: &course2md::summarize::Summary,
+) -> anyhow::Result<()> {
+    if let Some(out) = out {
+        let path = out.join(format!(
+            "{}.summary.md",
+            course2md::summarize::sanitize_filename(title)
+        ));
+        course2md::checkpoint::atomic_write(
+            &path,
+            course2md::summarize::render_standalone_md(title, summary).as_bytes(),
+        )?;
     }
     Ok(())
 }
@@ -587,7 +609,10 @@ fn summarize_dir(
         } else {
             md
         };
-        std::fs::write(&md_path, course2md::summarize::insert_into_md(&md, &sm))?;
+        course2md::checkpoint::atomic_write(
+            &md_path,
+            course2md::summarize::insert_into_md(&md, &sm).as_bytes(),
+        )?;
     }
     if html_path.is_file() {
         let html = std::fs::read_to_string(&html_path)?;
@@ -596,9 +621,9 @@ fn summarize_dir(
         } else {
             html
         };
-        std::fs::write(
+        course2md::checkpoint::atomic_write(
             &html_path,
-            course2md::summarize::insert_into_html(&html, &sm),
+            course2md::summarize::insert_into_html(&html, &sm).as_bytes(),
         )?;
     }
     // 可选：导出独立总结文件到 -o 指定目录
@@ -615,9 +640,9 @@ fn summarize_dir(
             course2md::summarize::sanitize_filename(&title)
         );
         let target = out_dir.join(fname);
-        std::fs::write(
+        course2md::checkpoint::atomic_write(
             &target,
-            course2md::summarize::render_standalone_md(&title, &sm),
+            course2md::summarize::render_standalone_md(&title, &sm).as_bytes(),
         )?;
         if !progress::is_quiet() {
             println!("已导出总结 / Summary exported: {}", target.display());

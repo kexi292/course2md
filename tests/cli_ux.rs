@@ -349,3 +349,67 @@ fn version_flags_include_the_build_commit() {
         assert_eq!(stdout(&result), expected);
     }
 }
+
+#[test]
+fn existing_summary_can_be_exported_repeatedly_without_sending_requests() {
+    use course2md::{
+        artifact,
+        fetch::VideoMeta,
+        summarize::Summary,
+        timeline::{Section, TranscriptEvent},
+    };
+    let cli = CliTest::new();
+    cli.config("[llm]\nbase_url = 'http://127.0.0.1:1/v1'\nmodel = 'offline-test'\n");
+    let target = artifact::Target {
+        task_id: "summary-test".into(),
+        course_id: "course".into(),
+        source_id: "source".into(),
+        version_id: "v1".into(),
+        course_dir: cli.dir.path().join("course"),
+    };
+    let work = cli.dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    artifact::publish_blocking(
+        &target,
+        &work,
+        &VideoMeta {
+            title: "Lesson".into(),
+            uploader: String::new(),
+            duration: 1.0,
+            webpage_url: String::new(),
+            extractor: "local".into(),
+            id: "source".into(),
+        },
+        &[Section {
+            t: 0.0,
+            end: 1.0,
+            image: String::new(),
+            speech: vec![TranscriptEvent {
+                start: 0.0,
+                end: 1.0,
+                text: "Body excluded from standalone summary".into(),
+                raw: None,
+                translation: None,
+            }],
+        }],
+        Some(&Summary {
+            tldr: "Saved overview".into(),
+            key_points: vec!["Key point".into()],
+            outline: vec![],
+        }),
+        &[],
+        artifact::Outcomes::default(),
+    )
+    .unwrap();
+    let version = target.version_dir();
+    let exported = cli.dir.path().join("exports/Lesson.summary.md");
+    for _ in 0..2 {
+        let result = cli.run(&["summarize", version.to_str().unwrap(), "-o", "exports"]);
+        assert!(result.status.success(), "{}", stderr(&result));
+        let text = std::fs::read_to_string(&exported).unwrap();
+        assert!(text.contains("Saved overview"));
+        assert!(!text.contains("Body excluded"));
+        assert!(!cli.dir.path().join("exports/Lesson.html").exists());
+        std::fs::remove_file(&exported).unwrap();
+    }
+}
