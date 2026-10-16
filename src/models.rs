@@ -30,6 +30,7 @@ pub fn normalize_apple_model(s: &str) -> Result<String> {
         | "1.7b"
         | "qwen3-1.7b"
         | "qwen3-asr-1.7b"
+        | "qwen3-1.7b-gguf"
         | "qwen3-asr-1.7b-q8_0.gguf" => Ok("qwen3-1.7b".into()),
         "0.6" | "0.6b" | "qwen3-0.6b" | "qwen3-asr-0.6b" => Ok("qwen3-0.6b".into()),
         "whisper" | "whisper-large-v3-turbo" => Ok("whisper".into()),
@@ -58,6 +59,7 @@ pub async fn ensure_cache(
     ) {
         return Ok(());
     }
+    let model = status.model.as_str();
     match provider {
         AsrProvider::Cpu | AsrProvider::Gpu => download_models(root).await,
         AsrProvider::Coreml => {
@@ -98,6 +100,8 @@ pub async fn prepare(
         "这种识别方式不支持所选模型，请明确选择其他模型 / This transcription backend does not support the selected model; explicitly choose another model"
     );
     crate::progress::stage("model/prepare", "start");
+    let canonical = before.model.clone();
+    let model = canonical.as_str();
     let result = match provider {
         AsrProvider::Cpu | AsrProvider::Gpu => download_models(root).await,
         AsrProvider::Coreml => {
@@ -264,6 +268,7 @@ fn mirror_hint() -> String {
 
 /// 下载 llama.cpp Qwen3-ASR GGUF。
 pub async fn download_models(root: &Path) -> Result<()> {
+    crate::dispatch::check_control()?;
     fs::create_dir_all(root)?;
     let _download_lock = crate::runtime::lock_file(&root.join(".download.lock"))?;
     let p = llama_paths(root);
@@ -307,6 +312,7 @@ impl std::fmt::Display for PermanentHttp {
 impl std::error::Error for PermanentHttp {}
 
 async fn download_file(url: &str, dest: &Path, label: &str) -> Result<()> {
+    crate::dispatch::check_control()?;
     if dest.is_file() && file_complete(dest) {
         tracing::info!(label, "skip existing");
         return Ok(());
@@ -338,6 +344,7 @@ async fn download_file(url: &str, dest: &Path, label: &str) -> Result<()> {
             .build();
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 1..=DOWNLOAD_ATTEMPTS {
+            crate::dispatch::check_control()?;
             if attempt > 1 {
                 let wait = std::time::Duration::from_secs(1 << (attempt - 1)); // 2s、4s 指数退避
                 tracing::warn!(
@@ -347,11 +354,12 @@ async fn download_file(url: &str, dest: &Path, label: &str) -> Result<()> {
                     ?wait,
                     "下载失败，稍后重试 / Download failed; retrying shortly"
                 );
-                std::thread::sleep(wait);
+                crate::runtime::interruptible_sleep(wait)?;
             }
             match download_once(&agent, &url, &tmp, &dest, &label) {
                 Ok(()) => return Ok(()),
                 Err(e) => {
+                    crate::dispatch::check_control()?;
                     // 确定性 HTTP 错误（4xx≠429）不再退避重试
                     if e.downcast_ref::<PermanentHttp>().is_some() {
                         return Err(e);
@@ -382,6 +390,7 @@ fn download_once(
     dest: &Path,
     label: &str,
 ) -> Result<()> {
+    crate::dispatch::check_control()?;
     tracing::info!(label = %label, url = %url, "download");
     let resp = match agent.get(url).call() {
         Ok(r) => r,
@@ -412,6 +421,7 @@ fn download_once(
     let mut buf = vec![0u8; 1024 * 512];
     let mut done: u64 = 0;
     loop {
+        crate::dispatch::check_control()?;
         let n = reader.read(&mut buf)?;
         if n == 0 {
             break;
@@ -422,6 +432,7 @@ fn download_once(
     }
     out.sync_all()?;
     drop(out);
+    crate::dispatch::check_control()?;
     // 完整性：以服务器 Content-Length 为准（而非"实际收到多少"——截断响应会伪装成功）；
     // 不完整时保留 .part（断点位置见上方日志）
     if total > 0 && done != total {

@@ -90,6 +90,19 @@ const STDERR_TAIL_MAX: usize = 100;
 /// wait_within 的轮询间隔：50ms 足够及时，又不至于空转 CPU
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Keep retry backoff responsive to task pause and cancellation.
+pub fn interruptible_sleep(delay: Duration) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        crate::dispatch::check_control()?;
+        let remaining = delay.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
+}
+
 impl StderrTail {
     pub fn tail(&self) -> String {
         self.lines.lock().map(|v| v.join("\n")).unwrap_or_default()
@@ -187,10 +200,8 @@ pub fn wait_ready(
     let t0 = Instant::now();
     let url = format!("{base}/health");
     loop {
-        if let Some(check) = control
-            && let Err(e) = check()
-        {
-            anyhow::bail!("{} 启动被中止 / startup aborted: {e:#}", child.name());
+        if let Some(check) = control {
+            check()?;
         }
         if let Some(st) = child.try_wait() {
             anyhow::bail!(
@@ -222,17 +233,34 @@ pub fn wait_ready(
     }
 }
 
-/// 在 PATH 上查找可执行文件（Windows 自动尝试 .exe 后缀）。
+/// Find executables on PATH, including Windows PATHEXT launchers.
 pub fn which(cmd: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    let names: Vec<String> = if cfg!(windows) {
-        vec![cmd.to_string(), format!("{cmd}.exe")]
-    } else {
-        vec![cmd.to_string()]
-    };
+    #[cfg(windows)]
+    let names = windows_command_names(
+        cmd,
+        &std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()),
+    );
+    #[cfg(not(windows))]
+    let names = vec![cmd.to_string()];
     std::env::split_paths(&path)
         .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
         .find(|p| is_executable(p))
+}
+
+#[cfg(windows)]
+fn windows_command_names(cmd: &str, pathext: &str) -> Vec<String> {
+    let mut names = vec![cmd.to_owned()];
+    if Path::new(cmd).extension().is_none() {
+        names.extend(
+            pathext
+                .split(';')
+                .map(str::trim)
+                .filter(|ext| !ext.is_empty())
+                .map(|ext| format!("{cmd}{ext}")),
+        );
+    }
+    names
 }
 
 #[cfg(unix)]
@@ -345,30 +373,36 @@ mod tests {
 
     /// issue：桌面取消任务后，llama-server 首次加载（最长 300s 超时）不得继续空等——
     /// control 钩子每轮轮询，返回 Err 立即中止，进程由 Drop 兜底。
-    #[cfg(unix)]
     #[test]
     fn wait_ready_aborts_when_control_hook_fails() {
+        #[cfg(unix)]
         let mut cmd = Command::new("sleep");
+        #[cfg(unix)]
         cmd.arg("30");
-        let mut child = ManagedChild::spawn("sleep", &mut cmd).unwrap();
+        #[cfg(windows)]
+        let mut cmd = Command::new("cmd");
+        #[cfg(windows)]
+        cmd.args(["/C", "exit", "0"]);
+        let mut child = ManagedChild::spawn("control-test", &mut cmd).unwrap();
         let t0 = Instant::now();
-        // 永远不就绪的端口 + 60s 超时；control 第二轮即报错，应远早于超时返回
-        let calls = std::sync::atomic::AtomicUsize::new(0);
         let result = wait_ready(
             "http://127.0.0.1:9",
             Duration::from_secs(60),
             &mut child,
             None,
             Some(&|| {
-                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1 {
-                    anyhow::bail!("测试取消 / test cancellation")
-                } else {
-                    Ok(())
-                }
+                Err(anyhow::Error::new(crate::dispatch::Failure {
+                    status: None,
+                    retryable: false,
+                    uncertain: false,
+                    message: "测试取消 / test cancellation".into(),
+                    unsupported_response_format: false,
+                }))
             }),
         );
         let err = result.expect_err("control 报错必须中止 wait_ready");
-        assert!(err.to_string().contains("启动被中止"), "{err:#}");
+        assert!(err.downcast_ref::<crate::dispatch::Failure>().is_some());
+        assert_eq!(err.to_string(), "测试取消 / test cancellation");
         assert!(t0.elapsed() < Duration::from_secs(10), "取消不应等到超时");
     }
 
@@ -381,6 +415,24 @@ mod tests {
         let probe = "cmd";
         assert!(which(probe).is_some());
         assert!(which("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lookup_honors_launcher_extensions() {
+        let names = windows_command_names("tool", ".COM;.EXE;.BAT;.CMD; .CUSTOM ;;");
+        assert_eq!(
+            names,
+            [
+                "tool",
+                "tool.COM",
+                "tool.EXE",
+                "tool.BAT",
+                "tool.CMD",
+                "tool.CUSTOM"
+            ]
+        );
+        assert_eq!(windows_command_names("tool.cmd", ".EXE;.CMD"), ["tool.cmd"]);
     }
 
     #[test]

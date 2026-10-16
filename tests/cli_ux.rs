@@ -141,6 +141,62 @@ fn settings_and_status_never_print_saved_keys() {
 }
 
 #[test]
+fn model_inspection_uses_configured_directory_with_explicit_override() {
+    let cli = CliTest::new();
+    cli.config("[defaults]\nmodel_dir = 'custom models'\n");
+    for (args, expected) in [
+        (
+            vec!["models", "inspect", "--provider", "cpu", "--json"],
+            "custom models",
+        ),
+        (
+            vec![
+                "models",
+                "inspect",
+                "--provider",
+                "cpu",
+                "--json",
+                "--dir",
+                "override",
+            ],
+            "override",
+        ),
+    ] {
+        let result = cli.run(&args);
+        assert!(result.status.success(), "{}", stderr(&result));
+        let status: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let parts = status["parts"].as_array().unwrap();
+        assert!(!parts.is_empty());
+        for part in parts {
+            assert!(std::path::Path::new(part["path"].as_str().unwrap()).starts_with(expected));
+        }
+    }
+}
+
+#[test]
+fn template_and_config_show_match_runtime_defaults() {
+    let cli = CliTest::new();
+    let template = course2md::settings::template();
+    let parsed: course2md::settings::ConfigFile = toml::from_str(
+        &template
+            .replace("#resume = ", "resume = ")
+            .replace("#stable_secs = ", "stable_secs = "),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.defaults.resume,
+        Some(course2md::config::resolve_resume(false, false, None))
+    );
+    assert_eq!(
+        parsed.defaults.stable_secs,
+        Some(course2md::config::DEFAULT_STABLE_SECS)
+    );
+    assert!(stdout(&cli.run(&["config", "show"])).contains("resume         : true"));
+    cli.config("[defaults]\nresume = false\n");
+    assert!(stdout(&cli.run(&["config", "show"])).contains("resume         : false"));
+}
+
+#[test]
 fn generated_template_parses_and_does_not_overwrite_existing_config() {
     let cli = CliTest::new();
     assert!(cli.run(&["config", "init"]).status.success());
@@ -291,5 +347,69 @@ fn version_flags_include_the_build_commit() {
         assert!(result.status.success());
         assert!(result.stderr.is_empty());
         assert_eq!(stdout(&result), expected);
+    }
+}
+
+#[test]
+fn existing_summary_can_be_exported_repeatedly_without_sending_requests() {
+    use course2md::{
+        artifact,
+        fetch::VideoMeta,
+        summarize::Summary,
+        timeline::{Section, TranscriptEvent},
+    };
+    let cli = CliTest::new();
+    cli.config("[llm]\nbase_url = 'http://127.0.0.1:1/v1'\nmodel = 'offline-test'\n");
+    let target = artifact::Target {
+        task_id: "summary-test".into(),
+        course_id: "course".into(),
+        source_id: "source".into(),
+        version_id: "v1".into(),
+        course_dir: cli.dir.path().join("course"),
+    };
+    let work = cli.dir.path().join("work");
+    std::fs::create_dir_all(&work).unwrap();
+    artifact::publish_blocking(
+        &target,
+        &work,
+        &VideoMeta {
+            title: "Lesson".into(),
+            uploader: String::new(),
+            duration: 1.0,
+            webpage_url: String::new(),
+            extractor: "local".into(),
+            id: "source".into(),
+        },
+        &[Section {
+            t: 0.0,
+            end: 1.0,
+            image: String::new(),
+            speech: vec![TranscriptEvent {
+                start: 0.0,
+                end: 1.0,
+                text: "Body excluded from standalone summary".into(),
+                raw: None,
+                translation: None,
+            }],
+        }],
+        Some(&Summary {
+            tldr: "Saved overview".into(),
+            key_points: vec!["Key point".into()],
+            outline: vec![],
+        }),
+        &[],
+        artifact::Outcomes::default(),
+    )
+    .unwrap();
+    let version = target.version_dir();
+    let exported = cli.dir.path().join("exports/Lesson.summary.md");
+    for _ in 0..2 {
+        let result = cli.run(&["summarize", version.to_str().unwrap(), "-o", "exports"]);
+        assert!(result.status.success(), "{}", stderr(&result));
+        let text = std::fs::read_to_string(&exported).unwrap();
+        assert!(text.contains("Saved overview"));
+        assert!(!text.contains("Body excluded"));
+        assert!(!cli.dir.path().join("exports/Lesson.html").exists());
+        std::fs::remove_file(&exported).unwrap();
     }
 }

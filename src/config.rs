@@ -391,52 +391,8 @@ impl PipelineConfig {
         allow_environment: bool,
     ) -> AnyhowResult<()> {
         // provider × 模型兼容性：静默忽略用户指定的模型属于静默错误结果
-        if let Some(m) = self
-            .asr_model
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let lower = m.to_ascii_lowercase();
-            match self.provider {
-                AsrProvider::Gpu | AsrProvider::Cpu => {
-                    anyhow::ensure!(
-                        matches!(
-                            lower.as_str(),
-                            "qwen3"
-                                | "qwen3-1.7b"
-                                | "qwen3-asr-1.7b"
-                                | "qwen3-1.7b-gguf"
-                                | "qwen3-asr-1.7b-q8_0.gguf"
-                        ),
-                        "provider {:?} 当前使用 Qwen3-ASR-1.7B Q8_0；请选择该模型 / This provider currently supports Qwen3-ASR-1.7B Q8_0 only.",
-                        self.provider
-                    );
-                }
-                AsrProvider::Coreml => {
-                    anyhow::ensure!(
-                        matches!(
-                            lower.as_str(),
-                            "qwen"
-                                | "qwen3"
-                                | "qwen3-1.7b"
-                                | "qwen3-asr-1.7b"
-                                | "qwen3-0.6b"
-                                | "qwen3-asr-0.6b"
-                                | "whisper"
-                                | "whisper-large-v3-turbo"
-                        ),
-                        "provider coreml 支持的模型 / supported models: qwen3-1.7b, qwen3-0.6b, whisper (received {m:?})"
-                    );
-                }
-                AsrProvider::Npu => {
-                    anyhow::ensure!(
-                        crate::npu::npu_model_alias(m).is_some() || lower.contains('/'),
-                        "provider npu 需要模型别名或仓库 ID / requires a known model alias or Hugging Face repository ID containing / (received {m:?})"
-                    );
-                }
-                AsrProvider::Api => {}
-            }
+        if let Some(model) = &self.asr_model {
+            canonical_model(self.provider, model)?;
         }
 
         // api 后端：key 缺失时立即报错，而不是切完音频才发现
@@ -509,6 +465,34 @@ pub fn cache_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
     home.join(".cache").join("course2md")
+}
+
+/// Resolve local aliases consistently for validation, cache inspection and preparation.
+pub fn canonical_model(provider: AsrProvider, raw: &str) -> AnyhowResult<String> {
+    let raw = raw.trim();
+    match provider {
+        AsrProvider::Api => Ok(raw.to_owned()),
+        AsrProvider::Coreml => crate::models::normalize_apple_model(raw),
+        AsrProvider::Cpu | AsrProvider::Gpu => {
+            let model = crate::models::normalize_apple_model(raw)?;
+            anyhow::ensure!(
+                model == DEFAULT_ASR_MODEL,
+                "所选识别方式只支持 Qwen3-ASR-1.7B / This backend supports Qwen3-ASR-1.7B only"
+            );
+            Ok(model)
+        }
+        AsrProvider::Npu => {
+            if let Some(repo) = crate::npu::npu_model_alias(raw) {
+                Ok(repo.to_owned())
+            } else {
+                anyhow::ensure!(
+                    raw.contains('/'),
+                    "NPU 需要已知模型别名或仓库 ID / NPU requires a known model alias or repository ID (org/model)"
+                );
+                Ok(raw.to_owned())
+            }
+        }
+    }
 }
 
 pub fn model_dir_from(opt: Option<&Path>) -> PathBuf {

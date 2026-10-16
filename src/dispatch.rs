@@ -792,6 +792,30 @@ impl Ledger {
     }
 }
 
+/// Persist batching policy before sending requests; preserve legacy receipt identities.
+pub(crate) fn cross_section_batches(purpose: &str) -> Result<bool> {
+    let Some(ledger) = active() else {
+        return Ok(true);
+    };
+    let marker = ledger.dir.join(format!("{purpose}.cross-section-v1"));
+    if marker.exists() {
+        anyhow::ensure!(
+            std::fs::read(&marker)? == b"1",
+            "Invalid request batching checkpoint"
+        );
+        return Ok(true);
+    }
+    // Keep old request bodies stable, including completed and uncertain receipts.
+    if read_receipts(&ledger.dir)?
+        .iter()
+        .any(|receipt| receipt.purpose == purpose)
+    {
+        return Ok(false);
+    }
+    crate::checkpoint::atomic_write(&marker, b"1")?;
+    Ok(true)
+}
+
 /// Read-only recovery probe; never authorizes or sends a request.
 pub(crate) fn cached_response(
     service: &str,

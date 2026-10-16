@@ -279,12 +279,12 @@ pub fn write_jsonl(path: &Path, frames: &[FrameEvent], speech: &[TranscriptEvent
     events.extend(speech.iter().cloned().map(TimelineEvent::Speech));
     // total_cmp：对 NaN 也有全序定义，避免 partial_cmp().unwrap() 在外部数据下 panic
     events.sort_by(|a, b| time_of(a).total_cmp(&time_of(b)));
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut bytes = Vec::new();
     for ev in &events {
-        serde_json::to_writer(&mut f, ev)?;
-        f.write_all(b"\n")?;
+        serde_json::to_writer(&mut bytes, ev)?;
+        bytes.write_all(b"\n")?;
     }
-    Ok(())
+    crate::checkpoint::atomic_write(path, &bytes)
 }
 
 fn time_of(e: &TimelineEvent) -> f64 {
@@ -329,6 +329,25 @@ mod tests {
             raw: None,
             translation: None,
         }
+    }
+
+    #[test]
+    fn timeline_replaces_previous_contents_with_sorted_json_lines() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("timeline.jsonl");
+        std::fs::write(&path, "old timeline contents".repeat(100)).unwrap();
+        write_jsonl(&path, &[frame(2.0)], &[sp(1.0, 3.0)]).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.ends_with('\n'));
+        let events: Vec<TimelineEvent> = contents
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(time_of(&events[0]), 1.0);
+        assert_eq!(time_of(&events[1]), 2.0);
+        write_jsonl(&path, &[], &[]).unwrap();
+        assert!(std::fs::read(path).unwrap().is_empty());
     }
 
     #[test]

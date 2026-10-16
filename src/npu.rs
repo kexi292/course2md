@@ -212,6 +212,15 @@ pub fn run_npu(
     Ok(events)
 }
 
+fn session_token() -> Result<String> {
+    use base64::Engine as _;
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|error| {
+        anyhow::anyhow!("无法生成安全会话令牌 / Secure session randomness unavailable: {error}")
+    })?;
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+}
+
 fn start_model_worker(
     model_id: &str,
 ) -> Result<(
@@ -228,9 +237,7 @@ fn start_model_worker(
 
     let port = crate::runtime::free_port()?;
     // 每次会话一个不可猜的令牌：worker 的 127.0.0.1 服务不应被本机其他进程驱使
-    let token = crate::execution::digest(
-        format!("npu-session-token-{}-{port}-{t0:?}", std::process::id()).as_bytes(),
-    );
+    let token = session_token()?;
     tracing::info!(model = %model_id, port, "starting npu worker");
     crate::progress::stage("model-load", "start");
     let mut child = spawn_npu_worker(&script_path, model_id, port, &token)?;
@@ -248,6 +255,9 @@ fn start_model_worker(
         Some("\"status\":\"ok\""),
         Some(&crate::dispatch::check_control),
     ) {
+        if e.downcast_ref::<crate::dispatch::Failure>().is_some() {
+            return Err(e);
+        }
         return Err(e.context(format!(
             "Intel NPU 服务启动失败/超时（首次模型编译可能需要更多时间） / Intel NPU service failed to start or timed out (the first model compilation may take longer); stderr tail:\n{}",
             stderr_tail.tail()
@@ -344,6 +354,21 @@ fn spawn_npu_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_tokens_contain_32_random_bytes() {
+        use base64::Engine as _;
+        let first = session_token().unwrap();
+        let second = session_token().unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(first)
+                .unwrap()
+                .len(),
+            32
+        );
+    }
 
     /// 内嵌脚本必须能被 Python 解析。0.8.x 曾因 f-string 内嵌字面换行导致
     /// 整个 NPU 后端无法启动（SyntaxError 在编译期拦截，任何路径都跑不到）。

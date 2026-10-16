@@ -99,18 +99,10 @@ pub fn inspect_at(
     apple_base: &Path,
     hf_base: &Path,
 ) -> Result<LocalModelStatus> {
-    let model = if model.trim().is_empty() {
-        crate::config::DEFAULT_ASR_MODEL
-    } else {
-        model.trim()
-    };
+    let canonical = crate::config::canonical_model(provider, model);
+    let model = canonical.as_deref().unwrap_or_else(|_| model.trim());
     let mut parts = Vec::new();
-    let supported = match provider {
-        AsrProvider::Cpu | AsrProvider::Gpu => model == crate::config::DEFAULT_ASR_MODEL,
-        AsrProvider::Coreml => ["qwen3-1.7b", "qwen3-0.6b", "whisper"].contains(&model),
-        AsrProvider::Npu => !model.is_empty(),
-        AsrProvider::Api => false,
-    };
+    let supported = provider != AsrProvider::Api && canonical.is_ok();
     if !supported {
         return Ok(LocalModelStatus {
             provider,
@@ -556,6 +548,46 @@ mod tests {
         }
         path
     }
+    #[test]
+    fn aliases_use_the_same_cache_and_identity_as_canonical_names() {
+        let root = roots();
+        for (provider, alias, canonical) in [
+            (AsrProvider::Cpu, " QWEN3 ", "qwen3-1.7b"),
+            (AsrProvider::Gpu, "qwen3-1.7b-gguf", "qwen3-1.7b"),
+            (AsrProvider::Coreml, "0.6B", "qwen3-0.6b"),
+            (AsrProvider::Coreml, "Whisper-Large-v3-Turbo", "whisper"),
+            (
+                AsrProvider::Npu,
+                " TURBO ",
+                "OpenVINO/whisper-large-v3-turbo-int8-ov",
+            ),
+            (AsrProvider::Npu, "org/CaseSensitive", "org/CaseSensitive"),
+        ] {
+            let alias_status = inspect_model(root.path(), provider, alias);
+            let canonical_status = inspect_model(root.path(), provider, canonical);
+            assert!(alias_status.can_prepare, "{provider}: {alias}");
+            assert_eq!(alias_status.model, canonical_status.model);
+            assert_eq!(alias_status.state, canonical_status.state);
+            assert_eq!(alias_status.fingerprint, canonical_status.fingerprint);
+            assert_eq!(
+                alias_status
+                    .parts
+                    .iter()
+                    .map(|part| &part.path)
+                    .collect::<Vec<_>>(),
+                canonical_status
+                    .parts
+                    .iter()
+                    .map(|part| &part.path)
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            inspect_model(root.path(), AsrProvider::Npu, "unknown").state,
+            CacheState::Unsupported
+        );
+    }
+
     #[test]
     fn inspection_does_not_create_directories_or_claim_an_empty_marker_is_ready() {
         let root = roots();

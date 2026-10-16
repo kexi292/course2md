@@ -61,13 +61,13 @@ def main():
     if not args.debug:
         if not (ROOT / "sources.lock.json").is_file():
             raise SystemExit("Freeze the tested source revisions with scripts/sources.py --freeze before release")
-        expected = json.loads((ROOT / "sources.lock.json").read_text())
+        expected = json.loads((ROOT / "sources.lock.json").read_text(encoding="utf-8"))
         if revisions != expected:
             raise SystemExit("Prepared sources differ from the tested release revisions; prepare sources with --locked")
     if not args.no_build:
         run("cargo", "build", *flags)
         run("cargo", "build", "--manifest-path", str(ROOT / "Cargo.toml"), *flags)
-    version = tomllib.loads((PROJECT / "Cargo.toml").read_text())["package"]["version"]
+    version = tomllib.loads((PROJECT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
     suffix = ".exe" if system == "Windows" else ""
     package_name = f"course2md-desktop-{system.lower()}-{platform.machine()}"
     base = ROOT / "target" / "packages" / package_name

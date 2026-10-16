@@ -161,10 +161,22 @@ pub fn template() -> String {
         .map(|f| format!("\"{f}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    TEMPLATE.replace(
-        "#formats = [DEFAULT_FORMATS]",
-        &format!("#formats = [{formats}]"),
-    )
+    TEMPLATE
+        .replace(
+            "#formats = [DEFAULT_FORMATS]",
+            &format!("#formats = [{formats}]"),
+        )
+        .replace(
+            "#stable_secs = DEFAULT_STABLE_SECS",
+            &format!("#stable_secs = {}", crate::config::DEFAULT_STABLE_SECS),
+        )
+        .replace(
+            "#resume = DEFAULT_RESUME",
+            &format!(
+                "#resume = {}",
+                crate::config::resolve_resume(false, false, None)
+            ),
+        )
 }
 
 const TEMPLATE: &str = r#"# course2md 配置 / Configuration
@@ -185,7 +197,7 @@ const TEMPLATE: &str = r#"# course2md 配置 / Configuration
 #max_height = 1080
 # first 立即截图，stable 等动画结束 / first: immediate; stable: wait for animations
 #slide_mode = "stable"
-#stable_secs = 1.0
+#stable_secs = DEFAULT_STABLE_SECS
 # 仅比较指定画面区域 / Compare only this region
 #roi = "40%,0%-100%,100%"
 # 识别线程数 / Speech recognition threads
@@ -217,7 +229,7 @@ const TEMPLATE: &str = r#"# course2md 配置 / Configuration
 # 成功后保留下载的视频 / Keep downloaded video after success
 #keep_video = false
 # 从语音检查点恢复 / Resume from speech checkpoints
-#resume = false
+#resume = DEFAULT_RESUME
 
 [asr_api]
 # 语音服务协议 / Speech service protocol
@@ -352,7 +364,10 @@ pub fn print_effective(cfg: &ConfigFile) {
     );
     println!("  keep_video     : {}", d.keep_video.unwrap_or(false));
     println!("  no_download    : {}", d.no_download.unwrap_or(false));
-    println!("  resume         : {}", d.resume.unwrap_or(false));
+    println!(
+        "  resume         : {}",
+        c::resolve_resume(false, false, d.resume)
+    );
     println!(
         "  gpu_layers     : {}",
         d.gpu_layers.unwrap_or(c::DEFAULT_GPU_LAYERS)

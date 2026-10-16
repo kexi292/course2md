@@ -141,7 +141,15 @@ pub(crate) fn write_document(
     };
     for section in &mut portable.sections {
         if let Some(image) = images.get(&section.image) {
-            section.image = image.path.clone();
+            section.image = if format == OutputFormat::Html {
+                format!(
+                    "data:{};base64,{}",
+                    image.mime,
+                    base64::engine::general_purpose::STANDARD.encode(&image.bytes)
+                )
+            } else {
+                image.path.clone()
+            };
         }
     }
     match format {
@@ -171,16 +179,6 @@ pub(crate) fn write_document(
             let mut text = render::render_html(&portable.meta, &portable.sections);
             if let Some(summary) = &portable.summary {
                 text = crate::summarize::insert_into_html(&text, summary);
-            }
-            for image in images.values() {
-                text = text.replace(
-                    &format!("src=\"{}\"", render::esc(&image.path)),
-                    &format!(
-                        "src=\"data:{};base64,{}\"",
-                        image.mime,
-                        base64::engine::general_purpose::STANDARD.encode(&image.bytes)
-                    ),
-                );
             }
             file.write_all(text.as_bytes())?;
         }
@@ -317,7 +315,10 @@ mod tests {
         image::RgbImage::from_pixel(2, 2, image::Rgb([20, 80, 180]))
             .save(source.join("frames/a.png"))
             .unwrap();
-        let document = Document {
+        image::RgbImage::from_pixel(2, 2, image::Rgb([180, 80, 20]))
+            .save(source.join("frames/b.png"))
+            .unwrap();
+        let mut document = Document {
             schema: 1,
             meta: VideoMeta {
                 title: "title".into(),
@@ -341,6 +342,11 @@ mod tests {
             }],
             summary: None,
         };
+        let mut second = document.sections[0].clone();
+        second.t = 1.;
+        second.end = 2.;
+        second.image = "frames/b.png".into();
+        document.sections.push(second);
         let destination = root.path().join("moved");
         for format in [OutputFormat::Md, OutputFormat::Html, OutputFormat::Json] {
             write_document(
@@ -355,10 +361,10 @@ mod tests {
         let mut zip =
             zip::ZipArchive::new(std::fs::File::open(destination.join("course.zip")).unwrap())
                 .unwrap();
-        assert_eq!(zip.len(), 2);
+        assert_eq!(zip.len(), 3);
         assert!(zip.by_name("course.md").is_ok());
         let html = std::fs::read_to_string(destination.join("course.html")).unwrap();
-        assert!(html.contains("data:image/png;base64,"));
+        assert_eq!(html.matches("src=\"data:image/png;base64,").count(), 2);
         assert!(!html.contains("src=\"images/"));
         assert!(!html.contains("时长 00:00"));
         let json = std::fs::read_to_string(destination.join("structured.json")).unwrap();

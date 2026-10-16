@@ -462,8 +462,7 @@ pub fn local_content_identity(
 
 impl VideoMeta {
     pub fn save(&self, path: &Path) -> Result<()> {
-        std::fs::write(path, serde_json::to_string_pretty(self)?)?;
-        Ok(())
+        crate::checkpoint::atomic_write(path, serde_json::to_string_pretty(self)?.as_bytes())
     }
 }
 
@@ -652,12 +651,12 @@ pub fn sidecar_subtitle(video: &Path) -> Option<SubtitleFetch> {
     crate::subtitle::sidecar_subtitle(video).map(|path| SubtitleFetch { path, auto: false })
 }
 
-/// 下载视频到 `dest`（默认 1080p 上限，mp4 合并）。已存在则跳过。
+/// 下载视频到 `dest`（默认 1080p 上限，mp4 合并）；调用方须先校验或归档旧文件。
 pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) -> Result<()> {
-    if dest.is_file() {
-        tracing::info!(path = %dest.display(), "media exists, skip download");
-        return Ok(());
-    }
+    ensure!(
+        !dest.exists(),
+        "视频位置已有未校验的文件 / An unverified file already exists at the video location"
+    );
     if let Some(p) = dest.parent() {
         tokio::fs::create_dir_all(p).await?;
     }
@@ -797,7 +796,10 @@ async fn run_output(cmd: &mut Command) -> Result<std::process::Output> {
                 retries,
                 "Bilibili HTTP 412，等待后重试 / Bilibili HTTP 412; retrying after a wait"
             );
-            tokio::time::sleep(delay).await;
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => {}
+                e = watch_control() => return Err(e),
+            }
             continue;
         }
         let error = crate::error::cmd_error("yt-dlp", out.status.code(), &stderr);
@@ -828,6 +830,18 @@ async fn run_status(cmd: &mut Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn download_rejects_existing_unverified_file_without_overwriting() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("media.mp4");
+        std::fs::write(&dest, b"partial").unwrap();
+        let error = download("https://example.invalid/video", &dest, 1080, false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("unverified"));
+        assert_eq!(std::fs::read(dest).unwrap(), b"partial");
+    }
 
     #[test]
     fn deterministic_download_errors_skip_the_retry_loop() {
