@@ -18,13 +18,14 @@ class SourcePatchTests(unittest.TestCase):
         self.repo = self.root / "source"
         self.repo.mkdir()
         self.run_git("init", "--quiet")
-        (self.repo / "input.rs").write_text("fn focus() { old(); }\n\nfn unrelated() {}\n")
-        (self.repo / "other.rs").write_text("untouched\n")
+        self.run_git("config", "core.autocrlf", "false")
+        (self.repo / "input.rs").write_text("fn focus() { old(); }\n\nfn unrelated() {}\n", newline="\n")
+        (self.repo / "other.rs").write_text("untouched\n", newline="\n")
         self.run_git("add", ".")
         self.run_git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
                      "commit", "--quiet", "-m", "fixture")
         self.patch = self.root / "zed-fixture.patch"
-        self.patch.write_text("--- a/input.rs\n+++ b/input.rs\n@@ -1,2 +1,2 @@\n-fn focus() { old(); }\n+fn focus() { fixed(); }\n \n")
+        self.patch.write_text("--- a/input.rs\n+++ b/input.rs\n@@ -1,2 +1,2 @@\n-fn focus() { old(); }\n+fn focus() { fixed(); }\n \n", newline="\n")
 
     def run_git(self, *args):
         return subprocess.run(["git", "-C", str(self.repo), *args], check=True,

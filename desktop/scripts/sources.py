@@ -139,7 +139,7 @@ def main():
         lock_path.write_text(json.dumps(revisions, indent=2) + "\n")
         print(f"Recorded tested revisions in {lock_path}")
         return
-    locked = json.loads(lock_path.read_text()) if args.locked else {}
+    locked = json.loads(lock_path.read_text(encoding="utf-8")) if args.locked else {}
     if args.locked and (set(locked) != set(REPOS) or
                         any(not re.fullmatch(r"[0-9a-f]{40}", value) for value in locked.values())):
         raise SystemExit("Release source lock must contain a full commit hash for each dependency")
