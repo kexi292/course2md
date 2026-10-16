@@ -50,15 +50,11 @@ pub fn sanitize_qwen_text(s: &str) -> String {
     if let Some(p) = t.rfind("<asr_text>") {
         t = t[p + "<asr_text>".len()..].trim();
     }
-    let lower = t.to_ascii_lowercase();
-    if let Some(rest) = lower.strip_prefix("language ")
-        && let Some(i) = rest.find(char::is_whitespace)
+    if t.get(..9)
+        .is_some_and(|p| p.eq_ignore_ascii_case("language "))
+        && let Some((_, rest)) = t[9..].split_once(char::is_whitespace)
     {
-        // 原串对齐
-        let skip = "language ".len() + i + 1;
-        if skip <= t.len() {
-            t = t[skip..].trim();
-        }
+        t = rest.trim();
     }
     t.to_string()
 }
@@ -353,10 +349,10 @@ fn run_blocking(
         Some("\"status\":\"ok\""),
         Some(&crate::dispatch::check_control),
     ) {
-        return Err(e.context(format!(
-            "无法启动识别服务 / Could not start llama-server. Details:\n{}",
-            stderr_tail.tail()
-        )));
+        if e.downcast_ref::<crate::dispatch::Failure>().is_some() {
+            return Err(e);
+        }
+        return Err(stderr_tail.attach(e, "无法启动识别服务 / Could not start llama-server"));
     }
     tracing::info!(
         secs = format_args!("{:.1}", t0.elapsed().as_secs_f64()),
@@ -1240,17 +1236,11 @@ pub(crate) fn ffmpeg_vad(wav: &Path, max_speech: f32) -> Result<Vec<Seg>> {
         );
     }
     let log = &out.stderr;
-    // 时长只探测一次，传入 normalize_segments（此前两处各 ffprobe 一次）；
-    // 失败至少告警——静默落 0.0 会让末段语音丢失。
-    let dur = match crate::media::probe_duration_blocking(wav) {
-        Some(d) => d,
-        None => {
-            tracing::warn!(
-                "无法读取音频时长，末段语音可能不完整 / Could not read audio duration; the final transcript segment may be incomplete"
-            );
-            0.0
-        }
-    };
+    // A zero duration would silently discard the final (or only) speech segment.
+    let dur = ffmpeg_input_duration(log)
+        .or_else(|| crate::media::probe_duration_blocking(wav))
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .context("无法读取音频时长 / Could not read the audio duration")?;
     let mut silences: Vec<(f64, f64)> = vec![];
     let mut start: Option<f64> = None;
     for line in log.lines() {
@@ -1276,6 +1266,15 @@ pub(crate) fn ffmpeg_vad(wav: &Path, max_speech: f32) -> Result<Vec<Seg>> {
         }
     }
     normalize_segments(invert_silence(dur, &silences), max_speech as f64, wav, dur)
+}
+
+fn ffmpeg_input_duration(log: &str) -> Option<f64> {
+    let rest = log.split("Duration:").nth(1)?.trim_start();
+    let stamp = rest.split([',', ' ', '\n']).next()?;
+    let mut parts = stamp.split(':');
+    let (h, m, s) = (parts.next()?, parts.next()?, parts.next()?);
+    Some(h.parse::<f64>().ok()? * 3600.0 + m.parse::<f64>().ok()? * 60.0 + s.parse::<f64>().ok()?)
+        .filter(|d| d.is_finite() && *d > 0.0)
 }
 
 /// 最终送入 ASR 的分段：`start/end` 是事件时间（用于时间线），`cut_*` 是切音频范围（含静音填充）。
@@ -1409,7 +1408,6 @@ pub fn normalize_segments(
     wav: &Path,
     dur: f64,
 ) -> Result<Vec<Seg>> {
-    let energy = Energy::load(wav).ok();
     // VAD 成功但无语音（或全被短段过滤）→ 空分段。
     // 不再把整段音频当语音兜底：静音课件会诱发 ASR 幻觉。
     let mut raw = speech;
@@ -1417,6 +1415,13 @@ pub fn normalize_segments(
     if raw.is_empty() {
         return Ok(vec![]);
     }
+    let energy = if raw.iter().any(|(a, b)| b - a > max_speech) {
+        Energy::load(wav)
+            .inspect_err(|e| tracing::warn!("无法读取音频能量，长段将按固定长度切分 / Could not read audio energy; using fixed-length splits: {e:#}"))
+            .ok()
+    } else {
+        None
+    };
 
     let mut pieces: Vec<(f64, f64)> = vec![];
     for &(s, e) in &raw {
@@ -1612,8 +1617,25 @@ mod tests {
             "你好世界。"
         );
         assert_eq!(sanitize_qwen_text("内容</asr_text>尾巴"), "内容");
+        assert_eq!(sanitize_qwen_text("language Chinese\u{3000}你好"), "你好");
         let s = invert_silence(10.0, &[(0.0, 1.0), (4.0, 5.0)]);
         assert!((s[0].0 - 1.0).abs() < 1e-6 && (s[0].1 - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vad_reads_duration_and_keeps_speech_without_pauses() {
+        assert_eq!(
+            ffmpeg_input_duration("  Duration: 00:01:02.50, bitrate: 256 kb/s\n"),
+            Some(62.5)
+        );
+        for log in [
+            "Duration: N/A,",
+            "Duration: 00:00:NaN,",
+            "Duration: 00:00:00.00,",
+        ] {
+            assert_eq!(ffmpeg_input_duration(log), None);
+        }
+        assert_eq!(invert_silence(62.5, &[]), vec![(0.0, 62.5)]);
     }
 
     #[test]

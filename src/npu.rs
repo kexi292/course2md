@@ -248,6 +248,9 @@ fn start_model_worker(
         Some("\"status\":\"ok\""),
         Some(&crate::dispatch::check_control),
     ) {
+        if e.downcast_ref::<crate::dispatch::Failure>().is_some() {
+            return Err(e);
+        }
         return Err(e.context(format!(
             "Intel NPU 服务启动失败/超时（首次模型编译可能需要更多时间） / Intel NPU service failed to start or timed out (the first model compilation may take longer); stderr tail:\n{}",
             stderr_tail.tail()

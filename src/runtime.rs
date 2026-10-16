@@ -187,10 +187,8 @@ pub fn wait_ready(
     let t0 = Instant::now();
     let url = format!("{base}/health");
     loop {
-        if let Some(check) = control
-            && let Err(e) = check()
-        {
-            anyhow::bail!("{} 启动被中止 / startup aborted: {e:#}", child.name());
+        if let Some(check) = control {
+            check()?;
         }
         if let Some(st) = child.try_wait() {
             anyhow::bail!(
@@ -345,30 +343,36 @@ mod tests {
 
     /// issue：桌面取消任务后，llama-server 首次加载（最长 300s 超时）不得继续空等——
     /// control 钩子每轮轮询，返回 Err 立即中止，进程由 Drop 兜底。
-    #[cfg(unix)]
     #[test]
     fn wait_ready_aborts_when_control_hook_fails() {
+        #[cfg(unix)]
         let mut cmd = Command::new("sleep");
+        #[cfg(unix)]
         cmd.arg("30");
-        let mut child = ManagedChild::spawn("sleep", &mut cmd).unwrap();
+        #[cfg(windows)]
+        let mut cmd = Command::new("cmd");
+        #[cfg(windows)]
+        cmd.args(["/C", "exit", "0"]);
+        let mut child = ManagedChild::spawn("control-test", &mut cmd).unwrap();
         let t0 = Instant::now();
-        // 永远不就绪的端口 + 60s 超时；control 第二轮即报错，应远早于超时返回
-        let calls = std::sync::atomic::AtomicUsize::new(0);
         let result = wait_ready(
             "http://127.0.0.1:9",
             Duration::from_secs(60),
             &mut child,
             None,
             Some(&|| {
-                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1 {
-                    anyhow::bail!("测试取消 / test cancellation")
-                } else {
-                    Ok(())
-                }
+                Err(anyhow::Error::new(crate::dispatch::Failure {
+                    status: None,
+                    retryable: false,
+                    uncertain: false,
+                    message: "测试取消 / test cancellation".into(),
+                    unsupported_response_format: false,
+                }))
             }),
         );
         let err = result.expect_err("control 报错必须中止 wait_ready");
-        assert!(err.to_string().contains("启动被中止"), "{err:#}");
+        assert!(err.downcast_ref::<crate::dispatch::Failure>().is_some());
+        assert_eq!(err.to_string(), "测试取消 / test cancellation");
         assert!(t0.elapsed() < Duration::from_secs(10), "取消不应等到超时");
     }
 
