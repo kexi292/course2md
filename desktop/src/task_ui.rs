@@ -981,6 +981,9 @@ impl Desktop {
         self.source_validation = None;
         self.source_candidates.clear();
         self.source_collection_title = None;
+        self.source_collection_name = None;
+        self.selected_candidates.clear();
+        self.source_candidate_covers.clear();
         self.subtitle_error = draft.source.as_ref().and_then(|source| {
             source
                 .subtitle_read_error
@@ -1056,7 +1059,7 @@ impl Desktop {
             "当前字幕尚未确认，请重新读取字幕，或明确选择其他文字来源"
         );
         let source = draft.source.clone().context("请先读取并确认视频")?;
-        self.build_plan_for_source(validation, draft, source)
+        self.build_plan_for_source(validation, draft, source, false)
     }
 
     fn build_plan_for_source(
@@ -1064,6 +1067,7 @@ impl Desktop {
         validation: PlanValidation,
         draft: &workspace::Draft,
         source: crate::source::Source,
+        discover_subtitles: bool,
     ) -> Result<TaskPlan> {
         self.ordinary_preferences_ready_for_submit()?;
         ensure!(
@@ -1127,10 +1131,10 @@ impl Desktop {
                 );
             }
             config.defaults.transcript_source = Some(course2md::config::TranscriptSource::Subtitle);
-        } else {
+        } else if !(discover_subtitles && draft.options.source_mode == 1) {
             use course2md::subtitle::SubtitleEvidence;
             ensure!(
-                draft.options.source_mode == 2
+                discover_subtitles || draft.options.source_mode == 2
                     || (draft.options.source_mode == 0
                         && matches!(
                             source.subtitles,
@@ -1140,7 +1144,9 @@ impl Desktop {
                         )),
                 "字幕还未确认。请读取字幕，或明确选择识别视频声音。"
             );
-            config.defaults.transcript_source = Some(course2md::config::TranscriptSource::Asr);
+            if !discover_subtitles {
+                config.defaults.transcript_source = Some(course2md::config::TranscriptSource::Asr);
+            }
             let environment = self
                 .environment
                 .as_ref()
@@ -1237,6 +1243,118 @@ impl Desktop {
             ai_service: refs.llm,
             translation_service: refs.translation,
         })
+    }
+
+    fn build_batch_plan(
+        &self,
+        candidate: &source::SourceCandidate,
+        title: String,
+    ) -> Result<TaskPlan> {
+        let mut draft = self.workspace.as_ref()
+            .and_then(|workspace| workspace.state.draft())
+            .context("当前输入尚未准备好")?.clone();
+        draft.title = title.clone();
+        draft.input = candidate.input.clone();
+        draft.subtitle = None;
+        let identity = course2md::fetch::candidate_identity(candidate)
+            .context("还无法确认这个视频的身份，请单独打开后转换")?;
+        let source = source::Source {
+            input: candidate.input.clone(),
+            title,
+            duration: candidate.duration.filter(|v| v.is_finite() && *v > 0.).unwrap_or_default(),
+            cover: self.source_candidate_covers.get(&candidate.input).cloned(),
+            identity,
+            online: true,
+            ..Default::default()
+        };
+        self.build_plan_for_source(PlanValidation::Submission, &draft, source, true)
+    }
+
+    // Validate every plan before the transaction so a failed item keeps the selection intact.
+    pub fn enqueue_selected_candidates(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if !self.online || self.preview_cancel.is_some() || !self.save_current_draft(cx) {
+            return;
+        }
+        let selected: Vec<(usize, source::SourceCandidate)> = self
+            .source_candidates
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| self.selected_candidates.contains(&candidate.input))
+            .map(|(index, candidate)| (index, candidate.clone()))
+            .collect();
+        if selected.is_empty() {
+            return;
+        }
+        self.message = None;
+        let collection = self.source_collection_name.clone();
+        let mut plans = Vec::new();
+        let mut skipped = 0usize;
+        for (index, candidate) in selected {
+            if course2md::fetch::candidate_identity(&candidate).is_none() {
+                skipped += 1;
+                continue;
+            }
+            let title = batch_note_title(&candidate, collection.as_deref(), index);
+            match self.build_batch_plan(&candidate, title) {
+                Ok(plan) => plans.push(plan),
+                Err(error) => {
+                    self.message = Some(format!("选中的视频尚未加入队列：{error:#}"));
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        if plans.is_empty() {
+            self.message = Some(if skipped > 0 {
+                "选中的视频还无法确认身份，请单独打开后转换".into()
+            } else {
+                "选中的视频尚未加入队列，请重试".into()
+            });
+            cx.notify();
+            return;
+        }
+        let total = plans.len();
+        let Some(workspace) = &mut self.workspace else {
+            return;
+        };
+        let result = workspace.transaction(|state| {
+            let mut first_id = None;
+            let mut duplicates = 0usize;
+            for plan in plans {
+                let (id, created) = state.enqueue(plan, None)?;
+                first_id.get_or_insert_with(|| id.clone());
+                if !created {
+                    duplicates += 1;
+                }
+            }
+            Ok((first_id, duplicates))
+        });
+        match result {
+            Ok((first_id, duplicates)) => {
+                self.selected_candidates.clear();
+                let created = total - duplicates;
+                let mut parts = Vec::new();
+                if created > 0 {
+                    parts.push(format!("已把 {created} 个视频加入队列"));
+                }
+                if duplicates > 0 {
+                    parts.push(format!("{duplicates} 个与进行中的任务相同，未重复加入"));
+                }
+                if skipped > 0 {
+                    parts.push(format!("{skipped} 个暂时无法确认身份，已跳过"));
+                }
+                self.message = Some(parts.join("；"));
+                if let Some(id) = first_id {
+                    self.select_task(&id, cx);
+                }
+                self.start_next_task(cx);
+            }
+            Err(error) => {
+                self.workspace_error =
+                    Some(format!("任务尚未加入队列：{error:#}。选中的视频仍保留。"))
+            }
+        }
+        cx.notify();
     }
 
     /// The form uses loaded snapshots. Submission rechecks live storage, local
@@ -1482,7 +1600,7 @@ impl Desktop {
             draft.input = source.input.clone();
             draft.title = source.title.clone();
             draft.source = Some(source.clone());
-            self.build_plan_for_source(PlanValidation::Submission, &draft, source)
+            self.build_plan_for_source(PlanValidation::Submission, &draft, source, false)
         });
         match result {
             Ok(plan) => {
@@ -4014,6 +4132,21 @@ impl ConversionOptions {
     }
 }
 
+fn batch_note_title(
+    candidate: &source::SourceCandidate,
+    collection: Option<&str>,
+    index: usize,
+) -> String {
+    let title = candidate.title.trim();
+    if !title.is_empty() && title != candidate.input.trim() {
+        return title.to_owned();
+    }
+    match collection.map(str::trim).filter(|title| !title.is_empty()) {
+        Some(collection) => format!("{collection} 视频 {}", index + 1),
+        None => format!("视频 {}", index + 1),
+    }
+}
+
 fn task_status_label(task: &TaskRecord) -> String {
     if task.handled_by.is_some() {
         return "已有后续处理任务".into();
@@ -4128,6 +4261,22 @@ fn enable_cloud_asr_fallback(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn batch_titles_keep_part_names_and_use_collection_only_as_fallback() {
+        let mut candidate = crate::source::SourceCandidate {
+            input: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=2".into(),
+            title: " 第二讲 ".into(),
+            identity: None,
+            duration: None,
+            thumbnail: None,
+        };
+        assert_eq!(super::batch_note_title(&candidate, Some("课程"), 1), "第二讲");
+        candidate.title = candidate.input.clone();
+        assert_eq!(super::batch_note_title(&candidate, Some("课程"), 1), "课程 视频 2");
+        candidate.title.clear();
+        assert_eq!(super::batch_note_title(&candidate, Some("  "), 1), "视频 2");
+    }
+
     use super::{
         PlanValidation, QueueItem, StageStatus, TaskFeedback, TaskGroup, WorkerWait,
         ai_stage_outcome, task_feedback, task_stage_progress, update_draft_source_title,

@@ -46,12 +46,12 @@ use gpui_component::{
     *,
 };
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fs::File,
     io::Write,
     path::PathBuf,
     sync::{
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
     time::{Duration, Instant},
@@ -298,6 +298,10 @@ struct Desktop {
     completed_source: Option<String>,
     source_preview: Option<source::Source>,
     source_candidates: Vec<source::SourceCandidate>,
+    selected_candidates: std::collections::BTreeSet<String>,
+    source_collection_name: Option<String>,
+    source_candidate_covers: HashMap<String, PathBuf>,
+    source_covers_cancel: Option<Arc<AtomicBool>>,
     source_collection_title: Option<String>,
     subtitle_loading: bool,
     subtitle_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -470,6 +474,9 @@ impl Desktop {
             }
         }
         if let Some(cancel) = &self.preview_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(cancel) = &self.source_covers_cancel {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }
         if let Some(cancel) = &self.subtitle_cancel {
@@ -687,6 +694,10 @@ impl Desktop {
             completed_source: None,
             source_preview: None,
             source_candidates: Vec::new(),
+            selected_candidates: Default::default(),
+            source_collection_name: None,
+            source_candidate_covers: HashMap::new(),
+            source_covers_cancel: None,
             source_collection_title: None,
             subtitle_loading: false,
             subtitle_cancel: None,
@@ -1664,6 +1675,9 @@ mod reader_notice_tests {
 
 impl Drop for Desktop {
     fn drop(&mut self) {
+        if let Some(cancel) = &self.source_covers_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(cancel) = &self.preview_cancel {
             cancel.store(true, std::sync::atomic::Ordering::Relaxed);
         }

@@ -1,5 +1,24 @@
 # Upstream Fix Review
 
+## Course Features Follow-up (2026-10-16)
+
+Integration branch: `feature/windows-desktop-setup`, based on fork main `93d1782`.
+Adapted `1c56b0f`, `2961d91`, `46fa89a` and the metadata concurrency part of
+`b7ddbe9`: online collection multiselect, exact part identities, part titles,
+duration and cached previews. Auxiliary metadata requests are bounded and
+cancellable between batches; failure preserves the original candidates.
+Batch submission reuses fork plan validation, frozen configuration, transaction
+rollback and task deduplication. Existing notes are excluded from select-all;
+manual selection visibly warns that processing creates another version.
+Local folder import, translation and credential references retain their paths.
+The upstream redesign, AI token counters and Ollama configuration are excluded.
+
+Root tests passed. Desktop tests: 245 passed, 4 ignored, using an isolated
+`XDG_CACHE_HOME` inside the workspace (the sandbox denies the normal user cache).
+New regressions cover title fallbacks, distinct part identities, same-part
+deduplication and frozen plans after restart. Native verification is recorded in
+the Windows usability follow-up below when completed.
+
 Reviewed on 2026-10-16. Integration branch: `feature/upstream-fixes`.
 
 ## Sources and Scope

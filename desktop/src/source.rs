@@ -444,12 +444,11 @@ pub fn probe(input: String, online: bool, cancel: Arc<AtomicBool>) -> Result<Sou
     let result = match metadata {
         course2md::fetch::OnlineProbe::Collection {
             title,
-            candidates,
+            mut candidates,
             unavailable_entries,
-        } => SourceProbe::Collection {
-            title,
-            candidates,
-            unavailable_entries,
+        } => {
+            course2md::fetch::enrich_bilibili_candidates(&mut candidates, &cancel);
+            SourceProbe::Collection { title, candidates, unavailable_entries }
         },
         course2md::fetch::OnlineProbe::Unresolved { message } => {
             SourceProbe::Unresolved { message }
@@ -552,7 +551,7 @@ fn online_metadata(
     command_output("yt-dlp", &args, cancel)
 }
 
-fn cache_remote_cover(url: &str, cancel: &AtomicBool) -> Result<PathBuf> {
+pub fn cache_remote_cover(url: &str, cancel: &AtomicBool) -> Result<PathBuf> {
     ensure!(!cancel.load(Ordering::Relaxed), "已取消读取");
     let response = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(3))
