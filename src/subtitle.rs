@@ -343,6 +343,11 @@ pub fn sidecar_tracks(video: &Path) -> Vec<SubtitleTrack> {
     let Some(stem) = video.file_stem().and_then(|value| value.to_str()) else {
         return Vec::new();
     };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
     let Ok(entries) = std::fs::read_dir(parent) else {
         return Vec::new();
     };
@@ -522,15 +527,14 @@ fn lang_rank(p: &Path) -> (u8, String) {
     (rank, stem)
 }
 
-/// 本地视频的同名字幕 sidecar：`lecture.mp4` → `lecture.srt` / `lecture.vtt`。
+/// 同名或带语言后缀的字幕，中文优先、其次英文。
 pub fn sidecar_subtitle(video: &Path) -> Option<PathBuf> {
-    for ext in ["srt", "vtt"] {
-        let p = video.with_extension(ext);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
+    let mut tracks = sidecar_tracks(video);
+    sort_tracks(&mut tracks, &[], "zh", Some("en"));
+    tracks.into_iter().find_map(|track| match track.origin {
+        SubtitleOrigin::File { path } => Some(path),
+        _ => None,
+    })
 }
 
 #[cfg(test)]
@@ -771,6 +775,12 @@ second cue
         )
         .unwrap();
         assert_eq!(sidecar_subtitle(&video).unwrap(), d.join("lecture.srt"));
+        std::fs::write(
+            d.join("lecture.zh.VTT"),
+            b"WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nx\n",
+        )
+        .unwrap();
+        assert_eq!(sidecar_subtitle(&video).unwrap(), d.join("lecture.zh.VTT"));
         let _ = std::fs::remove_dir_all(&d);
     }
 }
