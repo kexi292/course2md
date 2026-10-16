@@ -90,6 +90,19 @@ const STDERR_TAIL_MAX: usize = 100;
 /// wait_within 的轮询间隔：50ms 足够及时，又不至于空转 CPU
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Keep retry backoff responsive to task pause and cancellation.
+pub fn interruptible_sleep(delay: Duration) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        crate::dispatch::check_control()?;
+        let remaining = delay.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(());
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
+}
+
 impl StderrTail {
     pub fn tail(&self) -> String {
         self.lines.lock().map(|v| v.join("\n")).unwrap_or_default()

@@ -775,7 +775,7 @@ fn post_bytes_retry(
         match result {
             Ok(value) => return Ok(value),
             Err(error) if error.retryable && attempt < MAX_ATTEMPTS => {
-                std::thread::sleep(delay);
+                crate::runtime::interruptible_sleep(delay)?;
                 delay *= 2;
             }
             Err(error) => return Err(anyhow::Error::new(error)),

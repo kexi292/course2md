@@ -354,8 +354,7 @@ async fn download_file(url: &str, dest: &Path, label: &str) -> Result<()> {
                     ?wait,
                     "下载失败，稍后重试 / Download failed; retrying shortly"
                 );
-                std::thread::sleep(wait);
-                crate::dispatch::check_control()?;
+                crate::runtime::interruptible_sleep(wait)?;
             }
             match download_once(&agent, &url, &tmp, &dest, &label) {
                 Ok(()) => return Ok(()),
