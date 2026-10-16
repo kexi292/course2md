@@ -309,54 +309,61 @@ pub fn polish_sections_report(
         "batch_size":if stage == "translation" {1} else {BATCH},
         "vision":s.vision,"http_timeout_secs":300,
         "retry_attempts":s.retry_attempts.clamp(1,10),"retry_backoff_secs":s.retry_backoff_secs}));
+    let batch = if stage == "translation" { 1 } else { BATCH };
+    let cross_sections =
+        !s.vision && stage != "translation" && crate::dispatch::cross_section_batches(purpose)?;
+    let mut chunks: Vec<(usize, Vec<&mut TranscriptEvent>)> = Vec::new();
     for (si, sec) in sections.iter_mut().enumerate() {
-        let batch = if stage == "translation" { 1 } else { BATCH };
-        for chunk in sec.speech.chunks_mut(batch) {
-            crate::dispatch::check_control()?;
-            let Some(image) = images[si].as_ref() else {
-                record_chunk(purpose, chunk, "image_unavailable");
-                continue;
-            };
-            if stage == "translation" && is_chinese_translation_skip(&chunk[0].text) {
-                skipped += chunk.len();
-                record_chunk(purpose, chunk, "local_language_skip");
-                continue;
+        for event in &mut sec.speech {
+            if chunks.last().is_none_or(|(previous, chunk)| {
+                chunk.len() == batch || (!cross_sections && *previous != si)
+            }) {
+                chunks.push((si, Vec::new()));
             }
-            {
-                let items: Vec<_> = chunk
-                    .iter()
-                    .enumerate()
-                    .map(|(i, e)| (i, e.text.as_str()))
-                    .collect();
-                let body = build_chat_body(s, &items, image.as_deref())?;
-                let mut cached = crate::dispatch::cached_response(
+            chunks.last_mut().unwrap().1.push(event);
+        }
+    }
+    for (si, mut chunk) in chunks {
+        crate::dispatch::check_control()?;
+        let Some(image) = images[si].as_ref() else {
+            record_chunk(purpose, &chunk, "image_unavailable");
+            continue;
+        };
+        if stage == "translation" && is_chinese_translation_skip(&chunk[0].text) {
+            skipped += chunk.len();
+            record_chunk(purpose, &chunk, "local_language_skip");
+            continue;
+        }
+        {
+            let items: Vec<_> = chunk
+                .iter()
+                .enumerate()
+                .map(|(i, e)| (i, e.text.as_str()))
+                .collect();
+            let body = build_chat_body(s, &items, image.as_deref())?;
+            let mut cached =
+                crate::dispatch::cached_response(service, purpose, &endpoint(&s.base_url), &body)?;
+            if cached.is_none() {
+                let mut relaxed = body.clone();
+                relaxed.as_object_mut().unwrap().remove("response_format");
+                cached = crate::dispatch::cached_response(
                     service,
                     purpose,
                     &endpoint(&s.base_url),
-                    &body,
+                    &relaxed,
                 )?;
-                if cached.is_none() {
-                    let mut relaxed = body.clone();
-                    relaxed.as_object_mut().unwrap().remove("response_format");
-                    cached = crate::dispatch::cached_response(
-                        service,
-                        purpose,
-                        &endpoint(&s.base_url),
-                        &relaxed,
-                    )?;
+            }
+            if let Some(value) = cached {
+                validate_chat_response(&value, &body, purpose)?;
+                let parsed =
+                    parse_segments(value["choices"][0]["message"]["content"].as_str().unwrap())
+                        .unwrap();
+                if !apply_polish(&mut chunk, &parsed, s.note_language) {
+                    reused += chunk.len();
+                    record_chunk(purpose, &chunk, "reused");
                 }
-                if let Some(value) = cached {
-                    validate_chat_response(&value, &body, purpose)?;
-                    let parsed =
-                        parse_segments(value["choices"][0]["message"]["content"].as_str().unwrap())
-                            .unwrap();
-                    if !apply_polish(chunk, &parsed, s.note_language) {
-                        reused += chunk.len();
-                        record_chunk(purpose, chunk, "reused");
-                    }
-                } else {
-                    pending.push((si, chunk));
-                }
+            } else {
+                pending.push((si, chunk));
             }
         }
     }
@@ -385,12 +392,12 @@ pub fn polish_sections_report(
                     }
                     let next = queue.lock().map(|mut it| it.next());
                     match next {
-                        Ok(Some((si, chunk))) => {
+                        Ok(Some((si, mut chunk))) => {
                             let Some(image_b64) = images[si].as_ref() else {
                                 continue; // 截图不可用：整节保留原文（同原实现的提前返回）
                             };
                             let (count, unknown) =
-                                polish_chunk(&agent, s, chunk, image_b64.as_deref(), &warned);
+                                polish_chunk(&agent, s, &mut chunk, image_b64.as_deref(), &warned);
                             succeeded.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
                             completed.fetch_add(count, std::sync::atomic::Ordering::Relaxed);
                             uncertain.fetch_add(unknown, std::sync::atomic::Ordering::Relaxed);
@@ -478,7 +485,7 @@ fn section_image_b64(
 fn polish_chunk(
     agent: &ureq::Agent,
     s: &LlmSettings,
-    chunk: &mut [TranscriptEvent],
+    chunk: &mut [&mut TranscriptEvent],
     image_b64: Option<&str>,
     warned: &std::sync::atomic::AtomicBool,
 ) -> (usize, usize) {
@@ -542,7 +549,7 @@ fn polish_chunk(
     }
 }
 
-fn record_chunk(purpose: &str, chunk: &[TranscriptEvent], state: &str) {
+fn record_chunk(purpose: &str, chunk: &[&mut TranscriptEvent], state: &str) {
     crate::dispatch::record_diagnostic(serde_json::json!({"type":"chunk", "purpose":purpose,
         "state":state,"segments":chunk.len(),"start_secs":chunk.first().map(|e|e.start),
         "end_secs":chunk.last().map(|e|e.end),
@@ -562,7 +569,7 @@ fn segment_ids_match(polished: &[ProcessedSegment], expected: usize) -> bool {
 /// 把 (id, 新文本) 应用到一批事件上；空字符串 = 删除该条（由调用方 retain）。
 /// 返回 true = 返回集与输入不匹配（重排/缺项/重复），该批保留原文。
 fn apply_polish(
-    chunk: &mut [TranscriptEvent],
+    chunk: &mut [&mut TranscriptEvent],
     polished: &[ProcessedSegment],
     note_language: NoteLanguage,
 ) -> bool {
@@ -1453,7 +1460,7 @@ mod tests {
             },
         ];
         let bad = apply_polish(
-            &mut chunk,
+            &mut chunk.iter_mut().collect::<Vec<_>>(),
             &[(0, "今天讲编译原理".into(), None), (1, String::new(), None)],
             NoteLanguage::Source,
         );
@@ -1475,11 +1482,15 @@ mod tests {
             translation: None,
         }];
         assert!(apply_polish(
-            &mut chunk,
+            &mut chunk.iter_mut().collect::<Vec<_>>(),
             &[(0, "x".into(), None), (1, "y".into(), None)],
             NoteLanguage::Source,
         ));
-        assert!(apply_polish(&mut chunk, &[], NoteLanguage::Source));
+        assert!(apply_polish(
+            &mut chunk.iter_mut().collect::<Vec<_>>(),
+            &[],
+            NoteLanguage::Source
+        ));
         assert_eq!(chunk[0].text, "a", "不匹配时保留原文");
     }
 
@@ -1528,7 +1539,7 @@ mod tests {
             translation: None,
         }];
         assert!(!apply_polish(
-            &mut chunk,
+            &mut chunk.iter_mut().collect::<Vec<_>>(),
             &[(0, "hello".into(), Some(Some("你好".into())))],
             NoteLanguage::Source,
         ));
@@ -1545,7 +1556,7 @@ mod tests {
             translation: None,
         }];
         assert!(!apply_polish(
-            &mut chunk,
+            &mut chunk.iter_mut().collect::<Vec<_>>(),
             &[(0, "中文".into(), Some(Some("中文".into())))],
             NoteLanguage::ZhHans,
         ));

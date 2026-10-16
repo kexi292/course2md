@@ -506,6 +506,93 @@ fn summary_response() -> serde_json::Value {
     serde_json::json!({"choices":[{"message":{"content":serde_json::json!({"tldr":"这份摘要来自保留的正文。","key_points":["正文内容"],"outline":[{"t":0,"title":"开头","detail":"正文内容"}]}).to_string()}}]})
 }
 
+#[test]
+fn text_polish_batches_across_sections_and_keeps_legacy_receipts_safe() {
+    use course2md::{
+        llm::{self, LlmSettings},
+        timeline::Section,
+    };
+    use std::sync::atomic::Ordering;
+    let mock = MockAi::respond_with(|_, body| {
+        let mut segments: Vec<serde_json::Value> =
+            serde_json::from_str(body["messages"][1]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        for segment in &mut segments {
+            segment["text"] = format!("{} polished", segment["text"].as_str().unwrap()).into();
+        }
+        Some((
+            200,
+            serde_json::json!({"choices":[{"message":{"content":
+            serde_json::json!({"segments": segments}).to_string()}}]}),
+        ))
+    });
+    let root = tempfile::tempdir().unwrap();
+    let original: Vec<_> = (0..24)
+        .map(|i| Section {
+            t: i as f64,
+            end: (i + 1) as f64,
+            image: String::new(),
+            speech: vec![TranscriptEvent {
+                start: i as f64,
+                end: (i + 1) as f64,
+                text: format!("sentence {i}"),
+                raw: None,
+                translation: None,
+            }],
+        })
+        .collect();
+    let mut settings = LlmSettings {
+        enabled: true,
+        base_url: mock.url.clone(),
+        model: "batch-test".into(),
+        retry_attempts: 1,
+        ..Default::default()
+    };
+    {
+        let _guard =
+            course2md::dispatch::install(&root.path().join("new"), None, &Default::default())
+                .unwrap();
+        for expected_reused in [0, 24] {
+            let mut sections = original.clone();
+            let report =
+                llm::polish_sections_report(&mut sections, root.path(), &settings).unwrap();
+            assert_eq!(report.succeeded, 24);
+            assert_eq!(report.reused, expected_reused);
+            assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+            for (i, section) in sections.iter().enumerate() {
+                assert_eq!(section.speech[0].text, format!("sentence {i} polished"));
+                assert_eq!(section.speech[0].raw, Some(format!("sentence {i}")));
+            }
+        }
+    }
+    let work = root.path().join("legacy");
+    let _guard = course2md::dispatch::install(&work, None, &Default::default()).unwrap();
+    // Empty image names preserve the old per-section text request bodies.
+    settings.vision = true;
+    llm::polish_sections_report(&mut original.clone(), root.path(), &settings).unwrap();
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 26);
+    settings.vision = false;
+    let report =
+        llm::polish_sections_report(&mut original.clone(), root.path(), &settings).unwrap();
+    assert_eq!(report.reused, 24);
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 26);
+    let mut receipt = course2md::dispatch::receipts(&work).unwrap().remove(0);
+    receipt.state = course2md::dispatch::State::Uncertain;
+    receipt.attempt = 2;
+    receipt.response = None;
+    std::fs::write(
+        work.join("requests")
+            .join(format!("{}.json", receipt.stable_id)),
+        serde_json::to_vec(&receipt).unwrap(),
+    )
+    .unwrap();
+    let report =
+        llm::polish_sections_report(&mut original.clone(), root.path(), &settings).unwrap();
+    assert_eq!(report.reused, 23);
+    assert_eq!(report.uncertain, 1);
+    assert_eq!(mock.calls.load(Ordering::SeqCst), 26);
+}
+
 fn diagnostic_rounds(work: &Path) -> Vec<Vec<serde_json::Value>> {
     std::fs::read_dir(work.join("diagnostics"))
         .unwrap()
