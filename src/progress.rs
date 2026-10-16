@@ -106,6 +106,10 @@ fn log_event(level: &str, message: &str) -> serde_json::Value {
     serde_json::json!({"type": "log", "level": level, "message": message})
 }
 
+pub fn download_progress(current: u64, total: u64) {
+    emit(progress_event("download", current, total, ""));
+}
+
 /// 共享进度条样式：模板均为静态字符串，解析失败是编程错误。
 fn progress_style(template: &str) -> ProgressStyle {
     ProgressStyle::with_template(template)

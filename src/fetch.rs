@@ -421,7 +421,12 @@ fn apply_bilibili_view(candidates: &mut [SourceCandidate], bvid: &str, view: &Bi
                 .as_deref()
                 .map(str::trim)
                 .filter(|part| !part.is_empty())
-                .or_else(|| view.title.as_deref().map(str::trim).filter(|t| !t.is_empty()));
+                .or_else(|| {
+                    view.title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                });
             if let Some(title) = title {
                 candidate.title = title.to_string();
             }
@@ -476,7 +481,11 @@ pub fn enrich_bilibili_candidates(
                 .map(|bvid| scope.spawn(|| bilibili_view(&agent, bvid)))
                 .collect::<Vec<_>>()
                 .into_iter()
-                .map(|handle| handle.join().unwrap_or_else(|_| anyhow::bail!("分集信息线程异常")))
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| anyhow::bail!("分集信息线程异常"))
+                })
                 .collect()
         });
         for (bvid, view) in batch.iter().zip(views) {
@@ -666,7 +675,7 @@ pub async fn probe_video(url: &str) -> Result<OnlineVideo> {
 
 /// Metadata and all available subtitle channels only; no media/AI requests.
 pub async fn probe_online(url: &str) -> Result<OnlineProbe> {
-    let mut cmd = Command::new("yt-dlp");
+    let mut cmd = Command::new(crate::ytdlp::program());
     let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
     ytdlp_base(&mut cmd).args([
         "--simulate",
@@ -772,7 +781,7 @@ pub async fn fetch_selected_subtitle(
         text.clone()
     } else {
         let template = temp.path().join("subtitle");
-        let mut cmd = Command::new("yt-dlp");
+        let mut cmd = Command::new(crate::ytdlp::program());
         let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
         ytdlp_base(&mut cmd).args([
             "--skip-download",
@@ -856,7 +865,7 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
                 e = watch_control() => return Err(e),
             }
         }
-        let mut cmd = Command::new("yt-dlp");
+        let mut cmd = Command::new(crate::ytdlp::program());
         let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
         let fmt = format!("bv*[height<={max_height}]+ba/b[height<={max_height}]/b");
         ytdlp_base(&mut cmd).args([
@@ -868,7 +877,12 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
             "mp4",
             "--no-playlist",
             "--no-part",
-            "--no-progress",
+            // 结构化进度（2021.11 起的 yt-dlp 接口）：前缀行由 run_download 解析转发
+            "--newline",
+            "--progress-delta",
+            "0.2",
+            "--progress-template",
+            "download:[C2MD] %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s",
             "-o",
         ]);
         cmd.arg(&tmp);
@@ -876,10 +890,10 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
             cmd.arg("-v");
         }
         let outcome = tokio::select! {
-            status = run_status(ytdlp_url(&mut cmd, url)) => {
+            status = run_download(ytdlp_url(&mut cmd, url)) => {
                 status.map_err(|e| crate::auth::with_bilibili_login_tip(url, e))
             }
-            // 取消/暂停：drop run_status 分支即 kill_on_drop 终止当前 yt-dlp
+            // 取消/暂停：drop run_download 分支即 kill_on_drop 终止当前 yt-dlp
             e = watch_control() => return Err(e),
         };
         match outcome {
@@ -991,20 +1005,79 @@ async fn run_output(cmd: &mut Command) -> Result<std::process::Output> {
     }
 }
 
-async fn run_status(cmd: &mut Command) -> Result<()> {
-    let out = crate::media::run_cmd(cmd, "yt-dlp")
-        .await
-        .map_err(|error| {
-            if is_bilibili_412(&format!("{error:#}")) {
-                error.context(BILIBILI_412_HINT)
-            } else {
-                error
+/// 解析一行 yt-dlp 进度模板输出：(downloaded, total)。
+/// 模板字段：<downloaded> <total> <estimate>，未知值为 NA；
+/// 精确总字节未知时回落到估算值，都没有则 total=0（GUI 显示不确定进度）。
+fn ytdlp_progress(line: &str) -> Option<(u64, u64)> {
+    let rest = line.strip_prefix("[C2MD] ")?;
+    let mut fields = rest.split_whitespace();
+    let number = |value: Option<&str>| {
+        value
+            .filter(|value| *value != "NA")
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    let downloaded = number(fields.next())?;
+    let total = number(fields.next())
+        .or_else(|| number(fields.next()))
+        .unwrap_or(0);
+    Some((downloaded, total))
+}
+
+async fn drain_download_output(
+    pipe: impl tokio::io::AsyncRead + Unpin,
+    capture: bool,
+) -> std::io::Result<String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut reader = BufReader::new(pipe);
+    let mut line = Vec::new();
+    let mut tail = String::new();
+    while reader.read_until(b'\n', &mut line).await? > 0 {
+        // Windows diagnostics may use the system code page rather than UTF-8.
+        let text = String::from_utf8_lossy(&line);
+        if let Some((downloaded, total)) = ytdlp_progress(text.trim_end()) {
+            crate::progress::download_progress(downloaded, total);
+        } else if capture {
+            tail.push_str(&text);
+            let mut overflow = tail.len().saturating_sub(64 * 1024);
+            while !tail.is_char_boundary(overflow) {
+                overflow += 1;
             }
-        })?;
-    if !out.stderr.is_empty() {
-        tracing::debug!("{}", String::from_utf8_lossy(&out.stderr).trim());
+            tail.drain(..overflow);
+        }
+        line.clear();
     }
-    Ok(())
+    Ok(tail)
+}
+
+// Keep both pipes and the child in this future so cancellation stops all three.
+async fn run_download(cmd: &mut Command) -> Result<()> {
+    let mut child = cmd
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("启动 yt-dlp 失败 / Failed to start yt-dlp")?;
+    let stdout = child.stdout.take().expect("stdout 管道已配置");
+    let stderr_pipe = child.stderr.take().expect("stderr 管道已配置");
+    let (status, _, stderr) = tokio::try_join!(
+        child.wait(),
+        drain_download_output(stdout, false),
+        drain_download_output(stderr_pipe, true),
+    )
+    .context("读取 yt-dlp 下载结果失败")?;
+    if status.success() {
+        if !stderr.trim().is_empty() {
+            tracing::debug!("{}", stderr.trim());
+        }
+        return Ok(());
+    }
+    let error = crate::error::cmd_error("yt-dlp", status.code(), &stderr);
+    Err(if is_bilibili_412(&stderr) {
+        error.context(BILIBILI_412_HINT)
+    } else {
+        error
+    })
 }
 
 #[cfg(test)]
@@ -1334,17 +1407,61 @@ mod tests {
         assert!(!meta.uploader.is_empty());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn download_errors_retain_stderr_and_login_guidance() {
+        #[cfg(unix)]
         let mut cmd = Command::new("sh");
+        #[cfg(unix)]
         cmd.args([
             "-c",
             "echo 'ERROR: [BiliBili] HTTP Error 412: Precondition Failed' >&2; exit 1",
         ]);
-        let error = run_status(&mut cmd).await.unwrap_err();
+        #[cfg(windows)]
+        let mut cmd = Command::new("cmd.exe");
+        #[cfg(windows)]
+        cmd.args([
+            "/D",
+            "/C",
+            "echo ERROR: [BiliBili] HTTP Error 412: Precondition Failed 1>&2 & exit /b 1",
+        ]);
+        let error = run_download(&mut cmd).await.unwrap_err();
         assert!(error.to_string().contains("--login bilibili"));
         assert!(format!("{error:#}").contains("Precondition Failed"));
+    }
+
+    #[tokio::test]
+    async fn download_output_retains_late_errors_after_progress_and_non_utf8() {
+        let mut output = vec![0xff, b'\n'];
+        output.extend("诊断\n".repeat(20_000).as_bytes());
+        output.extend(b"[C2MD] 120326 NA 20971520\r\nERROR: final failure\n");
+        let tail = drain_download_output(output.as_slice(), true)
+            .await
+            .unwrap();
+        assert!(tail.len() <= 64 * 1024);
+        assert!(tail.ends_with("ERROR: final failure\n"));
+        assert!(!tail.contains("[C2MD]"));
+        assert!(
+            drain_download_output(output.as_slice(), false)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ytdlp_progress_lines_parse_bytes_with_estimate_fallback() {
+        assert_eq!(
+            ytdlp_progress("[C2MD] 120326 10485760 NA"),
+            Some((120326, 10485760))
+        );
+        assert_eq!(
+            ytdlp_progress("[C2MD] 120326 NA 20971520"),
+            Some((120326, 20971520))
+        );
+        assert_eq!(ytdlp_progress("[C2MD] 120326 NA NA"), Some((120326, 0)));
+        assert_eq!(ytdlp_progress("[C2MD] NA NA NA"), None);
+        assert_eq!(ytdlp_progress("[download] 45.3% of 10MiB"), None);
+        assert_eq!(ytdlp_progress(""), None);
     }
 
     #[cfg(unix)]
