@@ -156,7 +156,7 @@ pub async fn run_task(request: &execution::Request, cfg: &PipelineConfig) -> Res
     };
     execution::bind_work_dir(&cfg.out_dir, &binding)?;
     let is_local = Path::new(&request.source).is_file();
-    let meta = VideoMeta {
+    let mut meta = VideoMeta {
         title: request.title.clone(),
         uploader: request.author.clone(),
         duration: request.duration,
@@ -198,12 +198,34 @@ pub async fn run_task(request: &execution::Request, cfg: &PipelineConfig) -> Res
     } else {
         None
     };
+    let subtitle_input = if discovers_subtitles_at_runtime(subtitle.is_some(), cfg, is_local)
+        && artifact::published(&target)?.is_none()
+    {
+        progress::stage("fetch", "start");
+        let video = match fetch::probe_video(&request.source).await {
+            Ok(video) => video,
+            Err(error) => {
+                write_failure_run_json(cfg, is_local, &meta.extractor, &meta.id, &error, started);
+                return Err(error);
+            }
+        };
+        progress::stage("fetch", "done");
+        if meta.uploader.trim().is_empty() {
+            meta.uploader = video.meta.uploader.clone();
+        }
+        if meta.duration <= 0.0 {
+            meta.duration = video.meta.duration;
+        }
+        SubtitleInput::Discover(Some(Box::new(video)))
+    } else {
+        SubtitleInput::Selected(subtitle)
+    };
     let result = run_prepared(
         cfg,
         &meta,
         &target,
         is_local,
-        SubtitleInput::Selected(subtitle),
+        subtitle_input,
         true,
         request.allow_unauthenticated_asr,
         started,
@@ -577,9 +599,13 @@ fn export_for_task(
 }
 
 enum SubtitleInput {
-    /// CLI path: the video probed once at fetch time; `None` for local files.
+    /// Reuse probed metadata for subtitle discovery; `None` for local files.
     Discover(Option<Box<fetch::OnlineVideo>>),
     Selected(Option<Vec<timeline::TranscriptEvent>>),
+}
+
+fn discovers_subtitles_at_runtime(selected: bool, cfg: &PipelineConfig, local: bool) -> bool {
+    !selected && !local && cfg.transcript_source != config::TranscriptSource::Asr
 }
 
 async fn subtitles(
@@ -1320,6 +1346,27 @@ mod tests {
         result.unwrap();
     }
     use super::{run, should_delete_media};
+
+    #[test]
+    fn tasks_discover_online_subtitles_only_without_confirmed_text() {
+        let mut cfg = crate::options::resolve(
+            "https://example.invalid/video".into(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap();
+        for source in [
+            crate::config::TranscriptSource::Auto,
+            crate::config::TranscriptSource::Subtitle,
+        ] {
+            cfg.transcript_source = source;
+            assert!(super::discovers_subtitles_at_runtime(false, &cfg, false));
+            assert!(!super::discovers_subtitles_at_runtime(true, &cfg, false));
+            assert!(!super::discovers_subtitles_at_runtime(false, &cfg, true));
+        }
+        cfg.transcript_source = crate::config::TranscriptSource::Asr;
+        assert!(!super::discovers_subtitles_at_runtime(false, &cfg, false));
+    }
 
     #[test]
     fn empty_transcript_cache_is_retried_and_corruption_is_preserved() {
