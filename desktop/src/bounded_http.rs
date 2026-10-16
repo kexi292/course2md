@@ -29,7 +29,10 @@ pub(crate) fn json_agent(
 pub(crate) fn json_call(call: ureq::Request, authorization: Option<&Secret>) -> ureq::Request {
     let call = call.set("Accept", "application/json");
     match authorization {
-        Some(secret) => call.set("Authorization", &format!("Bearer {}", secret.expose())),
+        Some(secret) => {
+            let header = zeroize::Zeroizing::new(format!("Bearer {}", secret.expose()));
+            call.set("Authorization", &header)
+        }
         None => call,
     }
 }
