@@ -9,6 +9,8 @@
 
 GUI packages contain a matching private CLI engine. They do not install a terminal `course2md` command and can coexist with the standalone CLI package. Both channels install ffmpeg and yt-dlp. Model downloads and optional recognition backends are configured on first use; they are not bundled into the package.
 
+For the next Windows portable ZIP, `desktop/scripts/package.py` bundles the pinned standalone `yt-dlp.exe` beside the desktop app and engine. It verifies the release asset's SHA-256 and stops a release build if the download or check fails. `COURSE2MD_YTDLP` can supply a local binary when packaging offline. `ffmpeg` and `ffprobe` remain external dependencies. The CLI and desktop preview search for the bundled binary first, then installed tools.
+
 ## Automatic publication
 
 1. The `release` workflow builds the CLI and native GUI packages and publishes a stable GitHub Release.

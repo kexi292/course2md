@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build and package the native app and its matching CLI on the current platform."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import re
 import shutil
 import subprocess
 import tomllib
+import urllib.request
 
 from dmg import build_install_dmg
 
@@ -34,6 +36,64 @@ def macos_versions(version):
 
 def run(*args):
     subprocess.run(args, cwd=PROJECT, check=True)
+
+
+# Bundled yt-dlp is pinned so release archives are reproducible. To update, take
+# the version and hashes from that release's SHA2-256SUMS.
+YTDLP_VERSION = "2026.08.19"
+YTDLP_SHA256 = {
+    "yt-dlp_macos": "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202",
+    "yt-dlp.exe": "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
+    "yt-dlp_arm64.exe": "05b438997bafc3affdfda9d041353c9d73e04dc842207254b655b0887c4445b0",
+    "yt-dlp_linux": "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a",
+    "yt-dlp_linux_aarch64": "b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc",
+}
+
+
+def ytdlp_asset(system, machine):
+    """Standalone binary asset name in yt-dlp's GitHub releases, or None."""
+    if system == "Darwin":
+        return "yt-dlp_macos"
+    if system == "Windows":
+        return {"AMD64": "yt-dlp.exe", "ARM64": "yt-dlp_arm64.exe"}.get(machine)
+    if system == "Linux":
+        return {"x86_64": "yt-dlp_linux", "aarch64": "yt-dlp_linux_aarch64"}.get(machine)
+    return None
+
+
+def bundle_ytdlp(dest, required):
+    """Place the pinned standalone yt-dlp beside the app binaries.
+
+    COURSE2MD_YTDLP points at a local build to bundle instead of downloading.
+    Release builds fail without it; development builds fall back to PATH.
+    """
+    try:
+        local = os.environ.get("COURSE2MD_YTDLP")
+        if local:
+            shutil.copy2(local, dest)
+        else:
+            asset = ytdlp_asset(platform.system(), platform.machine())
+            if not asset:
+                raise OSError("Unsupported yt-dlp platform")
+            url = f"https://github.com/yt-dlp/yt-dlp/releases/download/{YTDLP_VERSION}/{asset}"
+            tmp = dest.parent / (dest.name + ".download")
+            try:
+                with urllib.request.urlopen(url, timeout=300) as response, tmp.open("wb") as out:
+                    shutil.copyfileobj(response, out)
+                digest = hashlib.sha256(tmp.read_bytes()).hexdigest()
+                if digest != YTDLP_SHA256[asset]:
+                    raise OSError(f"{asset} {YTDLP_VERSION} checksum mismatch: {digest}")
+                tmp.replace(dest)
+            finally:
+                tmp.unlink(missing_ok=True)
+        dest.chmod(0o755)
+        return dest
+    except OSError as error:
+        if required:
+            raise SystemExit(f"Release builds must bundle yt-dlp: {error}") from error
+        print(f"warning: yt-dlp not bundled ({error}); the app will use yt-dlp from PATH")
+        return None
+
 
 
 def main():
@@ -109,6 +169,7 @@ def main():
     shutil.copy2(PROJECT / "target" / profile / f"course2md{suffix}", binaries / f"course2md{suffix}")
     shutil.copy2(ROOT / "target" / profile / f"course2md-desktop{suffix}", binaries / f"course2md-desktop{suffix}")
     if system == "Windows":
+        bundle_ytdlp(binaries / "yt-dlp.exe", required=not args.debug)
         verify_windows_icon(binaries / "course2md-desktop.exe")
     shutil.copy2(PROJECT / "LICENSE", base / "LICENSE")
     shutil.copy2(ROOT / "assets/material/LICENSE", base / "LICENSE-material-icons")
