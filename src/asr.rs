@@ -41,6 +41,44 @@ const WORKERS: usize = 4;
 const MAX_ATTEMPTS: u32 = 3;
 const RETRY_BACKOFF_BASE: Duration = Duration::from_secs(1);
 
+const EMPTY_RESULT_TRIPWIRE: usize = 10;
+
+#[derive(Default)]
+struct EmptyResultTracker {
+    seen_success: bool,
+    pending_empty: Vec<(f64, f64)>,
+}
+
+impl EmptyResultTracker {
+    fn record_outcome(
+        &mut self,
+        cp: &mut crate::checkpoint::Checkpoint,
+        start: f64,
+        end: f64,
+        text: &str,
+    ) -> Result<()> {
+        if text.trim().is_empty() {
+            self.pending_empty.push((start, end));
+            anyhow::ensure!(
+                self.seen_success || self.pending_empty.len() < EMPTY_RESULT_TRIPWIRE,
+                "语音服务连续返回空文本；请检查服务地址与模型是否支持音频输入 / The speech service repeatedly returned empty text; check that the endpoint and model support audio input"
+            );
+            return Ok(());
+        }
+        self.seen_success = true;
+        self.flush_pending(cp)?;
+        cp.record(start, end, text)
+    }
+
+    // Buffer silence until success, so a broken endpoint cannot mark it completed.
+    fn flush_pending(&mut self, cp: &mut crate::checkpoint::Checkpoint) -> Result<()> {
+        for (start, end) in std::mem::take(&mut self.pending_empty) {
+            cp.record(start, end, "")?;
+        }
+        Ok(())
+    }
+}
+
 /// 清洗 Qwen3 转写中的提示词残留。
 pub fn sanitize_qwen_text(s: &str) -> String {
     let mut t = s.trim();
@@ -70,6 +108,10 @@ where
     F: FnOnce(&mut crate::checkpoint::Checkpoint) -> Result<Vec<TranscriptEvent>> + Send + 'static,
 {
     let mut cp = crate::checkpoint::Checkpoint::open(&cfg.out_dir, cfg.resume, identity)?;
+    if cfg.resume && cfg.out_dir.join(".asr_done").is_file() && cp.events().is_empty() {
+        // Older versions could mark a broken endpoint's empty output as complete.
+        cp = crate::checkpoint::Checkpoint::open(&cfg.out_dir, false, identity)?;
+    }
     tokio::task::spawn_blocking(move || {
         let r = f(&mut cp);
         if r.is_ok() {
@@ -409,6 +451,10 @@ pub(crate) fn run_chunks(
     ));
 
     let mut err: Option<anyhow::Error> = None;
+    let mut tracker = EmptyResultTracker {
+        seen_success: !cp.events().is_empty(),
+        ..Default::default()
+    };
     std::thread::scope(|scope| {
         let mut prefetch: Option<(usize, std::thread::ScopedJoinHandle<'_, Result<()>>)> = None;
         for (i, seg) in segs.iter().copied().enumerate() {
@@ -449,8 +495,9 @@ pub(crate) fn run_chunks(
             }
             match transcribe(i, seg, &chunk) {
                 Ok(text) => {
-                    // 空结果也记录完成；写盘失败则中断且不标记完成
-                    if let Err(e) = cp.record(start, end, text.as_deref().unwrap_or("")) {
+                    if let Err(e) =
+                        tracker.record_outcome(cp, start, end, text.as_deref().unwrap_or(""))
+                    {
                         err = Some(e);
                         break;
                     }
@@ -470,6 +517,7 @@ pub(crate) fn run_chunks(
     if let Some(e) = err {
         return Err(e);
     }
+    tracker.flush_pending(cp)?;
     // 事件统一来自 checkpoint（历史 + 本次），按时间排序
     Ok(cp.sorted_events())
 }
@@ -526,6 +574,10 @@ fn run_api(
     let next = std::sync::atomic::AtomicUsize::new(0);
     let abort = std::sync::atomic::AtomicBool::new(false);
     let mut err: Option<anyhow::Error> = None;
+    let mut tracker = EmptyResultTracker {
+        seen_success: !cp.events().is_empty(),
+        ..Default::default()
+    };
     std::thread::scope(|s| {
         for _ in 0..WORKERS {
             let tx = tx.clone();
@@ -560,11 +612,14 @@ fn run_api(
 
         for (i, r) in rx {
             match r {
+                _ if err.is_some() => {}
                 Ok(text) => {
-                    // 空结果（None）同样记录完成，避免静音 chunk 反复重跑
-                    if let Err(e) =
-                        cp.record(segs[i].start, segs[i].end, text.as_deref().unwrap_or(""))
-                    {
+                    if let Err(e) = tracker.record_outcome(
+                        cp,
+                        segs[i].start,
+                        segs[i].end,
+                        text.as_deref().unwrap_or(""),
+                    ) {
                         if err.is_none() {
                             err = Some(e);
                         }
@@ -587,6 +642,7 @@ fn run_api(
     if let Some(e) = err {
         return Err(e);
     }
+    tracker.flush_pending(cp)?;
     // 事件统一来自 checkpoint（收集循环里已 record），按时间排序
     let events: Vec<TranscriptEvent> = cp.sorted_events();
     tracing::info!(
@@ -1538,6 +1594,65 @@ pub fn cut_wav(src: &Path, start: f64, end: f64, dest: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn completed_empty_checkpoint_is_archived_before_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg =
+            crate::options::resolve(String::new(), &Default::default(), &Default::default())
+                .unwrap();
+        cfg.out_dir = dir.path().to_path_buf();
+        cfg.resume = true;
+        let identity = crate::checkpoint::AsrIdentity::new("api", "test", 20.0);
+        let mut cp = crate::checkpoint::Checkpoint::open(dir.path(), false, &identity).unwrap();
+        cp.record(0.0, 1.0, "").unwrap();
+        cp.finish().unwrap();
+        drop(cp);
+        let events = super::run_with_cp(&cfg, &identity, |cp| {
+            assert!(!cp.is_done(0.0, 1.0));
+            cp.record(0.0, 1.0, "retried speech")?;
+            Ok(cp.sorted_events())
+        })
+        .await
+        .unwrap();
+        assert_eq!(events[0].text, "retried speech");
+        assert!(dir.path().join(".previous-asr").is_dir());
+    }
+
+    #[test]
+    fn empty_endpoint_results_do_not_poison_checkpoints() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let identity = crate::checkpoint::AsrIdentity::new("api", "test", 20.0);
+        let mut cp = crate::checkpoint::Checkpoint::open(dir.path(), false, &identity).unwrap();
+        let mut tracker = EmptyResultTracker::default();
+        for i in 0..EMPTY_RESULT_TRIPWIRE - 1 {
+            tracker
+                .record_outcome(&mut cp, i as f64, i as f64 + 1.0, " ")
+                .unwrap();
+        }
+        assert!(tracker.record_outcome(&mut cp, 9.0, 10.0, "").is_err());
+        assert!(!cp.is_done(0.0, 1.0));
+        drop(tracker);
+
+        let mut tracker = EmptyResultTracker::default();
+        tracker.record_outcome(&mut cp, 0.0, 1.0, "").unwrap();
+        tracker.record_outcome(&mut cp, 1.0, 2.0, "speech").unwrap();
+        assert!(cp.is_done(0.0, 1.0));
+        for i in 2..15 {
+            tracker
+                .record_outcome(&mut cp, i as f64, i as f64 + 1.0, "")
+                .unwrap();
+        }
+        tracker.flush_pending(&mut cp).unwrap();
+        assert!(cp.is_done(14.0, 15.0));
+        assert_eq!(cp.events().len(), 1);
+
+        let mut tracker = EmptyResultTracker::default();
+        tracker.record_outcome(&mut cp, 20.0, 21.0, "").unwrap();
+        tracker.flush_pending(&mut cp).unwrap();
+        assert!(cp.is_done(20.0, 21.0), "short silence remains resumable");
+    }
+
     fn cloud_failure(status: Option<u16>, uncertain: bool) -> anyhow::Error {
         anyhow::Error::new(crate::dispatch::Failure {
             status,

@@ -731,12 +731,7 @@ async fn run_prepared(
         async {
             let transcript_work = async {
                 let cache_path = cfg.out_dir.join("transcript.json");
-                let cache = if cache_path.is_file() {
-                    let cache: TranscriptCache = serde_json::from_slice(&std::fs::read(
-                        &cache_path,
-                    )?)
-                    .context("已保存的文字损坏，原文件已保留 / Saved transcript is damaged")?;
-                    execution::validate_events(&cache.events)?;
+                let cache = if let Some(cache) = cached_transcript(&cache_path)? {
                     cache
                 } else if let Some((events, source)) = selected {
                     TranscriptCache { source, events }
@@ -758,7 +753,12 @@ async fn run_prepared(
                         events,
                     }
                 };
-                crate::checkpoint::atomic_write(&cache_path, &serde_json::to_vec_pretty(&cache)?)?;
+                if cache.events.iter().any(|e| !e.text.trim().is_empty()) {
+                    crate::checkpoint::atomic_write(
+                        &cache_path,
+                        &serde_json::to_vec_pretty(&cache)?,
+                    )?;
+                }
                 Ok::<_, anyhow::Error>(cache)
             };
             tokio::select! {
@@ -923,6 +923,21 @@ async fn run_prepared(
         }
     }
     Ok(())
+}
+
+fn cached_transcript(path: &Path) -> Result<Option<TranscriptCache>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let cache: TranscriptCache = serde_json::from_slice(&std::fs::read(path)?)
+        .context("已保存的文字损坏，原文件已保留 / Saved transcript is damaged")?;
+    if cache.events.iter().any(|e| !e.text.trim().is_empty()) {
+        execution::validate_events(&cache.events)?;
+        return Ok(Some(cache));
+    }
+    tracing::warn!("已保存的文字为空，将重新识别 / Saved transcript is empty; transcribing again");
+    std::fs::remove_file(path)?;
+    Ok(None)
 }
 
 fn save_materials(
@@ -1227,6 +1242,18 @@ fn should_delete_media(
 #[cfg(test)]
 mod tests {
     use super::{run, should_delete_media};
+
+    #[test]
+    fn empty_transcript_cache_is_retried_and_corruption_is_preserved() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("transcript.json");
+        std::fs::write(&path, br#"{"source":"asr","events":[]}"#).unwrap();
+        assert!(super::cached_transcript(&path).unwrap().is_none());
+        assert!(!path.exists());
+        std::fs::write(&path, b"broken").unwrap();
+        assert!(super::cached_transcript(&path).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"broken");
+    }
 
     #[test]
     fn recovery_archives_unverified_media_and_reuses_only_matching_content() {
