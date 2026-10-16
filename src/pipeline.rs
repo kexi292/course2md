@@ -61,7 +61,10 @@ pub async fn run(cfg: &PipelineConfig) -> Result<()> {
                 .unwrap_or(0.),
             webpage_url: cfg.url.clone(),
             extractor: "local".into(),
-            id: execution::file_digest(local)?,
+            id: {
+                let local = local.to_path_buf();
+                blocking(move || execution::file_digest(&local)).await?
+            },
         }
     };
     let local_duration_error = local_duration.and_then(|probe| probe.err());
@@ -147,7 +150,11 @@ pub async fn run_task(request: &execution::Request, cfg: &PipelineConfig) -> Res
     let target = Target::from_request(request);
     std::fs::create_dir_all(&cfg.out_dir)?;
     let _lock = crate::runtime::lock_file(&cfg.out_dir.join(".task.lock"))?;
-    execution::bind_work_dir(&cfg.out_dir, &request.binding(cfg)?)?;
+    let binding = {
+        let (request, cfg) = (request.clone(), cfg.clone());
+        blocking(move || request.binding(&cfg)).await?
+    };
+    execution::bind_work_dir(&cfg.out_dir, &binding)?;
     let is_local = Path::new(&request.source).is_file();
     let meta = VideoMeta {
         title: request.title.clone(),
@@ -351,11 +358,20 @@ async fn reprocess(
                 }
             }
         }
-        if !cfg.media_path().exists()
-            && verified_file(&prior.join("media.mp4"), &prior.join("media.sha256"))?
-        {
-            std::fs::copy(prior.join("media.mp4"), cfg.media_path())?;
-            save_file_digest(&cfg.media_path(), &cfg.out_dir.join("media.sha256"))?;
+        if !cfg.media_path().exists() {
+            let (prior, media, marker) = (
+                prior.to_path_buf(),
+                cfg.media_path(),
+                cfg.out_dir.join("media.sha256"),
+            );
+            blocking(move || {
+                if verified_file(&prior.join("media.mp4"), &prior.join("media.sha256"))? {
+                    std::fs::copy(prior.join("media.mp4"), &media)?;
+                    save_file_digest(&media, &marker)?;
+                }
+                Ok(())
+            })
+            .await?;
         }
     }
     // Copy verified base images into a separate namespace; a failed new screenshot pass
@@ -385,7 +401,7 @@ async fn reprocess(
         let media_path = if Path::new(&request.source).is_file() {
             PathBuf::from(&request.source)
         } else {
-            if !prepare_cached_media(cfg)? {
+            if !prepare_cached_media_async(cfg).await? {
                 anyhow::ensure!(
                     !Path::new(&request.source).is_absolute()
                         && !request.source_id.starts_with("local:"),
@@ -400,7 +416,7 @@ async fn reprocess(
                 crate::error::require_cmd("yt-dlp")?;
                 progress::stage("download", "start");
                 fetch::download(&cfg.url, &cfg.media_path(), cfg.max_height, false).await?;
-                save_file_digest(&cfg.media_path(), &cfg.out_dir.join("media.sha256"))?;
+                save_file_digest_async(cfg.media_path(), cfg.out_dir.join("media.sha256")).await?;
                 progress::stage("download", "done");
             }
             cfg.media_path()
@@ -699,7 +715,7 @@ async fn run_prepared(
     } else {
         cfg.media_path()
     };
-    let media_existed = !is_local && prepare_cached_media(cfg)?;
+    let media_existed = !is_local && prepare_cached_media_async(cfg).await?;
     crate::dispatch::check_control()?;
     if !is_local && !media_existed {
         anyhow::ensure!(
@@ -714,7 +730,7 @@ async fn run_prepared(
             tracing::enabled!(tracing::Level::DEBUG),
         )
         .await?;
-        save_file_digest(&media_path, &cfg.out_dir.join("media.sha256"))?;
+        save_file_digest_async(media_path.clone(), cfg.out_dir.join("media.sha256")).await?;
         progress::stage("download", "done");
     }
     crate::dispatch::check_control()?;
@@ -739,9 +755,14 @@ async fn run_prepared(
                     progress::stage("audio", "start");
                     let audio = cfg.audio_path();
                     // A verified marker proves audio extraction completed; a bare WAV may be truncated.
-                    if !verified_file(&audio, &cfg.out_dir.join("audio.sha256"))? {
+                    let marker = cfg.out_dir.join("audio.sha256");
+                    let verified = {
+                        let (audio, marker) = (audio.clone(), marker.clone());
+                        blocking(move || verified_file(&audio, &marker)).await?
+                    };
+                    if !verified {
                         media::extract_audio(&media_path, &audio).await?;
-                        save_file_digest(&audio, &cfg.out_dir.join("audio.sha256"))?;
+                        save_file_digest_async(audio.clone(), marker).await?;
                     }
                     progress::stage("audio", "done");
                     crate::dispatch::check_control()?;
@@ -965,21 +986,33 @@ async fn cached_frames(cfg: &PipelineConfig, media: &Path) -> Result<Vec<timelin
     if cache_path.is_file() {
         let cache: FramesCache = serde_json::from_slice(&std::fs::read(&cache_path)?)
             .context("截图进度损坏，原文件已保留 / Screenshot checkpoint is damaged")?;
-        if verified_cache_files(&cfg.out_dir, &cache.files) {
+        let out_dir = cfg.out_dir.clone();
+        if blocking(move || Ok(verified_cache_files(&out_dir, &cache.files))).await? {
             return Ok(cache.frames);
         }
     }
     crate::dispatch::check_control()?;
     let frames = scene::run(cfg, media).await?;
-    let files = frames
-        .iter()
-        .map(|frame| {
-            Ok((
-                frame.image.clone(),
-                execution::file_digest(&artifact::safe_asset_path(&cfg.out_dir, &frame.image)?)?,
-            ))
+    let files = {
+        let (out_dir, images) = (
+            cfg.out_dir.clone(),
+            frames
+                .iter()
+                .map(|frame| frame.image.clone())
+                .collect::<Vec<_>>(),
+        );
+        blocking(move || {
+            images
+                .into_iter()
+                .map(|image| {
+                    let digest =
+                        execution::file_digest(&artifact::safe_asset_path(&out_dir, &image)?)?;
+                    Ok((image, digest))
+                })
+                .collect::<Result<Vec<_>>>()
         })
-        .collect::<Result<Vec<_>>>()?;
+        .await?
+    };
     crate::checkpoint::atomic_write(
         &cache_path,
         &serde_json::to_vec_pretty(&FramesCache {
@@ -989,6 +1022,22 @@ async fn cached_frames(cfg: &PipelineConfig, media: &Path) -> Result<Vec<timelin
     )?;
     Ok(frames)
 }
+// Whole-file hashing must not stall sibling tasks or control polling.
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .context("后台文件校验中断 / Background file check interrupted")?
+}
+
+async fn save_file_digest_async(path: PathBuf, marker: PathBuf) -> Result<()> {
+    blocking(move || save_file_digest(&path, &marker)).await
+}
+
+async fn prepare_cached_media_async(cfg: &PipelineConfig) -> Result<bool> {
+    let cfg = cfg.clone();
+    blocking(move || prepare_cached_media(&cfg)).await
+}
+
 fn verified_file(path: &Path, marker: &Path) -> Result<bool> {
     if !path.is_file() || !marker.is_file() {
         return Ok(false);
@@ -1241,6 +1290,18 @@ fn should_delete_media(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_file_work_allows_sibling_tasks_to_run() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (result, ()) = tokio::join!(
+            super::blocking(move || Ok(rx.recv_timeout(std::time::Duration::from_secs(2))?)),
+            async {
+                tokio::task::yield_now().await;
+                tx.send(()).unwrap();
+            }
+        );
+        result.unwrap();
+    }
     use super::{run, should_delete_media};
 
     #[test]
