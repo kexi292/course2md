@@ -685,6 +685,23 @@ async fn run_prepared(
     progress::stage("subtitle", "start");
     let selected = subtitles(cfg, is_local, input).await?;
     progress::stage("subtitle", "done");
+    #[cfg(apple_native)]
+    let selected_config;
+    #[cfg(apple_native)]
+    let cfg = if selected.is_none() && cfg.provider == config::AsrProvider::Coreml {
+        selected_config = {
+            let mut selected_config = cfg.clone();
+            selected_config.asr_model = Some(crate::apple::resolve_model(
+                cfg.asr_model
+                    .as_deref()
+                    .filter(|model| !model.trim().is_empty()),
+            )?);
+            selected_config
+        };
+        &selected_config
+    } else {
+        cfg
+    };
     if selected.is_none() {
         cfg.validate_asr_with_auth(!allow_unauthenticated_asr, !strict_credentials)?;
         if !matches!(
