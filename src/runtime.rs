@@ -220,17 +220,34 @@ pub fn wait_ready(
     }
 }
 
-/// 在 PATH 上查找可执行文件（Windows 自动尝试 .exe 后缀）。
+/// Find executables on PATH, including Windows PATHEXT launchers.
 pub fn which(cmd: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
-    let names: Vec<String> = if cfg!(windows) {
-        vec![cmd.to_string(), format!("{cmd}.exe")]
-    } else {
-        vec![cmd.to_string()]
-    };
+    #[cfg(windows)]
+    let names = windows_command_names(
+        cmd,
+        &std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()),
+    );
+    #[cfg(not(windows))]
+    let names = vec![cmd.to_string()];
     std::env::split_paths(&path)
         .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
         .find(|p| is_executable(p))
+}
+
+#[cfg(windows)]
+fn windows_command_names(cmd: &str, pathext: &str) -> Vec<String> {
+    let mut names = vec![cmd.to_owned()];
+    if Path::new(cmd).extension().is_none() {
+        names.extend(
+            pathext
+                .split(';')
+                .map(str::trim)
+                .filter(|ext| !ext.is_empty())
+                .map(|ext| format!("{cmd}{ext}")),
+        );
+    }
+    names
 }
 
 #[cfg(unix)]
@@ -385,6 +402,24 @@ mod tests {
         let probe = "cmd";
         assert!(which(probe).is_some());
         assert!(which("definitely-not-a-real-binary-xyz").is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_lookup_honors_launcher_extensions() {
+        let names = windows_command_names("tool", ".COM;.EXE;.BAT;.CMD; .CUSTOM ;;");
+        assert_eq!(
+            names,
+            [
+                "tool",
+                "tool.COM",
+                "tool.EXE",
+                "tool.BAT",
+                "tool.CMD",
+                "tool.CUSTOM"
+            ]
+        );
+        assert_eq!(windows_command_names("tool.cmd", ".EXE;.CMD"), ["tool.cmd"]);
     }
 
     #[test]
