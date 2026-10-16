@@ -138,7 +138,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 json,
             } => {
                 init_logging(0, false, json);
-                let root = config::model_dir_from(dir.as_deref());
+                let root = configured_model_dir(dir.as_deref())?;
                 let status = models::status::inspect(provider, &model, &root)?;
                 if json {
                     println!("{}", serde_json::to_string(&status)?);
@@ -154,7 +154,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                 json,
             } => {
                 init_logging(0, false, json);
-                let root = config::model_dir_from(dir.as_deref());
+                let root = configured_model_dir(dir.as_deref())?;
                 let status = tokio::runtime::Runtime::new()?
                     .block_on(models::prepare(provider, &model, &root))?;
                 progress::emit(
@@ -171,9 +171,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
                     progress::set_json_mode();
                 }
                 init_logging(0, false, json);
-                let file = settings::load()?;
-                let root =
-                    config::model_dir_from(dir.as_deref().or(file.defaults.model_dir.as_deref()));
+                let root = configured_model_dir(dir.as_deref())?;
                 tokio::runtime::Runtime::new()?.block_on(models::download_models(&root))?;
                 progress::emit(
                     serde_json::json!({"type":"done", "model_dir": root.display().to_string()}),
@@ -185,9 +183,7 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             }
             ModelsCmd::List { dir } => {
                 init_logging(0, false, false);
-                let file = settings::load()?;
-                let root =
-                    config::model_dir_from(dir.as_deref().or(file.defaults.model_dir.as_deref()));
+                let root = configured_model_dir(dir.as_deref())?;
                 models::list_models(&root);
                 Ok(())
             }
@@ -383,6 +379,13 @@ fn run(cli: Cli) -> anyhow::Result<()> {
             tokio::runtime::Runtime::new()?.block_on(pipeline::run(&cfg))
         }
     }
+}
+
+fn configured_model_dir(dir: Option<&std::path::Path>) -> anyhow::Result<std::path::PathBuf> {
+    let file = settings::load()?;
+    Ok(config::model_dir_from(
+        dir.or(file.defaults.model_dir.as_deref()),
+    ))
 }
 
 /// 递归收集包含 timeline.jsonl 的输出目录（支持直接传单个输出目录或整个输出根）。

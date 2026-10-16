@@ -141,6 +141,62 @@ fn settings_and_status_never_print_saved_keys() {
 }
 
 #[test]
+fn model_inspection_uses_configured_directory_with_explicit_override() {
+    let cli = CliTest::new();
+    cli.config("[defaults]\nmodel_dir = 'custom models'\n");
+    for (args, expected) in [
+        (
+            vec!["models", "inspect", "--provider", "cpu", "--json"],
+            "custom models",
+        ),
+        (
+            vec![
+                "models",
+                "inspect",
+                "--provider",
+                "cpu",
+                "--json",
+                "--dir",
+                "override",
+            ],
+            "override",
+        ),
+    ] {
+        let result = cli.run(&args);
+        assert!(result.status.success(), "{}", stderr(&result));
+        let status: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        let parts = status["parts"].as_array().unwrap();
+        assert!(!parts.is_empty());
+        for part in parts {
+            assert!(std::path::Path::new(part["path"].as_str().unwrap()).starts_with(expected));
+        }
+    }
+}
+
+#[test]
+fn template_and_config_show_match_runtime_defaults() {
+    let cli = CliTest::new();
+    let template = course2md::settings::template();
+    let parsed: course2md::settings::ConfigFile = toml::from_str(
+        &template
+            .replace("#resume = ", "resume = ")
+            .replace("#stable_secs = ", "stable_secs = "),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.defaults.resume,
+        Some(course2md::config::resolve_resume(false, false, None))
+    );
+    assert_eq!(
+        parsed.defaults.stable_secs,
+        Some(course2md::config::DEFAULT_STABLE_SECS)
+    );
+    assert!(stdout(&cli.run(&["config", "show"])).contains("resume         : true"));
+    cli.config("[defaults]\nresume = false\n");
+    assert!(stdout(&cli.run(&["config", "show"])).contains("resume         : false"));
+}
+
+#[test]
 fn generated_template_parses_and_does_not_overwrite_existing_config() {
     let cli = CliTest::new();
     assert!(cli.run(&["config", "init"]).status.success());
