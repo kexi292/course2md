@@ -1392,7 +1392,9 @@ impl Desktop {
         wrapper.into_any_element()
     }
 
-    /// Sidebar successor: folder filter + creation entry, final form with M5.
+    /// The folder chooser is a menu rather than a horizontal segment row.
+    /// Folder names are user data and can grow without bound; keeping them in
+    /// the menu prevents the library toolbar from turning into a clipped strip.
     fn folder_filter_control(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let multi = self
             .workspace
@@ -1433,35 +1435,46 @@ impl Desktop {
         }
         let options = library_filter_options(&sections, &self.library_root, multi);
         let selected = library_filter_selected(&options, &self.library_root, self.folder_filter);
-        let choices: Vec<(String, String)> = options
+        let selected_label = options
             .iter()
-            .map(|option| (option.value.clone(), option.label.clone()))
-            .collect();
-        let mut group = SingleChoiceGroup::new("folder-filter", "文件夹筛选")
-            .options(choices)
-            .selected(selected);
-        // 真实文件夹用对象图标，与「全部/未分类」的集合过滤分开（review2#5）
-        for option in &options {
-            if option.folder.is_some_and(|id| id != 0) {
-                group = group.icon(option.value.clone(), icons::folder());
-            }
-        }
-        group.on_change(cx.listener({
-            let options = options.clone();
-            move |this, value: &SharedString, _, cx| {
-                let Some(option) = options.iter().find(|option| option.value == value.as_ref())
-                else {
-                    return;
-                };
-                this.library_root = option.root.clone();
-                if let Some(organization) = this.library_indexes.get(&option.root) {
-                    this.library = organization.clone();
+            .find(|option| option.value == selected)
+            .map(|option| option.label.clone())
+            .unwrap_or_else(|| "全部笔记".into());
+        let entity = cx.entity().downgrade();
+        outline_pill("folder-filter")
+            .icon(if self.folder_filter.is_some_and(|id| id != 0) {
+                icons::folder()
+            } else {
+                icons::book_open()
+            })
+            .label(selected_label)
+            .dropdown_menu(move |mut menu, _, _| {
+                for option in &options {
+                    let entity = entity.clone();
+                    let selected = selected.clone();
+                    let option = option.clone();
+                    let icon = option.folder.is_some_and(|id| id != 0).then(icons::folder);
+                    let mut item = PopupMenuItem::new(option.label.clone())
+                        .checked(option.value == selected)
+                        .on_click(move |_, _, cx| {
+                            let _ = entity.update(cx, |this, cx| {
+                                this.library_root = option.root.clone();
+                                if let Some(organization) = this.library_indexes.get(&option.root) {
+                                    this.library = organization.clone();
+                                }
+                                this.folder_filter = option.folder;
+                                this.scrolls[Page::Library as usize]
+                                    .set_offset(point(px(0.), px(0.)));
+                                cx.notify();
+                            });
+                        });
+                    if let Some(icon) = icon {
+                        item = item.icon(icon);
+                    }
+                    menu = menu.item(item);
                 }
-                this.folder_filter = option.folder;
-                this.scrolls[Page::Library as usize].set_offset(point(px(0.), px(0.)));
-                cx.notify();
-            }
-        }))
+                menu
+            })
     }
 
     pub(super) fn library_controls_visible(&self, cx: &App) -> bool {
@@ -1487,6 +1500,7 @@ impl Desktop {
         let sort_by_title = self.desktop_settings.library_sort_by_title;
         let can_group = self.folder_filter.is_none() && self.library_error.is_none();
         let controls = h_flex()
+            .w_full()
             .gap_2()
             .flex_wrap()
             .min_w_0()
@@ -1583,33 +1597,21 @@ impl Desktop {
             .gap_2()
             .pb_4()
             .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .flex_wrap()
-                    .gap_2()
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex_basis(rems(10.))
-                            .min_w_0()
-                            .max_w_full()
-                            .child(
-                                text_input(&self.inputs[&Field::Search])
-                                    .aria_label("搜索笔记标题")
-                                    .w_full()
-                                    .border_color(color(CONTROL))
-                                    .text_size(TEXT_BODY)
-                                    .prefix(
-                                        icons::search()
-                                            .size(rems(18. / 14.))
-                                            .text_color(color(GRAY)),
-                                    )
-                                    .cleanable(true),
-                            ),
-                    )
-                    .child(controls),
+                div().w_full().min_w_0().child(
+                    text_input(&self.inputs[&Field::Search])
+                        .aria_label("搜索笔记标题")
+                        .w_full()
+                        .border_color(color(CONTROL))
+                        .text_size(TEXT_BODY)
+                        .prefix(
+                            icons::search()
+                                .size(rems(18. / 14.))
+                                .text_color(color(GRAY)),
+                        )
+                        .cleanable(true),
+                ),
             )
+            .child(controls)
             .children(self.folder_export_feedback(cx))
     }
 
