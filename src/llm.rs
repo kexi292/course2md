@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn apply_polish_rejects_mismatched_ids() {
-        let mut chunk = vec![TranscriptEvent {
+        let mut chunk = [TranscriptEvent {
             start: 0.0,
             end: 1.0,
             text: "a".into(),
@@ -1531,7 +1531,7 @@ mod tests {
 
     #[test]
     fn source_mode_discards_model_translation() {
-        let mut chunk = vec![TranscriptEvent {
+        let mut chunk = [TranscriptEvent {
             start: 0.0,
             end: 1.0,
             text: "hello".into(),
@@ -1548,7 +1548,7 @@ mod tests {
 
     #[test]
     fn translation_mode_keeps_source_and_avoids_duplicate_text() {
-        let mut chunk = vec![TranscriptEvent {
+        let mut chunk = [TranscriptEvent {
             start: 0.0,
             end: 1.0,
             text: "中文".into(),

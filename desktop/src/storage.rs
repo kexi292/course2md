@@ -275,9 +275,9 @@ pub fn save_journal(path: &Path, journal: &Journal) -> Result<()> {
     sync_directory(path.parent().context("迁移记录缺少保存目录")?)
 }
 
-fn sync_directory(path: &Path) -> Result<()> {
+fn sync_directory(_path: &Path) -> Result<()> {
     #[cfg(unix)]
-    std::fs::File::open(path)?.sync_all()?;
+    std::fs::File::open(_path)?.sync_all()?;
     Ok(())
 }
 

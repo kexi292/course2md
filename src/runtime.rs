@@ -246,7 +246,7 @@ pub fn which_in(cmd: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
         &std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into()),
     );
     #[cfg(not(windows))]
-    let names = vec![cmd.to_string()];
+    let names = [cmd.to_string()];
     std::env::split_paths(path)
         .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
         .find(|p| is_executable(p))
