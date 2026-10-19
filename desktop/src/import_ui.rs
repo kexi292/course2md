@@ -967,6 +967,22 @@ impl Desktop {
         self.start_conversion(window, cx);
     }
 
+    fn toggle_candidate(&mut self, input: &str, cx: &mut Context<Self>) {
+        if !self.selected_candidates.remove(input) {
+            self.selected_candidates.insert(input.to_owned());
+        }
+        cx.notify();
+    }
+
+    fn set_candidate_selected(&mut self, input: &str, selected: bool, cx: &mut Context<Self>) {
+        if selected {
+            self.selected_candidates.insert(input.to_owned());
+        } else {
+            self.selected_candidates.remove(input);
+        }
+        cx.notify();
+    }
+
     fn drop_source_files(
         &mut self,
         files: &[PathBuf],
@@ -1000,6 +1016,7 @@ impl Desktop {
                             .into_owned(),
                         identity: None,
                         duration: None,
+                        thumbnail: None,
                     })
                     .collect();
                 cx.notify();
@@ -1298,6 +1315,211 @@ impl Desktop {
             ));
         }
         if let Some(title) = &self.source_collection_title {
+            // 在线列表走多选批量入队；本地多文件拖入保持单选（本地身份要做内容哈希，
+            // 逐个走原读取确认流程）。身份可确认的候选才可勾选；其余保持单条打开。
+            let batch = self.online;
+            let identities: Vec<Option<String>> = self
+                .source_candidates
+                .iter()
+                .map(course2md::fetch::candidate_identity)
+                .collect();
+            let noted: Vec<bool> = identities
+                .iter()
+                .map(|identity| {
+                    identity.as_ref().is_some_and(|identity| {
+                        self.courses.iter().any(|course| {
+                            course
+                                .manifest
+                                .as_ref()
+                                .is_some_and(|manifest| manifest.source_id == *identity)
+                        })
+                    })
+                })
+                .collect();
+            let selectable: Vec<String> = self
+                .source_candidates
+                .iter()
+                .zip(&identities)
+                .zip(&noted)
+                .filter(|((_, identity), noted)| batch && identity.is_some() && !**noted)
+                .map(|((candidate, _), _)| candidate.input.clone())
+                .collect();
+            let selected_count = self.selected_candidates.len();
+            let all_selected =
+                selected_count > 0 && selectable.iter().all(|input| self.selected_candidates.contains(input));
+            // 手动勾选了已有笔记的候选：入队会生成新版本，后果与操作同处可见
+            let noted_selected = self
+                .source_candidates
+                .iter()
+                .zip(&noted)
+                .filter(|(candidate, noted)| {
+                    **noted && self.selected_candidates.contains(&candidate.input)
+                })
+                .count();
+            let any_batchable = identities.iter().any(Option::is_some);
+            let mut list = v_flex()
+                .id("source-candidates")
+                // 视口按字号缩放（约 3 行 + 露出第 4 行一角）；内边距让
+                // 行的 hover/press 涂层不贴容器发丝边（review#3/#4）
+                .max_h(px(280.))
+                .overflow_y_scroll()
+                .p_1()
+                .rounded(RADIUS_CARD)
+                .border_1()
+                .border_color(color(CARD_LINE));
+            for (index, candidate) in self.source_candidates.iter().enumerate() {
+                let input = candidate.input.clone();
+                let untitled = candidate.title.trim().is_empty()
+                    || candidate.title.trim() == candidate.input.trim();
+                let title = if untitled {
+                    format!("视频 {}", index + 1)
+                } else {
+                    candidate.title.clone()
+                };
+                let cover = self.source_candidate_covers.get(&candidate.input).cloned();
+                // 统一的 leading 预览槽：已缓存的首帧/封面，
+                // 未就绪或无预览时回退到影片图标，保证每行文字起点对齐
+                let preview = div()
+                    .w(rems(5.6))
+                    .h(rems(3.15))
+                    .flex_shrink_0()
+                    .rounded(RADIUS_SMALL)
+                    .overflow_hidden()
+                    .bg(color(INSET))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when_some(cover, |slot, cover| {
+                        slot.child(img(cover).w_full().h_full().object_fit(ObjectFit::Cover))
+                    })
+                    .when(
+                        !self.source_candidate_covers.contains_key(&candidate.input),
+                        |slot| {
+                            slot.child(icons::movie().size(px(18.)).text_color(color(MUTED)))
+                        },
+                    );
+                let text = v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_start()
+                    .gap_1()
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .whitespace_normal()
+                            .text_ellipsis()
+                            .line_clamp(2)
+                            .font_weight(FontWeight::MEDIUM)
+                            // 标题是行的扫描锚点：主墨色（review#1）
+                            .text_color(color(INK))
+                            .child(title.clone()),
+                    )
+                    .when(untitled, |view| {
+                        view.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .text_size(TEXT_AUX)
+                                .text_color(color(MUTED))
+                                .text_ellipsis()
+                                .child(candidate.input.clone()),
+                        )
+                    })
+                    .when_some(
+                        candidate
+                            .duration
+                            .filter(|value| *value > 0. && value.is_finite() && !untitled),
+                        |view, seconds| {
+                            view.child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .text_size(TEXT_AUX)
+                                    .text_color(color(MUTED))
+                                    .text_ellipsis()
+                                    .child(course2md::render::fmt_ts(seconds)),
+                            )
+                        },
+                    );
+                let batchable = batch && identities[index].is_some();
+                if batch {
+                    // 与导出行同一多选模式：Checkbox 自身可点（键盘 Tab+空格可切换），
+                    // 预览/标题区作为兄弟可点区域；行不再嵌套两层 on_click。
+                    // 无身份候选不可勾选，同一行样式改为箭头、点击走单条读取确认流程。
+                    let mut content = h_flex()
+                        .id(("source-candidate-text", index))
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(12.))
+                        .items_center()
+                        .cursor_pointer();
+                    if batchable {
+                        let toggle_input = candidate.input.clone();
+                        content = content.on_click(cx.listener(move |this, _, _, cx| {
+                            this.toggle_candidate(&toggle_input, cx)
+                        }));
+                    } else {
+                        content = content.on_click(cx.listener(move |this, _, window, cx| {
+                            this.select_source_input(input.clone(), window, cx)
+                        }));
+                    }
+                    content = content.child(preview).child(text);
+                    if batchable {
+                        content = content.when(noted[index], |row| {
+                            row.child(badge(BadgeKind::Success).child("已有笔记"))
+                        });
+                    } else {
+                        content =
+                            content.child(icons::arrow_forward().size(px(18.)).flex_shrink_0());
+                    }
+                    let mut row = h_flex()
+                        .id(("source-candidate", index))
+                        .w_full()
+                        .min_w_0()
+                        .gap(px(12.))
+                        .items_center()
+                        .py_3()
+                        .px_2()
+                        .rounded(RADIUS_SMALL)
+                        .hover(|style| style.bg(color(INSET)));
+                    if batchable {
+                        let selected = self.selected_candidates.contains(&candidate.input);
+                        let check_input = candidate.input.clone();
+                        row = row.child(
+                            Checkbox::new(("source-candidate-check", index))
+                                .debug_selector(move || {
+                                    format!("source-candidate-checkbox-{index}")
+                                })
+                                .accessibility_label(format!("选择 {title}"))
+                                .checked(selected)
+                                .flex_shrink_0()
+                                .on_click(cx.listener(move |this, value: &bool, _, cx| {
+                                    this.set_candidate_selected(&check_input, *value, cx)
+                                })),
+                        );
+                    }
+                    list = list.child(row.child(content));
+                } else {
+                    list = list.child(
+                        quiet(("source-candidate", index))
+                            .w_full()
+                            .h_auto()
+                            .py_3()
+                            .rounded(RADIUS_SMALL)
+                            .justify_start()
+                            .tooltip(candidate.input.clone())
+                            .accessibility_label(format!("选择 {title}"))
+                            .child(preview)
+                            .child(text)
+                            .child(icons::arrow_forward().size(px(18.)).flex_shrink_0())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.select_source_input(input.clone(), window, cx)
+                            })),
+                    );
+                }
+            }
+            let selectable_inputs = selectable.clone();
             view = view.child(motion::enter(
                 text_id("source-candidates", title),
                 v_flex()
@@ -1306,69 +1528,70 @@ impl Desktop {
                         accessible_text("import-collection-title", title.clone())
                             .font_weight(FontWeight::SEMIBOLD),
                     )
-                    .child(help("选择本次要整理的视频"))
-                    .child(
-                        v_flex()
-                            .id("source-candidates")
-                            .max_h(px(280.))
-                            .overflow_y_scroll()
-                            .rounded(RADIUS_CARD)
-                            .border_1()
-                            .border_color(color(CARD_LINE))
-                            .children(self.source_candidates.iter().enumerate().map(
-                                |(index, candidate)| {
-                                    let input = candidate.input.clone();
-                                    let untitled = candidate.title.trim().is_empty()
-                                        || candidate.title.trim() == candidate.input.trim();
-                                    let title = if untitled {
-                                        format!("视频 {}", index + 1)
-                                    } else {
-                                        candidate.title.clone()
-                                    };
-                                    quiet(("source-candidate", index))
-                                        .w_full()
-                                        .h_auto()
-                                        .py_3()
-                                        .rounded(RADIUS_SMALL)
-                                        .justify_start()
-                                        .icon(icons::movie())
-                                        .tooltip(candidate.input.clone())
-                                        .accessibility_label(format!("选择 {title}"))
+                    .child(list)
+                    .when(batch && any_batchable, |view| {
+                        view.child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .justify_between()
+                                .flex_wrap()
+                                .gap_3()
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .flex_wrap()
+                                        .min_w_0()
                                         .child(
-                                            v_flex()
-                                                .flex_1()
-                                                .min_w_0()
-                                                .items_start()
-                                                .gap_1()
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .min_w_0()
-                                                        .whitespace_normal()
-                                                        .text_ellipsis()
-                                                        .line_clamp(2)
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .child(title),
-                                                )
-                                                .when(untitled, |view| {
-                                                    view.child(
-                                                        div()
-                                                            .w_full()
-                                                            .min_w_0()
-                                                            .text_size(TEXT_AUX)
-                                                            .text_color(color(MUTED))
-                                                            .text_ellipsis()
-                                                            .child(candidate.input.clone()),
-                                                    )
-                                                }),
+                                            quiet("toggle-all-candidates")
+                                                .label(if all_selected { "全不选" } else { "全选" })
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if all_selected {
+                                                        this.selected_candidates.clear();
+                                                    } else {
+                                                        this.selected_candidates
+                                                            .extend(selectable_inputs.iter().cloned());
+                                                    }
+                                                    cx.notify();
+                                                })),
                                         )
-                                        .child(icons::arrow_forward().size(px(18.)).flex_shrink_0())
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.select_source_input(input.clone(), window, cx)
-                                        }))
-                                },
-                            )),
-                    ),
+                                        .child(
+                                            div()
+                                                .text_size(TEXT_AUX)
+                                                .text_color(color(MUTED))
+                                                .whitespace_nowrap()
+                                                .child(format!("已选 {selected_count} 个")),
+                                        )
+                                        .when(noted_selected > 0, |row| {
+                                            row.child(
+                                                div()
+                                                    .min_w_0()
+                                                    .text_size(TEXT_AUX)
+                                                    .text_color(color(WARNING))
+                                                    .whitespace_normal()
+                                                    .child(format!(
+                                                        "含 {noted_selected} 个已有笔记，将生成新版本"
+                                                    )),
+                                            )
+                                        }),
+                                )
+                                .child(
+                                    primary_pill("start-batch-conversion")
+                                        .icon(icons::arrow_forward())
+                                        .label(if selected_count > 0 {
+                                            format!("整理选中的 {selected_count} 个视频")
+                                        } else {
+                                            "整理选中的视频".to_owned()
+                                        })
+                                        // 空选择即不可执行：与开始转换同一纪律
+                                        .disabled(selected_count == 0)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.enqueue_selected_candidates(window, cx)
+                                        })),
+                                ),
+                        )
+                    }),
             ));
         }
         if let Some(error) = &self.preview_error
@@ -2231,13 +2454,18 @@ impl Desktop {
             .iter()
             .find(|library| Some(&library.id) == current.as_ref())
             .cloned();
-        let mut view = box_section(Icon::new(IconName::Folder), "名称与保存").child(
-            crate::focus_scroll::RevealFocus::new(
+        let batch = self.online && self.source_collection_title.is_some();
+        let mut view = box_section(
+            Icon::new(IconName::Folder),
+            if batch { "保存位置" } else { "名称与保存" },
+        );
+        if !batch {
+            view = view.child(crate::focus_scroll::RevealFocus::new(
                 ("import-title-focus", self.validation_attempt),
                 self.input(Field::Title, "笔记名称", cx),
                 self.scrolls[Page::New as usize].clone(),
-            ),
-        );
+            ));
+        }
         view = view.child(
             accessible_text("import-destination-label", "保存到").font_weight(FontWeight::MEDIUM),
         );
@@ -2504,7 +2732,8 @@ impl Desktop {
     }
 
     fn can_start_input(&self, cx: &App) -> bool {
-        (self.online || !self.value(Field::Source, cx).is_empty())
+        self.source_collection_title.is_none()
+            && (self.online || !self.value(Field::Source, cx).is_empty())
             && self.preview_error.is_none()
             && self.existing_source_note().is_none()
             && self.current_input_task(cx).is_none_or(|task| {
@@ -2744,7 +2973,7 @@ impl Desktop {
                         .child(self.text_source_view(window, cx)),
                 );
             }
-            if self.preview_cancel.is_none() && self.source_candidates.is_empty() {
+            if self.preview_cancel.is_none() {
                 let options_open = self.generation_options_open;
                 let mut recognition_box = box_section(icons::microphone(), "识别方式");
                 if self.source_preview.is_some() && !text_required {

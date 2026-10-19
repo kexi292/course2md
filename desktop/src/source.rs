@@ -308,7 +308,15 @@ fn command_once(
     check_preview_deadline(cancel, start)?;
     let stdout = tempfile::tempfile()?;
     let stderr = tempfile::tempfile()?;
-    let mut command = Command::new(name);
+    // yt-dlp 用共享搜索清单定位到绝对路径（随包自带 → PATH → 常见安装目录），
+    // 不再依赖子进程 PATH 解析；其余命令沿用裸名 + 扩展 PATH。
+    let program = if name == "yt-dlp" {
+        course2md::ytdlp::resolve_in(Some(&crate::backend::tool_path()))
+            .unwrap_or_else(|| PathBuf::from(name))
+    } else {
+        PathBuf::from(name)
+    };
+    let mut command = Command::new(&program);
     let _cookies = if name == "yt-dlp" {
         course2md::auth::configure_ytdlp(&mut command, args.last().copied().unwrap_or_default())?
     } else {
@@ -444,12 +452,11 @@ pub fn probe(input: String, online: bool, cancel: Arc<AtomicBool>) -> Result<Sou
     let result = match metadata {
         course2md::fetch::OnlineProbe::Collection {
             title,
-            candidates,
+            mut candidates,
             unavailable_entries,
-        } => SourceProbe::Collection {
-            title,
-            candidates,
-            unavailable_entries,
+        } => {
+            course2md::fetch::enrich_bilibili_candidates(&mut candidates, &cancel);
+            SourceProbe::Collection { title, candidates, unavailable_entries }
         },
         course2md::fetch::OnlineProbe::Unresolved { message } => {
             SourceProbe::Unresolved { message }
@@ -552,7 +559,7 @@ fn online_metadata(
     command_output("yt-dlp", &args, cancel)
 }
 
-fn cache_remote_cover(url: &str, cancel: &AtomicBool) -> Result<PathBuf> {
+pub fn cache_remote_cover(url: &str, cancel: &AtomicBool) -> Result<PathBuf> {
     ensure!(!cancel.load(Ordering::Relaxed), "已取消读取");
     let response = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(3))

@@ -68,6 +68,9 @@ pub struct SourceCandidate {
     pub title: String,
     pub identity: Option<String>,
     pub duration: Option<f64>,
+    /// 预览图 URL（分集首帧或视频封面）；本地缓存由桌面端负责
+    #[serde(default)]
+    pub thumbnail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -238,6 +241,7 @@ pub fn parse_online_probe(bytes: &[u8], input: &str, diagnostics: &str) -> Resul
                 duration: entry
                     .duration
                     .filter(|value| value.is_finite() && *value > 0.),
+                thumbnail: entry.thumbnail.filter(|url| !url.trim().is_empty()),
             });
         }
         return Ok(OnlineProbe::Collection {
@@ -306,6 +310,191 @@ pub fn parse_online_probe(bytes: &[u8], input: &str, diagnostics: &str) -> Resul
             subtitles,
         },
     })
+}
+
+/// Bilibili 分 P 视频的 flat-playlist 探测只返回裸链接；真实分集标题、首帧预览
+/// 与时长来自公开的 web API。一个 BV 一次请求即可覆盖全部分集。
+#[derive(Debug, Deserialize)]
+struct BilibiliView {
+    data: Option<BilibiliViewData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BilibiliViewData {
+    title: Option<String>,
+    pic: Option<String>,
+    pages: Option<Vec<BilibiliPage>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BilibiliPage {
+    page: u32,
+    part: Option<String>,
+    duration: Option<f64>,
+    first_frame: Option<String>,
+}
+
+/// 单个探测最多补充的不同 BV 数：异常巨大的合集列表不放大请求量
+const BILIBILI_ENRICH_LIMIT: usize = 32;
+/// 分集信息补充的并发请求数
+const BILIBILI_ENRICH_CONCURRENCY: usize = 4;
+
+/// `/video/BVxxxxxxxxxx` 路径段中的 BV 号（"BV" + 10 位）。
+fn bilibili_bvid(url: &str) -> Option<String> {
+    let url = url::Url::parse(url).ok()?;
+    let host = url.host_str()?.to_ascii_lowercase();
+    if host != "bilibili.com" && !host.ends_with(".bilibili.com") {
+        return None;
+    }
+    let mut segments = url.path_segments()?;
+    if segments.next()? != "video" {
+        return None;
+    }
+    let bvid = segments.next()?;
+    (bvid.len() == 12 && bvid.starts_with("BV") && bvid.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| bvid.to_owned())
+}
+
+/// 链接里的 `?p=N` 分集号；没有时按第 1 集处理。
+fn bilibili_part_number(url: &str) -> Option<u32> {
+    url::Url::parse(url)
+        .ok()?
+        .query_pairs()
+        .find(|(key, _)| key == "p")
+        .and_then(|(_, value)| value.parse().ok())
+        .filter(|part| *part > 0)
+}
+
+/// 候选条目的稳定身份：优先使用探测给出的身份；Bilibili 分 P 的 flat 探测
+/// 不带条目 id，从具体分集链接推导（与单集探测的 `BV…_pN` 身份一致），保证
+/// 批量任务与单独转换同一视频时去重、已有笔记判断命中同一身份。
+pub fn candidate_identity(candidate: &SourceCandidate) -> Option<String> {
+    if let Some(identity) = candidate
+        .identity
+        .as_deref()
+        .map(str::trim)
+        .filter(|identity| !identity.is_empty())
+    {
+        return Some(identity.to_owned());
+    }
+    let bvid = bilibili_bvid(&candidate.input)?;
+    let id = match bilibili_part_number(&candidate.input) {
+        Some(part) => format!("{bvid}_p{part}"),
+        None => bvid,
+    };
+    online_identity("bilibili", &id)
+}
+
+fn bilibili_view(agent: &ureq::Agent, bvid: &str) -> Result<BilibiliViewData> {
+    let response = agent
+        .get(&format!(
+            "https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
+        ))
+        .set(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+        )
+        .set("Referer", "https://www.bilibili.com")
+        .call()
+        .context("读取 Bilibili 分集信息失败")?;
+    let view: BilibiliView = serde_json::from_str(&response.into_string()?)?;
+    view.data.context("Bilibili 没有返回分集信息")
+}
+
+/// 把一个 BV 的分集信息填进候选：只补缺失字段，提取器已有信息保持权威。
+fn apply_bilibili_view(candidates: &mut [SourceCandidate], bvid: &str, view: &BilibiliViewData) {
+    let pages = view.pages.as_deref().unwrap_or_default();
+    for candidate in candidates
+        .iter_mut()
+        .filter(|candidate| bilibili_bvid(&candidate.input).as_deref() == Some(bvid))
+    {
+        let number = bilibili_part_number(&candidate.input).unwrap_or(1);
+        let Some(page) = pages.iter().find(|page| page.page == number) else {
+            continue;
+        };
+        let untitled =
+            candidate.title.trim().is_empty() || candidate.title.trim() == candidate.input.trim();
+        if untitled {
+            // 分集标题为空时回落到合集标题（同一 BV 只有一个标题）
+            let title = page
+                .part
+                .as_deref()
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .or_else(|| {
+                    view.title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty())
+                });
+            if let Some(title) = title {
+                candidate.title = title.to_string();
+            }
+        }
+        if candidate.thumbnail.is_none() {
+            candidate.thumbnail = page
+                .first_frame
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .map(str::to_string)
+                .or_else(|| view.pic.clone());
+        }
+        if candidate.duration.is_none() {
+            candidate.duration = page
+                .duration
+                .filter(|value| value.is_finite() && *value > 0.);
+        }
+    }
+}
+
+/// 用 Bilibili web API 补全分 P 候选的分集标题、首帧预览图与时长。
+/// 辅助探测：任何失败都保留原候选，不阻断任务（见 interaction.md）。
+pub fn enrich_bilibili_candidates(
+    candidates: &mut [SourceCandidate],
+    cancel: &std::sync::atomic::AtomicBool,
+) {
+    let mut bvids = Vec::new();
+    for candidate in candidates.iter() {
+        if let Some(bvid) = bilibili_bvid(&candidate.input)
+            && !bvids.contains(&bvid)
+        {
+            bvids.push(bvid);
+        }
+        if bvids.len() >= BILIBILI_ENRICH_LIMIT {
+            break;
+        }
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(3))
+        .timeout_read(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_secs(8))
+        .build();
+    // 每个请求最长 8s：分批并发，避免几十个分集串行等待
+    for batch in bvids.chunks(BILIBILI_ENRICH_CONCURRENCY) {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
+        let views: Vec<_> = std::thread::scope(|scope| {
+            batch
+                .iter()
+                .map(|bvid| scope.spawn(|| bilibili_view(&agent, bvid)))
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| anyhow::bail!("分集信息线程异常"))
+                })
+                .collect()
+        });
+        for (bvid, view) in batch.iter().zip(views) {
+            match view {
+                Ok(view) => apply_bilibili_view(candidates, bvid, &view),
+                Err(error) => tracing::debug!(bvid, "分集信息补充失败：{error:#}"),
+            }
+        }
+    }
 }
 
 fn subtitle_evidence(
@@ -486,7 +675,7 @@ pub async fn probe_video(url: &str) -> Result<OnlineVideo> {
 
 /// Metadata and all available subtitle channels only; no media/AI requests.
 pub async fn probe_online(url: &str) -> Result<OnlineProbe> {
-    let mut cmd = Command::new("yt-dlp");
+    let mut cmd = Command::new(crate::ytdlp::program());
     let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
     ytdlp_base(&mut cmd).args([
         "--simulate",
@@ -592,7 +781,7 @@ pub async fn fetch_selected_subtitle(
         text.clone()
     } else {
         let template = temp.path().join("subtitle");
-        let mut cmd = Command::new("yt-dlp");
+        let mut cmd = Command::new(crate::ytdlp::program());
         let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
         ytdlp_base(&mut cmd).args([
             "--skip-download",
@@ -676,7 +865,7 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
                 e = watch_control() => return Err(e),
             }
         }
-        let mut cmd = Command::new("yt-dlp");
+        let mut cmd = Command::new(crate::ytdlp::program());
         let _cookies = crate::auth::configure_ytdlp(cmd.as_std_mut(), url)?;
         let fmt = format!("bv*[height<={max_height}]+ba/b[height<={max_height}]/b");
         ytdlp_base(&mut cmd).args([
@@ -688,7 +877,12 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
             "mp4",
             "--no-playlist",
             "--no-part",
-            "--no-progress",
+            // 结构化进度（2021.11 起的 yt-dlp 接口）：前缀行由 run_download 解析转发
+            "--newline",
+            "--progress-delta",
+            "0.2",
+            "--progress-template",
+            "download:[C2MD] %(progress.downloaded_bytes)s %(progress.total_bytes)s %(progress.total_bytes_estimate)s",
             "-o",
         ]);
         cmd.arg(&tmp);
@@ -696,10 +890,10 @@ pub async fn download(url: &str, dest: &Path, max_height: u32, verbose: bool) ->
             cmd.arg("-v");
         }
         let outcome = tokio::select! {
-            status = run_status(ytdlp_url(&mut cmd, url)) => {
+            status = run_download(ytdlp_url(&mut cmd, url)) => {
                 status.map_err(|e| crate::auth::with_bilibili_login_tip(url, e))
             }
-            // 取消/暂停：drop run_status 分支即 kill_on_drop 终止当前 yt-dlp
+            // 取消/暂停：drop run_download 分支即 kill_on_drop 终止当前 yt-dlp
             e = watch_control() => return Err(e),
         };
         match outcome {
@@ -811,20 +1005,79 @@ async fn run_output(cmd: &mut Command) -> Result<std::process::Output> {
     }
 }
 
-async fn run_status(cmd: &mut Command) -> Result<()> {
-    let out = crate::media::run_cmd(cmd, "yt-dlp")
-        .await
-        .map_err(|error| {
-            if is_bilibili_412(&format!("{error:#}")) {
-                error.context(BILIBILI_412_HINT)
-            } else {
-                error
+/// 解析一行 yt-dlp 进度模板输出：(downloaded, total)。
+/// 模板字段：<downloaded> <total> <estimate>，未知值为 NA；
+/// 精确总字节未知时回落到估算值，都没有则 total=0（GUI 显示不确定进度）。
+fn ytdlp_progress(line: &str) -> Option<(u64, u64)> {
+    let rest = line.strip_prefix("[C2MD] ")?;
+    let mut fields = rest.split_whitespace();
+    let number = |value: Option<&str>| {
+        value
+            .filter(|value| *value != "NA")
+            .and_then(|value| value.parse::<u64>().ok())
+    };
+    let downloaded = number(fields.next())?;
+    let total = number(fields.next())
+        .or_else(|| number(fields.next()))
+        .unwrap_or(0);
+    Some((downloaded, total))
+}
+
+async fn drain_download_output(
+    pipe: impl tokio::io::AsyncRead + Unpin,
+    capture: bool,
+) -> std::io::Result<String> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut reader = BufReader::new(pipe);
+    let mut line = Vec::new();
+    let mut tail = String::new();
+    while reader.read_until(b'\n', &mut line).await? > 0 {
+        // Windows diagnostics may use the system code page rather than UTF-8.
+        let text = String::from_utf8_lossy(&line);
+        if let Some((downloaded, total)) = ytdlp_progress(text.trim_end()) {
+            crate::progress::download_progress(downloaded, total);
+        } else if capture {
+            tail.push_str(&text);
+            let mut overflow = tail.len().saturating_sub(64 * 1024);
+            while !tail.is_char_boundary(overflow) {
+                overflow += 1;
             }
-        })?;
-    if !out.stderr.is_empty() {
-        tracing::debug!("{}", String::from_utf8_lossy(&out.stderr).trim());
+            tail.drain(..overflow);
+        }
+        line.clear();
     }
-    Ok(())
+    Ok(tail)
+}
+
+// Keep both pipes and the child in this future so cancellation stops all three.
+async fn run_download(cmd: &mut Command) -> Result<()> {
+    let mut child = cmd
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("启动 yt-dlp 失败 / Failed to start yt-dlp")?;
+    let stdout = child.stdout.take().expect("stdout 管道已配置");
+    let stderr_pipe = child.stderr.take().expect("stderr 管道已配置");
+    let (status, _, stderr) = tokio::try_join!(
+        child.wait(),
+        drain_download_output(stdout, false),
+        drain_download_output(stderr_pipe, true),
+    )
+    .context("读取 yt-dlp 下载结果失败")?;
+    if status.success() {
+        if !stderr.trim().is_empty() {
+            tracing::debug!("{}", stderr.trim());
+        }
+        return Ok(());
+    }
+    let error = crate::error::cmd_error("yt-dlp", status.code(), &stderr);
+    Err(if is_bilibili_412(&stderr) {
+        error.context(BILIBILI_412_HINT)
+    } else {
+        error
+    })
 }
 
 #[cfg(test)]
@@ -889,6 +1142,141 @@ mod tests {
                 .iter()
                 .all(|candidate| candidate.identity.is_none())
         );
+    }
+
+    #[test]
+    fn bilibili_ids_come_from_video_paths_and_part_query() {
+        assert_eq!(
+            bilibili_bvid("https://www.bilibili.com/video/BV1CAxaeHEeH?p=3").as_deref(),
+            Some("BV1CAxaeHEeH")
+        );
+        assert_eq!(
+            bilibili_bvid("https://www.bilibili.com/video/BV1xx411c7mD/").as_deref(),
+            Some("BV1xx411c7mD")
+        );
+        assert!(bilibili_bvid("https://www.bilibili.com/bangumi/play/ep123").is_none());
+        assert!(bilibili_bvid("https://example.com/video/BV1CAxaeHEeH").is_none());
+        assert!(bilibili_bvid("https://notbilibili.com/video/BV1CAxaeHEeH").is_none());
+        assert!(bilibili_bvid("https://www.bilibili.com/other/BV1CAxaeHEeH").is_none());
+        assert!(bilibili_bvid("not a url").is_none());
+        assert_eq!(
+            bilibili_part_number("https://www.bilibili.com/video/BV1CAxaeHEeH?p=12"),
+            Some(12)
+        );
+        assert_eq!(
+            bilibili_part_number("https://www.bilibili.com/video/BV1CAxaeHEeH"),
+            None
+        );
+    }
+
+    #[test]
+    fn candidate_identity_prefers_probe_and_derives_bilibili_parts() {
+        let probed = SourceCandidate {
+            input: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=3".into(),
+            title: "t".into(),
+            identity: Some("online:bilibili:15:BV1CAxaeHEeH_p3".into()),
+            duration: None,
+            thumbnail: None,
+        };
+        assert_eq!(
+            candidate_identity(&probed).as_deref(),
+            Some("online:bilibili:15:BV1CAxaeHEeH_p3")
+        );
+        // 与单集探测（yt-dlp 对 ?p=N 返回 id `BV…_pN`）逐字节一致，批量去重才能命中
+        let part = SourceCandidate {
+            identity: None,
+            ..probed.clone()
+        };
+        assert_eq!(
+            candidate_identity(&part).as_deref(),
+            Some("online:bilibili:15:BV1CAxaeHEeH_p3")
+        );
+        let bare = SourceCandidate {
+            input: "https://www.bilibili.com/video/BV1CAxaeHEeH".into(),
+            identity: None,
+            ..probed.clone()
+        };
+        assert_eq!(
+            candidate_identity(&bare).as_deref(),
+            Some("online:bilibili:12:BV1CAxaeHEeH")
+        );
+        let unknown = SourceCandidate {
+            input: "https://example.com/watch?v=abc".into(),
+            identity: None,
+            ..probed.clone()
+        };
+        assert_eq!(candidate_identity(&unknown), None);
+    }
+
+    #[test]
+    fn bilibili_view_fills_only_missing_part_metadata() {
+        let view: BilibiliViewData = serde_json::from_value(serde_json::json!({
+            "title": "《高等数学》全程教学视频",
+            "pic": "https://i2.hdslb.com/bfs/archive/cover.jpg",
+            "pages": [
+                {"page": 1, "part": "1 映射", "duration": 2076, "first_frame": "https://i1.hdslb.com/bfs/storyff/p1.jpg"},
+                {"page": 2, "part": "", "duration": 307, "first_frame": null}
+            ]
+        }))
+        .unwrap();
+        let mut candidates = vec![
+            SourceCandidate {
+                input: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=1".into(),
+                title: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=1".into(),
+                identity: None,
+                duration: None,
+                thumbnail: None,
+            },
+            SourceCandidate {
+                input: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=2".into(),
+                title: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=2".into(),
+                identity: None,
+                duration: Some(42.),
+                thumbnail: Some("https://example.invalid/keep.jpg".into()),
+            },
+            SourceCandidate {
+                input: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=9".into(),
+                title: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=9".into(),
+                identity: None,
+                duration: None,
+                thumbnail: None,
+            },
+            SourceCandidate {
+                input: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=2".into(),
+                title: "https://www.bilibili.com/video/BV1CAxaeHEeH?p=2".into(),
+                identity: None,
+                duration: None,
+                thumbnail: None,
+            },
+        ];
+        apply_bilibili_view(&mut candidates, "BV1CAxaeHEeH", &view);
+        // 裸链接候选：补真实分集标题与首帧
+        assert_eq!(candidates[0].title, "1 映射");
+        assert_eq!(
+            candidates[0].thumbnail.as_deref(),
+            Some("https://i1.hdslb.com/bfs/storyff/p1.jpg")
+        );
+        assert_eq!(candidates[0].duration, Some(2076.));
+        // 已有信息保持权威；空 part 回落到合集标题；已有时长/预览图不被改写
+        assert_eq!(candidates[1].title, "《高等数学》全程教学视频");
+        assert_eq!(candidates[1].duration, Some(42.));
+        assert_eq!(
+            candidates[1].thumbnail.as_deref(),
+            Some("https://example.invalid/keep.jpg")
+        );
+        // 没有对应分页的候选保持原样
+        assert_eq!(
+            candidates[2].title,
+            "https://www.bilibili.com/video/BV1CAxaeHEeH?p=9"
+        );
+        assert!(candidates[2].thumbnail.is_none());
+        // 首帧缺失时回落到视频封面
+        assert_eq!(candidates[3].title, "《高等数学》全程教学视频");
+        assert_eq!(
+            candidates[3].thumbnail.as_deref(),
+            Some("https://i2.hdslb.com/bfs/archive/cover.jpg")
+        );
+        assert_eq!(candidates[3].duration, Some(307.));
     }
 
     #[test]
@@ -1019,17 +1407,61 @@ mod tests {
         assert!(!meta.uploader.is_empty());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn download_errors_retain_stderr_and_login_guidance() {
+        #[cfg(unix)]
         let mut cmd = Command::new("sh");
+        #[cfg(unix)]
         cmd.args([
             "-c",
             "echo 'ERROR: [BiliBili] HTTP Error 412: Precondition Failed' >&2; exit 1",
         ]);
-        let error = run_status(&mut cmd).await.unwrap_err();
+        #[cfg(windows)]
+        let mut cmd = Command::new("cmd.exe");
+        #[cfg(windows)]
+        cmd.args([
+            "/D",
+            "/C",
+            "echo ERROR: [BiliBili] HTTP Error 412: Precondition Failed 1>&2 & exit /b 1",
+        ]);
+        let error = run_download(&mut cmd).await.unwrap_err();
         assert!(error.to_string().contains("--login bilibili"));
         assert!(format!("{error:#}").contains("Precondition Failed"));
+    }
+
+    #[tokio::test]
+    async fn download_output_retains_late_errors_after_progress_and_non_utf8() {
+        let mut output = vec![0xff, b'\n'];
+        output.extend("诊断\n".repeat(20_000).as_bytes());
+        output.extend(b"[C2MD] 120326 NA 20971520\r\nERROR: final failure\n");
+        let tail = drain_download_output(output.as_slice(), true)
+            .await
+            .unwrap();
+        assert!(tail.len() <= 64 * 1024);
+        assert!(tail.ends_with("ERROR: final failure\n"));
+        assert!(!tail.contains("[C2MD]"));
+        assert!(
+            drain_download_output(output.as_slice(), false)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn ytdlp_progress_lines_parse_bytes_with_estimate_fallback() {
+        assert_eq!(
+            ytdlp_progress("[C2MD] 120326 10485760 NA"),
+            Some((120326, 10485760))
+        );
+        assert_eq!(
+            ytdlp_progress("[C2MD] 120326 NA 20971520"),
+            Some((120326, 20971520))
+        );
+        assert_eq!(ytdlp_progress("[C2MD] 120326 NA NA"), Some((120326, 0)));
+        assert_eq!(ytdlp_progress("[C2MD] NA NA NA"), None);
+        assert_eq!(ytdlp_progress("[download] 45.3% of 10MiB"), None);
+        assert_eq!(ytdlp_progress(""), None);
     }
 
     #[cfg(unix)]

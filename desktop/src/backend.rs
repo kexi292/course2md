@@ -325,9 +325,16 @@ pub fn tool_path() -> std::ffi::OsString {
     if let Some(path) = std::env::var_os("COURSE2MD_TOOL_PATH").filter(|path| !path.is_empty()) {
         return path;
     }
-    let mut dirs: Vec<_> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .into_iter()
+        .collect();
+    dirs.extend(
+        std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).collect())
+            .unwrap_or_else(Vec::<PathBuf>::new),
+    );
     #[cfg(unix)]
     {
         if let Some(home) = std::env::var_os("HOME") {
@@ -388,6 +395,8 @@ pub struct Environment {
 impl Environment {
     pub fn detect() -> Self {
         let cli = resolve_cli().ok();
+        let ytdlp = course2md::ytdlp::resolve_in(Some(&tool_path()))
+            .unwrap_or_else(|| PathBuf::from("yt-dlp"));
         // (字段名, 命令, 参数) 与回填写在一起：数组重排不会造成静默错配
         let checks = std::thread::scope(|scope| {
             let commands: Vec<(&'static str, &Path, &'static str)> = vec![
@@ -398,7 +407,7 @@ impl Environment {
                 ),
                 ("ffmpeg", Path::new("ffmpeg"), "-version"),
                 ("ffprobe", Path::new("ffprobe"), "-version"),
-                ("ytdlp", Path::new("yt-dlp"), "--version"),
+                ("ytdlp", ytdlp.as_path(), "--version"),
                 ("llama-devices", Path::new("llama-server"), "--list-devices"),
             ];
             let handles: Vec<_> = commands

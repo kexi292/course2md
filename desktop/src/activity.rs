@@ -173,7 +173,7 @@ impl TransferMetrics {
 }
 
 fn is_byte_download(stage: &str) -> bool {
-    stage.starts_with("model/") && stage != "model/apple"
+    stage == "download" || (stage.starts_with("model/") && stage != "model/apple")
 }
 
 pub fn quantity(stage: &str, current: u64, total: u64) -> String {
@@ -181,7 +181,7 @@ pub fn quantity(stage: &str, current: u64, total: u64) -> String {
         format!("已检查 {current} 张画面")
     } else if stage == "scenes/extract" && total > 0 {
         format!("已保存 {current} / {total} 张截图")
-    } else if stage.starts_with("model/") && stage != "model/apple" {
+    } else if is_byte_download(stage) {
         if total > 0 {
             format!("{} / {}", bytes(current), bytes(total))
         } else {
@@ -405,6 +405,26 @@ mod tests {
             detail.contains("速度 410 KB/s") && detail.contains("预计剩余"),
             "{detail}"
         );
+    }
+
+    #[test]
+    fn video_downloads_use_bytes_and_reset_metrics_for_the_next_stream() {
+        let mut activity = Activity::new();
+        activity.update(0, 16 * 1024 * 1024, None);
+        activity.started = Instant::now() - Duration::from_secs(10);
+        activity.update(8 * 1024 * 1024, 16 * 1024 * 1024, None);
+        let metrics = activity.transfer_metrics("download", true);
+        assert_eq!(metrics.quantity, "8.0 MB / 16.0 MB");
+        assert_eq!(metrics.speed.as_deref(), Some("819 KB/s"));
+        assert!(matches!(metrics.eta, Some(TransferEta::Remaining(_))));
+        assert_eq!(activity.fraction(), Some(0.5));
+
+        activity.update(3 * 1024 * 1024, 0, None);
+        let metrics = activity.transfer_metrics("download", true);
+        assert_eq!(metrics.quantity, "3.0 MB");
+        assert_eq!(metrics.speed.as_deref(), Some("正在测量"));
+        assert!(metrics.eta.is_none());
+        assert!(activity.fraction().is_none());
     }
 
     #[test]

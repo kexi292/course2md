@@ -236,6 +236,10 @@ pub fn wait_ready(
 /// Find executables on PATH, including Windows PATHEXT launchers.
 pub fn which(cmd: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
+    which_in(cmd, &path)
+}
+
+pub fn which_in(cmd: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
     #[cfg(windows)]
     let names = windows_command_names(
         cmd,
@@ -243,7 +247,7 @@ pub fn which(cmd: &str) -> Option<PathBuf> {
     );
     #[cfg(not(windows))]
     let names = vec![cmd.to_string()];
-    std::env::split_paths(&path)
+    std::env::split_paths(path)
         .flat_map(|dir| names.iter().map(move |n| dir.join(n)))
         .find(|p| is_executable(p))
 }

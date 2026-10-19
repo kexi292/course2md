@@ -1855,6 +1855,44 @@ mod tests {
         }
     }
     #[test]
+    fn online_batch_keeps_parts_distinct_and_deduplicates_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ws = test_workspace(dir.path());
+        let parts: Vec<_> = (1..=2).map(|part| {
+            let mut plan = plan(&ws.state.default_library);
+            let candidate = crate::source::SourceCandidate {
+                input: format!("https://www.bilibili.com/video/BV1CAxaeHEeH?p={part}"),
+                title: format!("第 {part} 讲"),
+                identity: None,
+                duration: Some(60.),
+                thumbnail: None,
+            };
+            plan.source_id = course2md::fetch::candidate_identity(&candidate).unwrap();
+            plan.source.identity = plan.source_id.clone();
+            plan.source.input = candidate.input;
+            plan.source.online = true;
+            plan.title = candidate.title;
+            plan.config.defaults.transcript_source = Some(course2md::config::TranscriptSource::Subtitle);
+            plan
+        }).collect();
+        ws.transaction(|state| {
+            for part in &parts {
+                assert!(state.enqueue(part.clone(), None)?.1);
+            }
+            assert!(!state.enqueue(parts[0].clone(), None)?.1);
+            Ok(())
+        }).unwrap();
+        drop(ws);
+        let mut restored = test_workspace(dir.path());
+        assert_eq!(restored.state.tasks.len(), 2);
+        for part in parts {
+            let (id, created) = restored.state.enqueue(part.clone(), None).unwrap();
+            assert!(!created);
+            assert!(restored.state.task(&id).unwrap().plan == part);
+        }
+    }
+
+    #[test]
     fn failed_commit_does_not_publish_an_unpersisted_task() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("state");
