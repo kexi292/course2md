@@ -21,6 +21,8 @@ cargo build --manifest-path desktop/Cargo.toml
 COURSE2MD_BIN="$PWD/target/debug/course2md" cargo run --manifest-path desktop/Cargo.toml
 ```
 
+根目录 `target/` 是 CLI (`course2md`) 的 Cargo 构建目录，`desktop/target/` 是独立桌面包 (`course2md-desktop`) 的构建及打包目录。桌面程序运行和打包同时需要两份可执行文件，因此这两个目录不能互相替代。它们都由 Git 忽略；`target/` 下也可能包含独立 Git worktree，清理前先运行 `git worktree list`，不要直接删除整个目录。
+
 把当前源码装到本机测试：
 
 ```sh
